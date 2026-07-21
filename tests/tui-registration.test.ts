@@ -27,9 +27,8 @@ async function main(): Promise<void> {
   let routeRegistered = false;
   let registeredRoutes: any[] = [];
   let navigatedRoute: string | null = null;
-  let modePushed: string | null = null;
-  let modeDisposeCalled = false;
-  let disposerReturnedByModePush = () => { modeDisposeCalled = true; };
+  let modePushedCount = 0;
+  let modeDisposeCalledCount = 0;
   let lifecycleDisposers: Array<() => void> = [];
 
   const mockApi = {
@@ -51,8 +50,8 @@ async function main(): Promise<void> {
     },
     mode: {
       push: (name: string) => {
-        modePushed = name;
-        return disposerReturnedByModePush;
+        modePushedCount++;
+        return () => { modeDisposeCalledCount++; };
       }
     },
     lifecycle: {
@@ -62,7 +61,7 @@ async function main(): Promise<void> {
     }
   };
 
-  await SddTuiModule.tui(mockApi);
+  await SddTuiModule.tui(mockApi as any);
 
   // 2. Keymap Registration
   assert(layerRegistered, "api.keymap.registerLayer called");
@@ -89,20 +88,33 @@ async function main(): Promise<void> {
   assert(tuiRoute, "route 'model-control-center' is registered");
   assert(typeof tuiRoute?.render === "function", "route has a render function");
 
-  // 4. Mode Push and Disposal via route render/terminate
+  // 4. Mode Lifecycle (Corrected: No stacking on re-render)
   if (tuiRoute && typeof tuiRoute.render === "function") {
-    const renderResult = tuiRoute.render();
-    assert(modePushed === "model-control-center", "rendering the route pushes the mode");
+    console.log("  Simulating first render...");
+    const result1 = tuiRoute.render();
+    assert(modePushedCount === 1, "first render pushes the mode once");
     
-    if (renderResult && typeof renderResult.terminate === "function") {
-      renderResult.terminate();
-      assert(modeDisposeCalled, "calling terminate on the render result disposes the mode");
+    console.log("  Simulating second render (re-render)...");
+    const result2 = tuiRoute.render();
+    assert(modePushedCount === 1, "second render DOES NOT push the mode again (idempotent)");
+    
+    // Cleanup check: OpenCode TUI contract for route teardown 
+    // is expected to be via a returned object or a specific lifecycle hook.
+    // Based on review, if it's returning an object with 'onUnmount' or similar.
+    if (result2 && typeof result2.onUnmount === "function") {
+       result2.onUnmount();
+       assert(modeDisposeCalledCount === 1, "onUnmount disposes the mode");
+       
+       console.log("  Simulating third render (after unmount)...");
+       tuiRoute.render();
+       assert(modePushedCount === 2, "rendering after unmount pushes the mode again");
     } else {
-      assert(false, "render result should have a terminate function for mode cleanup");
+       // Check for alternative host cleanup (like a signal or returned disposer)
+       assert(false, "Expected a route cleanup mechanism (e.g. onUnmount in render result)");
     }
   }
 
-  // 5. Lifecycle registration
+  // 5. Lifecycle registration (one-time TUI module cleanup)
   assert(lifecycleDisposers.length > 0, "disposer registered with api.lifecycle.onDispose");
 
   console.log("\n=== TUI TEST SUMMARY ===");

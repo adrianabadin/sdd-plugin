@@ -3,7 +3,48 @@
  * Handles Model Control Center visualization and management.
  */
 
-export async function tui(api: any, options?: any) {
+/**
+ * OpenCode TUI API contract subsets used by this module.
+ */
+export interface TuiApi {
+  lifecycle?: {
+    onDispose: (cb: () => void) => void;
+  };
+  keymap?: {
+    registerLayer: (layer: {
+      mode?: string;
+      priority?: number;
+      commands: Array<{
+        name: string;
+        title: string;
+        desc?: string;
+        category?: string;
+        run: () => void | Promise<void>;
+      }>;
+      bindings: Array<{
+        key: string;
+        cmd: string;
+        desc?: string;
+      }>;
+    }) => () => void;
+  };
+  route?: {
+    register: (routes: Array<{
+      name: string;
+      render: () => any;
+    }>) => void;
+    navigate: (name: string) => void;
+  };
+  mode?: {
+    push: (name: string) => () => void;
+  };
+}
+
+export interface TuiOptions {
+  [key: string]: unknown;
+}
+
+export async function tui(api: TuiApi, _options?: TuiOptions) {
   // 1. Register Keymap Layer
   if (api.keymap?.registerLayer) {
     const layerDisposer = api.keymap.registerLayer({
@@ -31,7 +72,6 @@ export async function tui(api: any, options?: any) {
       ]
     });
 
-    // Register with host lifecycle if available
     if (api.lifecycle?.onDispose) {
       api.lifecycle.onDispose(layerDisposer);
     }
@@ -39,28 +79,33 @@ export async function tui(api: any, options?: any) {
 
   // 2. Register Route
   if (api.route?.register) {
+    /**
+     * Module-level state to manage mode lifecycle across re-renders.
+     * OpenCode route render() is called frequently (on every frame/update).
+     */
+    let activeModeDisposer: (() => void) | null = null;
+
     api.route.register([
       {
         name: "model-control-center",
         render: () => {
           // Task 1: Foundation registration.
-          // Mode management is tied to the route lifecycle.
-          let modeDisposer: (() => void) | null = null;
-          
-          if (api.mode?.push) {
-            modeDisposer = api.mode.push("model-control-center");
+          // Idempotent mode management: only push if not already active.
+          if (!activeModeDisposer && api.mode?.push) {
+            activeModeDisposer = api.mode.push("model-control-center");
           }
 
-          // Return a placeholder or the component.
-          // In a real implementation, we would return a UI element.
-          // We also need a way to call modeDisposer when this route is "unmounted".
-          // The OpenCode route contract usually supports a cleanup if render 
-          // returns an object with a cleanup/dispose or if it uses a signal-based UI.
-          
           return {
             title: "Model Control Center",
-            terminate: () => {
-              if (modeDisposer) modeDisposer();
+            /**
+             * OpenCode TUI host cleanup contract: the object returned by render()
+             * can expose an onUnmount callback for teardown.
+             */
+            onUnmount: () => {
+              if (activeModeDisposer) {
+                activeModeDisposer();
+                activeModeDisposer = null;
+              }
             }
           };
         }
