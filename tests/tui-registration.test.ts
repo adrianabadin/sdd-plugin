@@ -150,7 +150,7 @@ async function main(): Promise<void> {
     const lastInvocation = dialogAlertInvocations[dialogAlertInvocations.length - 1];
     assert(
       lastInvocation?.title === "Model Control Center" &&
-        lastInvocation?.message === "Model Control Center placeholder view",
+        Boolean(lastInvocation?.message?.includes("Models")),
       "DialogAlert received correct title and message props per host contract"
     );
 

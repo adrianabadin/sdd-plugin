@@ -7,6 +7,7 @@ import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { JSX } from "@opentui/solid";
 import { onCleanup } from "solid-js";
 import { createComponent } from "solid-js/web";
+import ModelControlCenter from "./tui/ModelControlCenter.js";
 
 export type TuiApi = TuiPluginApi;
 
@@ -69,7 +70,7 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
             });
           }
 
-          return renderPlaceholderRoute(api);
+          return createComponent(ModelControlCenter, { api });
         },
       },
     ]);

@@ -14,7 +14,7 @@
     "test:focused": "npx tsx tests/background-model-refresh-coordinator.test.ts",
     "test:adapter": "npx tsx tests/opencode-model-catalog.adapter.test.ts",
     "test:trace": "npx tsx tests/model-refresh-trace-logger.test.ts",
-    "test:tui": "npx tsx tests/tui-registration.test.ts",
+    "test:tui": "npx tsx tests/tui-registration.test.ts && npx tsx tests/tui-navigation.test.ts",
     "test:tui:bun": "bun tests/tui-bun-renderer.test.ts",
     "test:exports": "npx tsx tests/root-package-exports.test.ts",
     "test:typecheck:strict": "npx tsc --project tsconfig.test.json --noEmit",

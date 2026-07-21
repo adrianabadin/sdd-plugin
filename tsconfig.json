@@ -9,6 +9,10 @@
     "rootDir": "src",
     "outDir": "dist",
 
+    // JSX for OpenTUI/Solid
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+
     // Other Outputs
     "sourceMap": true,
     "declaration": true,
@@ -26,6 +30,6 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["node_modules", "dist", "test-verification.ts", "prisma.config.ts", "src/index.ts"]
 }
