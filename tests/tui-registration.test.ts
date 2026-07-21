@@ -69,6 +69,12 @@ async function main(): Promise<void> {
           modeDisposeCalledCount++;
         };
       }
+    },
+    ui: {
+      DialogAlert: (props: any) => ({
+        type: "DialogAlert",
+        props
+      })
     }
   };
 
@@ -102,19 +108,20 @@ async function main(): Promise<void> {
   // 4. Render Output & Mode Lifecycle
   if (tuiRoute && typeof tuiRoute.render === "function") {
     console.log("  Simulating first render...");
-    const result1 = tuiRoute.render();
+    const result1 = tuiRoute.render() as Record<string, any>;
     assert(modePushedCount === 1, "first render pushes the mode once");
     
-    // Validate host-compatible render output: must not contain title or onUnmount
-    assert(result1 !== null && typeof result1 === "object", "render returns an object (JSX.Element)");
-    assert(!("title" in (result1 as any)), "render result does not contain invented title field");
-    assert(!("onUnmount" in (result1 as any)), "render result does not contain invented onUnmount field");
+    // Validate host-compatible render output: must return a valid Solid element / UI component result from createComponent
+    assert(result1 !== null && typeof result1 === "object", "render returns a non-null element object");
+    assert(Object.keys(result1).length > 0, "render result is not a plain empty object {}");
+    assert(result1.type === "DialogAlert", "render produces DialogAlert element via createComponent");
+    assert(result1.props?.title === "Model Control Center", "render component has expected title");
+    assert(typeof result1.props?.message === "string", "render component has expected message");
 
     console.log("  Simulating second render (re-render)...");
-    const result2 = tuiRoute.render();
+    const result2 = tuiRoute.render() as Record<string, any>;
     assert(modePushedCount === 1, "second render DOES NOT push the mode again (idempotent)");
-    assert(!("title" in (result2 as any)), "second render result does not contain invented title field");
-    assert(!("onUnmount" in (result2 as any)), "second render result does not contain invented onUnmount field");
+    assert(result2 !== null && typeof result2 === "object" && Object.keys(result2).length > 0, "second render result is valid component element");
   }
 
   // 5. Lifecycle disposal

@@ -3,11 +3,7 @@
  * Handles Model Control Center visualization and management.
  */
 
-declare global {
-  namespace JSX {
-    interface Element {}
-  }
-}
+import { createComponent } from "solid-js/web";
 
 /**
  * OpenCode TUI API contract subsets used by this module.
@@ -37,17 +33,54 @@ export interface TuiApi {
   route?: {
     register: (routes: Array<{
       name: string;
-      render: () => JSX.Element;
+      render: () => unknown;
     }>) => () => void;
     navigate: (name: string) => void;
   };
   mode?: {
     push: (name: string) => () => void;
   };
+  ui?: {
+    DialogAlert?: (props: {
+      title: string;
+      message: string;
+      onConfirm?: () => void;
+    }) => unknown;
+    DialogSelect?: <Value = string>(props: {
+      title: string;
+      options: Array<{ title: string; value: Value; description?: string }>;
+      onSelect?: (option: { title: string; value: Value }) => void;
+      placeholder?: string;
+    }) => unknown;
+    dialog?: {
+      replace: (render: () => unknown, onClose?: () => void) => void;
+      clear: () => void;
+    };
+    toast?: (input: { variant?: "info" | "success" | "warning" | "error"; title?: string; message: string }) => void;
+  };
 }
 
 export interface TuiOptions {
   [key: string]: unknown;
+}
+
+function DefaultPlaceholderComponent(props: { title: string; message: string }) {
+  return {
+    type: "element",
+    name: "ModelControlCenterPlaceholder",
+    props: {
+      title: props.title,
+      message: props.message
+    }
+  };
+}
+
+export function renderPlaceholderRoute(api: TuiApi): unknown {
+  const Component = (api.ui?.DialogAlert ?? DefaultPlaceholderComponent) as never;
+  return createComponent(Component, {
+    title: "Model Control Center",
+    message: "Model Control Center placeholder view"
+  } as never);
 }
 
 export async function tui(api: TuiApi, _options?: TuiOptions) {
@@ -109,7 +142,7 @@ export async function tui(api: TuiApi, _options?: TuiOptions) {
             }
           }
 
-          return {} as JSX.Element;
+          return renderPlaceholderRoute(api);
         }
       }
     ]);
