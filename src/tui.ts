@@ -4,6 +4,7 @@
  */
 
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
+import type { JSX } from "@opentui/solid";
 import { onCleanup } from "solid-js";
 import { createComponent } from "solid-js/web";
 
@@ -13,23 +14,11 @@ export interface TuiOptions {
   [key: string]: unknown;
 }
 
-function DefaultPlaceholderComponent(props: { title: string; message: string }) {
-  return {
-    type: "element",
-    name: "ModelControlCenterPlaceholder",
-    props: {
-      title: props.title,
-      message: props.message,
-    },
-  };
-}
-
-export function renderPlaceholderRoute(api: TuiPluginApi): unknown {
-  const Component = (api.ui?.DialogAlert ?? DefaultPlaceholderComponent) as never;
-  return createComponent(Component, {
+export function renderPlaceholderRoute(api: TuiPluginApi): JSX.Element {
+  return createComponent(api.ui.DialogAlert, {
     title: "Model Control Center",
     message: "Model Control Center placeholder view",
-  } as never);
+  });
 }
 
 export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unknown) {

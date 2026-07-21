@@ -34,6 +34,9 @@
     "@opencode-ai/plugin": ">=1.17.11"
   },
   "devDependencies": {
+    "@opentui/core": "^0.4.5",
+    "@opentui/keymap": "^0.4.5",
+    "@opentui/solid": "^0.4.5",
     "@types/node": "^26.1.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"

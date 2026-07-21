@@ -45,6 +45,20 @@ pmc sync-context
 - Python + `graphifyy` (`pip install graphifyy`)
 - `npx -y @aabadin/agent-memory-mcp` (optional, for persistent memory)
 
+## OpenCode TUI Integration (`sdd-plugin2/tui`)
+
+The `./tui` subpath export provides the OpenCode Model Control Center TUI module (`{ id: "sdd-plugin.tui", tui }`).
+
+```json
+{
+  "plugin": ["sdd-plugin2/tui"]
+}
+```
+
+- Keymap shortcut: `ctrl+alt+f` (opens `model-control-center` route)
+- OpenCode plugin contract: Uses `api.keymap.registerLayer`, `api.route.register`, `api.mode.push`, and Solid `onCleanup` for route leave/re-entry teardown.
+- Peer / UI dependencies: Compatible with `@opentui/solid`, `@opentui/core`, and `@opentui/keymap` (`^0.4.5`).
+
 ## CLI Reference
 
 ```
