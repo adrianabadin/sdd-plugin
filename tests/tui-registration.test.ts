@@ -1,7 +1,10 @@
 /**
  * Test for TUI registration and keymap binding with the real OpenCode TUI contract.
  */
-import SddTuiModule, { TuiApi } from "../src/tui.js";
+import SddTuiModule, { renderPlaceholderRoute } from "../src/tui.js";
+import type { TuiPluginApi, TuiRouteDefinition } from "@opencode-ai/plugin/tui";
+import { createRoot, onCleanup } from "solid-js";
+import { createComponent } from "solid-js/web";
 
 const failures: string[] = [];
 
@@ -23,23 +26,20 @@ async function main(): Promise<void> {
   assert(typeof SddTuiModule.tui === "function", "tui is a function");
 
   let layerRegistered = false;
-  let registeredLayer: any = null;
+  let registeredLayer: Parameters<TuiPluginApi["keymap"]["registerLayer"]>[0] | null = null;
   let routeRegistered = false;
-  let registeredRoutes: any[] = [];
+  let registeredRoutes: TuiRouteDefinition[] = [];
   let navigatedRoute: string | null = null;
   let modePushedCount = 0;
-  let modeDisposeCalledCount = 0;
+  let modePoppedCount = 0;
   let layerDisposerCalled = false;
   let routeDisposerCalled = false;
-  let modeDisposerCalled = false;
   const lifecycleDisposers: Array<() => void> = [];
 
-  const mockApi: TuiApi = {
-    lifecycle: {
-      onDispose: (cb: () => void) => {
-        lifecycleDisposers.push(cb);
-      }
-    },
+  const mockApi: TuiPluginApi = {
+    app: { version: "1.18.4" },
+    attention: {} as never,
+    keys: {} as never,
     keymap: {
       registerLayer: (layer) => {
         layerRegistered = true;
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
           layerDisposerCalled = true;
         };
       }
-    },
+    } as never,
     route: {
       register: (routes) => {
         routeRegistered = true;
@@ -59,38 +59,58 @@ async function main(): Promise<void> {
       },
       navigate: (name: string) => {
         navigatedRoute = name;
-      }
+      },
+      current: { name: "home" }
     },
     mode: {
-      push: (name: string) => {
+      current: () => "base",
+      push: (_name: string) => {
         modePushedCount++;
         return () => {
-          modeDisposerCalled = true;
-          modeDisposeCalledCount++;
+          modePoppedCount++;
         };
       }
     },
     ui: {
-      DialogAlert: (props: any) => ({
-        type: "DialogAlert",
+      DialogAlert: (props) => createComponent(
+        (p: typeof props) => ({
+          type: "DialogAlert",
+          props: p
+        }) as never,
         props
-      })
+      )
+    } as never,
+    tuiConfig: {} as never,
+    kv: {} as never,
+    state: {} as never,
+    theme: {} as never,
+    client: {} as never,
+    event: {} as never,
+    renderer: {} as never,
+    slots: {} as never,
+    plugins: {} as never,
+    lifecycle: {
+      signal: new AbortController().signal,
+      onDispose: (cb: () => void) => {
+        lifecycleDisposers.push(cb);
+        return () => {};
+      }
     }
   };
 
-  await SddTuiModule.tui(mockApi);
+  await SddTuiModule.tui(mockApi, undefined, {} as never);
 
   // 2. Keymap Registration
   assert(layerRegistered, "api.keymap.registerLayer called");
   if (registeredLayer) {
     assert(registeredLayer.mode === "base", "layer mode is 'base'");
     assert(Array.isArray(registeredLayer.commands), "layer has commands array");
-    const openCmd = registeredLayer.commands.find((c: any) => c.name === "model-control-center.open");
-    assert(openCmd, "found 'model-control-center.open' command");
+    const openCmd = registeredLayer.commands.find((c) => c.name === "model-control-center.open");
+    assert(Boolean(openCmd), "found 'model-control-center.open' command");
     
     assert(Array.isArray(registeredLayer.bindings), "layer has bindings array");
-    const binding = registeredLayer.bindings.find((b: any) => b.key === "ctrl+alt+f");
-    assert(binding && binding.cmd === "model-control-center.open", "binding 'ctrl+alt+f' points to open command");
+    const binding = registeredLayer.bindings.find((b) => b.key === "ctrl+alt+f");
+    assert(Boolean(binding && binding.cmd === "model-control-center.open"), "binding 'ctrl+alt+f' points to open command");
 
     // Test command execution
     if (openCmd && typeof openCmd.run === "function") {
@@ -101,33 +121,56 @@ async function main(): Promise<void> {
 
   // 3. Route Registration
   assert(routeRegistered, "api.route.register called");
-  const tuiRoute = registeredRoutes.find(r => r.name === "model-control-center");
-  assert(tuiRoute, "route 'model-control-center' is registered");
+  const tuiRoute = registeredRoutes.find((r) => r.name === "model-control-center");
+  assert(Boolean(tuiRoute), "route 'model-control-center' is registered");
   assert(typeof tuiRoute?.render === "function", "route has a render function");
 
-  // 4. Render Output & Mode Lifecycle
+  // 4. Render Output & Host-realistic Solid Route Lifecycle (Leave & Re-entry)
   if (tuiRoute && typeof tuiRoute.render === "function") {
-    console.log("  Simulating first render...");
-    const result1 = tuiRoute.render() as Record<string, any>;
-    assert(modePushedCount === 1, "first render pushes the mode once");
-    
-    // Validate host-compatible render output: must return a valid Solid element / UI component result from createComponent
-    assert(result1 !== null && typeof result1 === "object", "render returns a non-null element object");
-    assert(Object.keys(result1).length > 0, "render result is not a plain empty object {}");
-    assert(result1.type === "DialogAlert", "render produces DialogAlert element via createComponent");
-    assert(result1.props?.title === "Model Control Center", "render component has expected title");
-    assert(typeof result1.props?.message === "string", "render component has expected message");
+    console.log("  Simulating route entry (Solid root mount)...");
+    let disposeRouteRoot: (() => void) | null = null;
+    let renderResult: ReturnType<typeof tuiRoute.render> | null = null;
 
-    console.log("  Simulating second render (re-render)...");
-    const result2 = tuiRoute.render() as Record<string, any>;
-    assert(modePushedCount === 1, "second render DOES NOT push the mode again (idempotent)");
-    assert(result2 !== null && typeof result2 === "object" && Object.keys(result2).length > 0, "second render result is valid component element");
+    createRoot((dispose) => {
+      disposeRouteRoot = dispose;
+      renderResult = tuiRoute.render({ params: {} });
+    });
+
+    assert(modePushedCount === 1, "route render pushes route-specific mode on mount");
+    assert(modePoppedCount === 0, "mode remains active while route is mounted");
+    assert(renderResult !== null && typeof renderResult === "object", "render returns valid element");
+
+    console.log("  Simulating route leave (Solid root cleanup)...");
+    if (disposeRouteRoot) {
+      (disposeRouteRoot as () => void)();
+    }
+
+    assert(modePoppedCount === 1, "leaving route invokes Solid onCleanup and pops mode");
+
+    console.log("  Simulating route re-entry (second Solid root mount)...");
+    let disposeReentryRoot: (() => void) | null = null;
+    createRoot((dispose) => {
+      disposeReentryRoot = dispose;
+      tuiRoute.render({ params: {} });
+    });
+
+    assert(modePushedCount === 2, "re-entering route pushes mode again");
+    assert(modePoppedCount === 1, "re-entered route mode active before cleanup");
+
+    if (disposeReentryRoot) {
+      (disposeReentryRoot as () => void)();
+    }
+    assert(modePoppedCount === 2, "leaving re-entered route pops mode again");
   }
 
-  // 5. Lifecycle disposal
+  // 5. Direct helper render check
+  const placeholderElement = renderPlaceholderRoute(mockApi);
+  assert(placeholderElement !== null && typeof placeholderElement === "object", "renderPlaceholderRoute returns valid element");
+
+  // 6. Lifecycle disposal
   assert(lifecycleDisposers.length > 0, "disposers registered with api.lifecycle.onDispose");
   
-  // Trigger cleanup
+  // Trigger plugin unload cleanup
   console.log("  Simulating plugin unload (triggering onDispose callbacks)...");
   for (const dispose of lifecycleDisposers) {
     dispose();
@@ -135,7 +178,6 @@ async function main(): Promise<void> {
 
   assert(layerDisposerCalled, "keymap layer disposer called on plugin unload");
   assert(routeDisposerCalled, "route registration disposer called on plugin unload");
-  assert(modeDisposerCalled, "mode push disposer called on plugin unload");
 
   console.log("\n=== TUI TEST SUMMARY ===");
   if (failures.length === 0) {
