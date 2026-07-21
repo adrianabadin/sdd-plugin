@@ -18,8 +18,11 @@
     "test:tui:bun": "bun tests/tui-bun-renderer.test.ts",
     "test:exports": "npx tsx tests/root-package-exports.test.ts",
     "test:typecheck:strict": "npx tsc --project tsconfig.test.json --noEmit",
-    "test:all": "npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace && npm run test:tui && npm run test:exports && npm run test:typecheck:strict",
-    "trace:tail": "node -e \"const fs=require('fs'),os=require('os'),path=require('path');const p=process.env.SDD_PLUGIN_TRACE_PATH||path.join(os.homedir(),'.cache','sdd-plugin','model-refresh.log');try{const lines=fs.readFileSync(p,'utf8').trimEnd().split('\\n');for(const l of lines.slice(-50))process.stdout.write(l+'\\n');}catch(e){console.error('no trace yet:',e.message);}\""
+    "test:integration": "npx tsx tests/integration-model-edit-flow.test.ts && npx tsx tests/integration-quarantine-interception.test.ts && npx tsx tests/integration-route-cleanup.test.ts && npx tsx tests/integration-package-exports.test.ts && npx tsx tests/integration-release-safety.test.ts",
+    "test:release-safety": "npm run test:integration && npm run test:exports && npm run test:typecheck:strict",
+    "verify:release-safety": "node scripts/verify-release-safety.mjs",
+    "test:all": "npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace && npm run test:tui && npm run test:exports && npm run test:typecheck:strict && npm run test:integration",
+    "trace:tail": "node -e \"const fs=require('fs'),os=require('os'),path=require('path');const p=process.env.SDD_PLUGIN_TRACE_PATH||path.join(os.homedir(),'.cache','sdd-plugin','model-refresh.log');try{const lines=fs.readFileSync(p,'utf8').trimEnd().split('\\n');for(const l of lines.slice(-50))process.stdout.write(l+'\\n');}catch(e){console.error('no trace yet:',e.message);)}\""
   },
   "repository": {
     "type": "git",

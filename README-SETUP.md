@@ -73,6 +73,31 @@ The `./tui` subpath export provides the OpenCode Model Control Center TUI module
 - **Bun OpenTUI Real Renderer Test**: `npm run test:tui:bun` (or `bun tests/tui-bun-renderer.test.ts`)
   Invokes `@opentui/solid` `testRender` against the Solid/OpenTUI route component. OpenCode executes plugins under Bun; this test requires the Bun runtime (with native FFI) and fails with an explicit error under Node.js.
 
+## Release Safety (Task 7)
+
+The CI pipeline enforces release safety before any artifact is shipped:
+
+1. **Forbidden staged artifacts** — `.gitignore` and the CI gate `npm run verify:release-safety` ensure that `.env` files, `opencode-models.db` (production DB), `dist/`, `node_modules/`, generated Prisma client, and incremental build state are never staged for commit.
+2. **Test database isolation** — every integration test writes to a unique `opencode-models.test-<uuid>.db` path via the shared `resolveDatabasePath()` resolver; production DBs are never touched.
+3. **Bun release gate** — `npm run test:tui:bun` runs only on Bun (the runtime OpenCode uses in production). The Node suite `npm test` is split from the Bun gate so a Bun-less local environment cannot falsely claim renderer coverage.
+4. **End-to-end integration suite** — `npm run test:integration` covers model edit immediate application, quarantine set/release interception, publish-failure resilience, route open/close cleanup, Ctrl+Alt+F host collision, public exports after build, and staged-artifact protection.
+5. **Migration safety** — the committed Prisma migration only adds nullable columns (`metadata`, `metadataEnvelopeHash`, `quarantineType`, `quarantineUntil`); rollback is `prisma migrate resolve --rolled-back` followed by `prisma migrate deploy`. Existing rows are preserved because every new column is nullable.
+
+### CI gate commands
+
+```bash
+npm run verify:release-safety   # gate 1: no forbidden artifacts staged
+npm run build                   # gate 2: TypeScript build succeeds
+npm test                        # gate 3: Node test suite + integration
+npm run test:exports            # gate 4: public root + ./tui self-references
+npm run test:typecheck:strict   # gate 5: tests compile with strict checks
+npm run test:tui:bun            # gate 6 (Bun-only): native OpenTUI renderer
+```
+
+A change MUST pass all six gates before it can be merged. Gates 1, 4, 5, 6
+are non-negotiable. Gates 2 and 3 are split so a Bun-less contributor can
+still run unit and integration tests locally.
+
 ## CLI Reference
 
 ```

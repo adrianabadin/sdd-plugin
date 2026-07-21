@@ -28,11 +28,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify release-safety (no forbidden artifacts staged)
+        run: npm run verify:release-safety
+
       - name: Build project
         run: npm run build
 
-      - name: Run Node tests
+      - name: Run Node tests (includes integration and unit suites)
         run: npm test
 
       - name: Run TUI Bun tests (Release Gate)
         run: npm run test:tui:bun
+
+      - name: Verify public exports after build
+        run: npm run test:exports
+
+      - name: Verify strict typecheck for tests
+        run: npm run test:typecheck:strict
