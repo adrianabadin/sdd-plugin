@@ -1,11 +1,70 @@
-# Apply Progress — Task 6: Quarantine Management
+# Apply Progress — Task 7: Final Integration & Release Safety
 
 **Change**: `model-control-center-tui`
-**Task**: Task 6 — Quarantine Management
+**Task**: Task 7 — Final Integration & Release Safety
 **Mode**: Strict TDD Mode
+**Commit**: `80d3547` (chore(release-safety): add Task 7 evidence, packaging, and release-safety gates)
+**PR Slice**: single PR (size:exception — see Workload / PR Boundary below)
 
 ## Status
-Completed Task 6 implementation under Strict TDD cycle. All unit, integration, domain, runtime, use case, TUI view, and Prisma adapter test suites passing cleanly. Tasks 2-5 preserved. No automatic quarantine; no provider/model browser redesign.
+Completed Task 7 implementation under Strict TDD cycle. All previous Task 2-6 work preserved. Five integration tests added covering the five contract areas from `task-7-design.md`. All Node test suites green. Strict typecheck, build, public exports, and release-safety verification all pass locally. Bun release gate could not be exercised locally (no `bun` binary in this environment); CI executes it on `oven-sh/setup-bun@v2`.
+
+## Completed Tasks (cumulative)
+- [x] 1. Main menu & keyboard navigation foundation (Task 2)
+- [x] 2. Connected providers screen & model list screen with search (Task 3)
+- [x] 3. Model detail view & tabbed interface (Task 4)
+- [x] 4. Durable model-detail persistence & immediate runtime application (Task 5)
+- [x] 5. Quarantine management: TTL/precedence helpers, QuarantineWritePort, use cases, runtime store, screen, navigation integration, and bootstrap interception gate (Task 6)
+- [x] 6. Task 7 — Final integration: end-to-end integration tests, route open/close cleanup, Ctrl+Alt+F host collision, public root & `./tui` package self-reference exports after build, Bun/OpenTUI renderer CI gate with Node/Bun test separation, Prisma migration / database-path / test DB isolation, staged-artifact protection, README + CI updates.
+
+## Completed Work (Task 7)
+- **Five integration tests** aligned with the 5 design bullets:
+  - `tests/integration-model-edit-flow.test.ts` — `SaveModelDetailUseCase` → adapter → DB → `ModelConfigRegistry` publish → next `SddPlugin` interception observes update. Includes the publish-failure resilience path (use case surfaces warning when registry throws, DB persists, next interception rehydrates from DB) and cross-process rehydration (delete `globalThis[Symbol.for('sdd-plugin.model-config-registry.v1')]` then trigger the hook).
+  - `tests/integration-quarantine-interception.test.ts` — provider- and model-level set/release; bootstrap interception observes `isActive`; release clears `quarantineType` AND `quarantineUntil` in DB; missing-store fallback (`delete globalThis[Symbol.for('sdd-plugin.quarantine-store.v1')]` → hook re-creates and hydrates from DB).
+  - `tests/integration-route-cleanup.test.ts` — 5 mount/unmount cycles verifying mode push/pop parity, no duplicate route registrations, base keymap layer registered exactly once, route-scoped layer (from `ModelControlCenter`) registered once per mount and disposed on `onCleanup`, plugin unload disposes both layers. Includes Ctrl+Alt+F host collision check: binding registered ONLY on the base layer, command executes `route.navigate('model-control-center')`, supported OpenCode version contract (`>= 1.17.11`) verified.
+  - `tests/integration-package-exports.test.ts` — `dist/bootstrap/index.js` and `dist/tui.js` exist after build; `package.json` exports map correct; root call as factory returns `tool.execute.before` hook; `./tui` exports `{ id: 'sdd-plugin.tui', tui }`; Bun renderer test source contains the runtime guard + `process.exit(1)` + actionable error message; CI workflow installs Bun and runs `npm run test:tui:bun`; Node test suite does NOT include `tui-bun-renderer`.
+  - `tests/integration-release-safety.test.ts` — `resolveDatabasePath()` honors `SDD_PLUGIN_DB_PATH` and falls back to `<repo>/opencode-models.db`; three parallel test DBs are independent files; production DB mtime unchanged after test pushes; `.gitignore` patterns verified; `git check-ignore` confirms `.env`, `dist`, `node_modules`, `opencode-models.db` are ignored; `git status --short` reports no untracked forbidden paths; `git status --ignored` lists `dist/`, `node_modules/`, `opencode-models.db*` as ignored.
+- **Release-safety helpers**:
+  - `scripts/verify-release-safety.mjs` — CI gate that scans the working tree for staged or untracked forbidden artifacts and exits non-zero if any are present. Cross-checks against `git check-ignore` so a file already covered by `.gitignore` does not fail the gate.
+  - `.gitignore` updated to explicitly exclude `dist/`, `node_modules/`, `opencode-models.db` and sidecars, `opencode-models.test-*`, `.env`, `.env.local`, `.env.*.local`, `src/generated/prisma`, and `*.tsbuildinfo`.
+  - `.github/workflows/ci.yml` — adds `npm run verify:release-safety` as the first gate, splits `npm test` (Node) from `npm run test:tui:bun` (Bun release gate), and exposes `npm run test:exports` and `npm run test:typecheck:strict` as required CI steps.
+  - `package.json` — new scripts `test:integration` (5 tests), `test:release-safety`, `verify:release-safety`; `test:all` now includes `test:integration`.
+  - `README-SETUP.md` — adds a "Release Safety (Task 7)" section documenting the six CI gates and the Prisma migration rollback path.
+- **Migration safety preserved**: the committed Prisma migration only adds nullable columns (`metadata`, `metadataEnvelopeHash`, `quarantineType`, `quarantineUntil`); rollback is `prisma migrate resolve --rolled-back` followed by `prisma migrate deploy`. Existing rows are preserved because every new column is nullable.
+
+## TDD Cycle Evidence
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| 7.1 Model edit E2E + publish failure | `tests/integration-model-edit-flow.test.ts` | Integration | ✅ 7/7 | ✅ Written | ✅ Passed | ✅ 2 paths (happy + failure) | ✅ Clean |
+| 7.2 Quarantine set/release + missing-store | `tests/integration-quarantine-interception.test.ts` | Integration | ✅ 7/7 | ✅ Written | ✅ Passed | ✅ 3 paths (provider/model/missing-store) | ✅ Clean |
+| 7.3 Route open/close cleanup + host collision | `tests/integration-route-cleanup.test.ts` | Integration | ✅ 7/7 | ✅ Written | ✅ Passed | ✅ 5 mount cycles | ✅ Tightened |
+| 7.4 Public exports after build + Bun gate | `tests/integration-package-exports.test.ts` | Integration | N/A (new) | ✅ Written | ✅ Passed | ✅ 2 contracts (root + ./tui) | ✅ Clean |
+| 7.5 Release safety (DB isolation + staged artifacts) | `tests/integration-release-safety.test.ts` | Integration | N/A (new) | ✅ Written | ✅ Passed | ✅ 3 DB isolation paths + 4 gitignore paths | ✅ Clean |
+
+## Verification Evidence
+- `npx tsx tests/integration-model-edit-flow.test.ts` → PASS (24 assertions)
+- `npx tsx tests/integration-quarantine-interception.test.ts` → PASS (18 assertions)
+- `npx tsx tests/integration-route-cleanup.test.ts` → PASS (54 assertions)
+- `npx tsx tests/integration-package-exports.test.ts` → PASS (24 assertions)
+- `npx tsx tests/integration-release-safety.test.ts` → PASS (27 assertions)
+- `npm run build` → PASS (TypeScript succeeds)
+- `npm run test:typecheck:strict` → PASS (tests compile with strict checks)
+- `npm run test:exports` → PASS (root + ./tui self-references)
+- `npm test` → PASS (full Node suite, exit 0)
+- `npm run verify:release-safety` → PASS (no forbidden artifacts staged)
+- `npm run test:tui:bun` → NOT RUN LOCALLY (Bun unavailable in this environment; reported as limitation below)
+
+## Workload / PR Boundary
+- Mode: single PR with `size:exception`
+- Current work unit: Task 7 (Final Integration & Release Safety) full slice
+- Boundary: scoped to evidence/release-safety only — integration tests, release-safety script, .gitignore tightening, CI workflow gate additions, README updates. No product code changes.
+- Estimated review budget impact: 1,251 net new lines (1,255 insertions, 4 deletions across 10 files). Over the 800-line soft target. Justification: evidence/release-safety work where tests ARE the deliverable. Five focused tests cover five explicit contract bullets from `task-7-design.md`. Each test averages ~217 lines of structured assertions, headers, and contract documentation — comparable to existing Task 5/6 integration tests.
+- Local Bun limitation: this environment has no `bun` binary. The Bun release gate (`npm run test:tui:bun`) is asserted via static analysis in `tests/integration-package-exports.test.ts` and runs in CI on `oven-sh/setup-bun@v2`.
+
+## Risks
+- Test DB files (`opencode-models.test-<uuid>.db`) are produced by integration tests and ignored by `.gitignore`; if `.gitignore` regresses, the next commit could include them. `verify-release-safety.mjs` catches this in CI.
+- The Bun release gate depends on the CI runner installing Bun via `oven-sh/setup-bun@v2`. If that action is removed or fails, the gate silently disappears. The package-exports integration test asserts the workflow contains the required step.
+- `dist/` was previously not ignored; the new `.gitignore` adds it. A future contributor who runs `git add .` after a build will not stage it, but if they explicitly `git add -f dist/...` they can. The release-safety script catches forbidden staged artifacts regardless of how they were added.
 
 ## Completed Tasks
 - [x] 1. Main menu & keyboard navigation foundation (Task 2)
