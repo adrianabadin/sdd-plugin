@@ -49,15 +49,21 @@ pmc sync-context
 
 The `./tui` subpath export provides the OpenCode Model Control Center TUI module (`{ id: "sdd-plugin.tui", tui }`).
 
+> **Configuration Notice**: OpenCode requires TUI modules to be declared in `tui.json` (or under the TUI plugin configuration section), NOT in the main server plugin list (`opencode.json` `plugin: [...]`). Main server plugins operate in non-DOM/headless background node runtimes and lack `@opentui/*` UI primitives.
+
+### Correct TUI Configuration (`tui.json` or TUI plugin config):
 ```json
 {
   "plugin": ["sdd-plugin2/tui"]
 }
 ```
 
-- Keymap shortcut: `ctrl+alt+f` (opens `model-control-center` route)
-- OpenCode plugin contract: Uses `api.keymap.registerLayer`, `api.route.register`, `api.mode.push`, and Solid `onCleanup` for route leave/re-entry teardown.
-- Peer / UI dependencies: Compatible with `@opentui/solid`, `@opentui/core`, and `@opentui/keymap` (`^0.4.5`).
+### Activation Contract:
+- **Module export**: `sdd-plugin2/tui` exports a TUI plugin module matching `{ id: "sdd-plugin.tui", tui: (api) => ... }`.
+- **Keymap shortcut**: Press `ctrl+alt+f` in `base` mode. This triggers the command `model-control-center.open` registered via `api.keymap.registerLayer`, navigating to the `model-control-center` route.
+- **Route rendering**: The route is registered with `api.route.register`. When entered, it pushes a route-specific mode (`model-control-center`) via `api.mode.push` and renders the Solid interface (`DialogAlert` placeholder component).
+- **Teardown & Cleanup**: Leaving the route invokes Solid `onCleanup` which pops the mode. Unloading the plugin disposes keymap and route registrations via `api.lifecycle.onDispose`.
+- **Peer / UI dependencies**: Compatible with `@opentui/solid`, `@opentui/core`, and `@opentui/keymap` (`^0.4.5`).
 
 ## CLI Reference
 

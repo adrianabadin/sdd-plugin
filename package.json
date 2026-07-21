@@ -37,9 +37,9 @@
     "@opentui/core": "^0.4.5",
     "@opentui/keymap": "^0.4.5",
     "@opentui/solid": "^0.4.5",
-    "@types/node": "^26.1.1",
+    "@types/node": "^20.17.0",
     "tsx": "^4.23.1",
-    "typescript": "^7.0.2"
+    "typescript": "5.9.3"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
