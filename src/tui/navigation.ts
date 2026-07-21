@@ -25,7 +25,13 @@ export type ScreenState =
       query: string;
       searchActive: boolean;
     }
-  | { name: "model-detail"; providerId: string; modelId: string; tab: DetailTab }
+  | {
+      name: "model-detail";
+      providerId: string;
+      modelId: string;
+      tab: DetailTab;
+      focus?: { area: "tabs" } | { area: "fields"; index: number };
+    }
   | { name: "quarantines" };
 
 export type NavigationEvent =
@@ -37,7 +43,13 @@ export type NavigationEvent =
   | { type: "tab-prev" }
   | { type: "search-start" }
   | { type: "search-stop" }
-  | { type: "search-input"; query: string };
+  | { type: "search-input"; query: string }
+  | { type: "field-next" }
+  | { type: "field-prev" }
+  | { type: "focus-fields"; index?: number }
+  | { type: "focus-tabs" }
+  | { type: "save-intent" }
+  | { type: "discard-draft" };
 
 export function createInitialStack(): ScreenState[] {
   return [{ name: "main-menu", selectedIndex: 0 }];
@@ -86,6 +98,18 @@ export function transitionScreen(
       return screen;
     }
 
+    case "activate": {
+      if (screen.name === "model-detail") {
+        if (!screen.focus || screen.focus.area === "tabs") {
+          return {
+            ...screen,
+            focus: { area: "fields", index: 0 },
+          };
+        }
+      }
+      return screen;
+    }
+
     case "search-start": {
       if (screen.name === "models") {
         return { ...screen, searchActive: true };
@@ -109,6 +133,13 @@ export function transitionScreen(
 
     case "tab-next": {
       if (screen.name === "model-detail") {
+        if (screen.focus?.area === "fields") {
+          const currentIndex = screen.focus.index;
+          return {
+            ...screen,
+            focus: { area: "fields", index: currentIndex + 1 },
+          };
+        }
         const currentIdx = DETAIL_TABS.indexOf(screen.tab);
         const nextIdx = (currentIdx + 1) % DETAIL_TABS.length;
         const nextTab = DETAIL_TABS[nextIdx] ?? "overview";
@@ -119,10 +150,37 @@ export function transitionScreen(
 
     case "tab-prev": {
       if (screen.name === "model-detail") {
+        if (screen.focus?.area === "fields") {
+          const currentIndex = screen.focus.index;
+          return {
+            ...screen,
+            focus: { area: "fields", index: Math.max(0, currentIndex - 1) },
+          };
+        }
         const currentIdx = DETAIL_TABS.indexOf(screen.tab);
         const prevIdx = (currentIdx - 1 + DETAIL_TABS.length) % DETAIL_TABS.length;
         const prevTab = DETAIL_TABS[prevIdx] ?? "overview";
         return { ...screen, tab: prevTab };
+      }
+      return screen;
+    }
+
+    case "focus-fields": {
+      if (screen.name === "model-detail") {
+        return {
+          ...screen,
+          focus: { area: "fields", index: event.index ?? 0 },
+        };
+      }
+      return screen;
+    }
+
+    case "focus-tabs": {
+      if (screen.name === "model-detail") {
+        return {
+          ...screen,
+          focus: { area: "tabs" },
+        };
       }
       return screen;
     }
@@ -164,6 +222,10 @@ export function handleNavigation(
       const updatedScreen: ScreenState = { ...currentScreen, searchActive: false };
       return { stack: [...stack.slice(0, -1), updatedScreen], exited: false };
     }
+    if (currentScreen.name === "model-detail" && currentScreen.focus?.area === "fields") {
+      const updatedScreen: ScreenState = { ...currentScreen, focus: { area: "tabs" } };
+      return { stack: [...stack.slice(0, -1), updatedScreen], exited: false };
+    }
     return popScreen(stack);
   }
 
@@ -203,9 +265,20 @@ export function handleNavigation(
           providerId: currentScreen.providerId,
           modelId: targetModelId,
           tab: "overview",
+          focus: { area: "tabs" },
         }),
         exited: false,
       };
+    }
+
+    if (currentScreen.name === "model-detail") {
+      if (!currentScreen.focus || currentScreen.focus.area === "tabs") {
+        const updatedScreen: ScreenState = {
+          ...currentScreen,
+          focus: { area: "fields", index: 0 },
+        };
+        return { stack: [...stack.slice(0, -1), updatedScreen], exited: false };
+      }
     }
 
     return { stack, exited: false };

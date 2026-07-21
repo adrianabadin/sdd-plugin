@@ -9,11 +9,16 @@ import type {
   ModelRepositoryPort,
   PricingSnapshotLike,
 } from "../../ports/model-repository.port.js";
+import type {
+  ModelDetailQueryPort,
+  PersistedModelDetail,
+} from "../../ports/model-detail-query.port.js";
 import type { RefreshTraceContext } from "../../ports/model-catalog.port.js";
 import type { ModelRefreshTraceLogger } from "../logging/model-refresh-trace.logger.js";
+import type { QuarantineType } from "../../domain/model/quarantine.js";
 
 /**
- * Adapter: implement the `ModelRepositoryPort` against Prisma.
+ * Adapter: implement the `ModelRepositoryPort` and `ModelDetailQueryPort` against Prisma.
  *
  * This module is the ONLY place that imports `@prisma/client`. The
  * domain and use case layers see only port interfaces and domain
@@ -27,7 +32,7 @@ import type { ModelRefreshTraceLogger } from "../logging/model-refresh-trace.log
  * logger because they are the only layer that knows how a particular
  * persistence sink reports its result counts.
  */
-export class PrismaModelRepositoryAdapter implements ModelRepositoryPort {
+export class PrismaModelRepositoryAdapter implements ModelRepositoryPort, ModelDetailQueryPort {
   private readonly trace: ModelRefreshTraceLogger | undefined;
 
   constructor(
@@ -232,6 +237,71 @@ export class PrismaModelRepositoryAdapter implements ModelRepositoryPort {
       currency: latest.currency,
       effectiveFrom: latest.effectiveFrom,
       effectiveUntil: latest.effectiveUntil,
+    };
+  }
+
+  async findModelDetail(
+    providerId: string,
+    modelId: string
+  ): Promise<PersistedModelDetail | null> {
+    const mp = await this.prisma.modelProvider.findUnique({
+      where: {
+        modelId_providerId: {
+          modelId,
+          providerId,
+        },
+      },
+      include: {
+        provider: true,
+        model: true,
+        pricing: {
+          orderBy: { effectiveFrom: "desc" },
+          take: 1,
+        },
+      },
+    });
+
+    if (!mp) {
+      return null;
+    }
+
+    const latestPricingRecord = mp.pricing[0];
+    const pricing: PricingSnapshotLike | null = latestPricingRecord
+      ? {
+          id: latestPricingRecord.id,
+          inputPerMillion: latestPricingRecord.inputPerMillion,
+          outputPerMillion: latestPricingRecord.outputPerMillion,
+          cachedPerMillion: latestPricingRecord.cachedPerMillion,
+          currency: latestPricingRecord.currency,
+          effectiveFrom: latestPricingRecord.effectiveFrom,
+          effectiveUntil: latestPricingRecord.effectiveUntil,
+        }
+      : null;
+
+    return {
+      providerId: mp.provider.id,
+      providerName: mp.provider.name,
+      providerSubscription: mp.provider.subscription,
+      providerIsBlocked: mp.provider.isBlocked,
+      providerQuarantineType: (mp.provider.quarantineType as QuarantineType) ?? null,
+      providerQuarantineUntil: mp.provider.quarantineUntil,
+      modelId: mp.model.id,
+      modelName: mp.model.name,
+      benchmarks: {
+        mmlu: mp.model.mmlu,
+        humaneval: mp.model.humaneval,
+        sweBench: mp.model.sweBench,
+        gpqa: mp.model.gpqa,
+        math: mp.model.math,
+        bbh: mp.model.bbh,
+        mtBench: mp.model.mtBench,
+        multineedle: mp.model.multineedle,
+      },
+      modelQuarantineType: (mp.model.quarantineType as QuarantineType) ?? null,
+      modelQuarantineUntil: mp.model.quarantineUntil,
+      modelProviderQuarantineType: (mp.quarantineType as QuarantineType) ?? null,
+      modelProviderQuarantineUntil: mp.quarantineUntil,
+      pricing,
     };
   }
 

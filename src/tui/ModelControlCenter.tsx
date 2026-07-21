@@ -1,8 +1,9 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { JSX } from "@opentui/solid";
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { createSignal, createEffect, onCleanup, onMount } from "solid-js";
 import { createComponent } from "solid-js/web";
 import type { ModelCatalogPort } from "../ports/model-catalog.port.js";
+import type { ModelDetailQueryPort } from "../ports/model-detail-query.port.js";
 import type { ConnectedModelInfo } from "../domain/model/connected-model.js";
 import {
   buildProviderSummaries,
@@ -12,6 +13,15 @@ import {
 import MainMenu from "./MainMenu.js";
 import ProvidersScreen from "./ProvidersScreen.js";
 import ModelsScreen from "./ModelsScreen.js";
+import ModelDetailScreen from "./ModelDetailScreen.js";
+import {
+  mergeModelDetail,
+  createDraft,
+  isDraftDirty,
+  type LoadedDetail,
+  type DetailDraft,
+} from "./model-detail-view.js";
+import { validateDraft, type ValidationResult } from "./detail-validation.js";
 import {
   createInitialStack,
   handleNavigation,
@@ -21,7 +31,8 @@ import {
 
 export interface ModelControlCenterProps {
   api: TuiPluginApi;
-  catalog?: ModelCatalogPort;
+  catalog?: ModelCatalogPort | undefined;
+  detailQuery?: ModelDetailQueryPort | undefined;
 }
 
 export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element {
@@ -29,7 +40,49 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
   const [catalogState, setCatalogState] = createSignal<CatalogView>({ status: "loading" });
   const [rawModels, setRawModels] = createSignal<ReadonlyArray<ConnectedModelInfo>>([]);
 
+  // Task 4 Detail signals
+  const [loadedBaseline, setLoadedBaseline] = createSignal<LoadedDetail | null>(null);
+  const [detailDraft, setDetailDraft] = createSignal<DetailDraft | null>(null);
+  const [detailNotice, setDetailNotice] = createSignal<string | undefined>(undefined);
+  const [detailValidation, setDetailValidation] = createSignal<ValidationResult | undefined>(undefined);
+
   const initialRouteName = props.api.route?.current?.name ?? "home";
+
+  // Effect to load model detail state when entering model-detail screen
+  createEffect(() => {
+    const current = currentScreen();
+    if (current.name === "model-detail") {
+      const { providerId, modelId } = current;
+      const catalogModels = rawModels();
+      const catalogMatch = catalogModels.find(
+        (m) => m.providerId === providerId && m.modelId === modelId
+      ) ?? null;
+
+      if (props.detailQuery) {
+        props.detailQuery
+          .findModelDetail(providerId, modelId)
+          .then((persisted) => {
+            const merged = mergeModelDetail(catalogMatch, persisted, providerId, modelId);
+            setLoadedBaseline(merged);
+            setDetailDraft(createDraft(merged));
+            setDetailNotice(persisted ? undefined : "No saved metadata record; showing catalog defaults.");
+            setDetailValidation(undefined);
+          })
+          .catch((err: unknown) => {
+            const merged = mergeModelDetail(catalogMatch, null, providerId, modelId);
+            setLoadedBaseline(merged);
+            setDetailDraft(createDraft(merged));
+            setDetailNotice(`Error querying persisted detail: ${String(err)}`);
+          });
+      } else {
+        const merged = mergeModelDetail(catalogMatch, null, providerId, modelId);
+        setLoadedBaseline(merged);
+        setDetailDraft(createDraft(merged));
+        setDetailNotice(undefined);
+        setDetailValidation(undefined);
+      }
+    }
+  });
 
   onMount(() => {
     if (!props.catalog) {
@@ -93,8 +146,42 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
     return {};
   }
 
+  function handleSaveIntent(): void {
+    const draft = detailDraft();
+    if (!draft) return;
+    const res = validateDraft(draft);
+    if (res.isValid) {
+      setLoadedBaseline(draft);
+      setDetailNotice("Validated — persistence lands in Task 5");
+      setDetailValidation(undefined);
+    } else {
+      setDetailValidation(res);
+      setDetailNotice(undefined);
+    }
+  }
+
   function dispatch(event: NavigationEvent): void {
     const current = currentScreen();
+
+    if (event.type === "save-intent") {
+      if (current.name === "model-detail") {
+        handleSaveIntent();
+      }
+      return;
+    }
+
+    if (event.type === "back" && current.name === "model-detail") {
+      const base = loadedBaseline();
+      const draft = detailDraft();
+
+      if (current.focus?.area === "tabs" && base && draft && isDraftDirty(base, draft)) {
+        setDetailDraft(createDraft(base));
+        setDetailNotice("Draft discarded");
+        setDetailValidation(undefined);
+        return;
+      }
+    }
+
     const maxIndex = getVisibleCount(current);
     const { providerId, modelId } = getSelectedIds(current);
 
@@ -149,6 +236,11 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
           title: "Previous Detail Tab",
           run: () => dispatch({ type: "tab-prev" }),
         },
+        {
+          name: "mcc.form.save",
+          title: "Validate / Save Draft Intent",
+          run: () => dispatch({ type: "save-intent" }),
+        },
       ],
       bindings: [
         { key: "up", cmd: "mcc.nav.up" },
@@ -158,6 +250,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         { key: "/", cmd: "mcc.nav.search-start" },
         { key: "tab", cmd: "mcc.nav.tab-next" },
         { key: "shift+tab", cmd: "mcc.nav.tab-prev" },
+        { key: "ctrl+s", cmd: "mcc.form.save" },
       ],
     });
 
@@ -233,11 +326,27 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         });
       }
 
-      case "model-detail":
-        return createComponent(props.api.ui.DialogAlert, {
-          title: "Model Detail",
-          message: `Model detail placeholder view (${screen.modelId}, tab: ${screen.tab}) (Task 4)`,
+      case "model-detail": {
+        const base = loadedBaseline();
+        const draft = detailDraft();
+        if (!base || !draft) {
+          return createComponent(props.api.ui.DialogAlert, {
+            title: `Model Detail (${screen.modelId})`,
+            message: "Loading model detail...",
+          });
+        }
+        return createComponent(ModelDetailScreen, {
+          api: props.api,
+          providerId: screen.providerId,
+          modelId: screen.modelId,
+          tab: screen.tab,
+          focus: screen.focus,
+          baseline: base,
+          draft,
+          validation: detailValidation(),
+          notice: detailNotice(),
         });
+      }
     }
   };
 

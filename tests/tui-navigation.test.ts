@@ -231,7 +231,48 @@ async function main(): Promise<void> {
   assert(navRes.stack.length === 2, "Esc with searchActive=false pops stack (height becomes 2)");
   assert(navRes.stack[1]?.name === "providers", "Returned to providers screen");
 
-  // 5. MainMenu Component Render Structure
+  // 4c. Task 4 Focus & Detail Screen Navigation Rules
+  console.log("\n4c. Testing Task 4 Focus & Detail Screen Navigation Rules...");
+  let detailFocusScreen: ScreenState = {
+    name: "model-detail",
+    providerId: "openai",
+    modelId: "gpt-4o",
+    tab: "overview",
+    focus: { area: "tabs" },
+  };
+
+  // Enter on tabs focus moves focus to fields area index 0
+  detailFocusScreen = transitionScreen(detailFocusScreen, { type: "activate" });
+  assert(
+    detailFocusScreen.name === "model-detail" &&
+      detailFocusScreen.focus?.area === "fields" &&
+      detailFocusScreen.focus.index === 0,
+    "Enter on tab strip enters field focus area (index 0)"
+  );
+
+  // Tab-next in field focus advances field index
+  detailFocusScreen = transitionScreen(detailFocusScreen, { type: "tab-next" });
+  assert(
+    detailFocusScreen.name === "model-detail" &&
+      detailFocusScreen.focus?.area === "fields" &&
+      detailFocusScreen.focus.index === 1,
+    "Tab-next in field focus advances field index to 1"
+  );
+
+  // Esc / back when in fields focus exits back to tabs focus (area: 'tabs'), keeping screen
+  let detailStack: ScreenState[] = [
+    { name: "main-menu", selectedIndex: 0 },
+    { name: "providers", selectedIndex: 0 },
+    { name: "models", providerId: "openai", selectedIndex: 0, query: "", searchActive: false },
+    detailFocusScreen,
+  ];
+
+  const escRes = handleNavigation(detailStack, { type: "back" });
+  const topFocusScreen = escRes.stack[escRes.stack.length - 1];
+  assert(
+    topFocusScreen?.name === "model-detail" && topFocusScreen.focus?.area === "tabs",
+    "Esc in field focus exits field focus back to tabs focus"
+  );
   console.log("\n5. Testing MainMenu Component Rendering...");
   let registeredLayer: any = null;
   let layerDisposed = false;

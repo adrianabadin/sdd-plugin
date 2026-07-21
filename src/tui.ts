@@ -9,6 +9,10 @@ import { onCleanup } from "solid-js";
 import { createComponent } from "solid-js/web";
 import ModelControlCenter from "./tui/ModelControlCenter.js";
 import { OpenCodeModelCatalogAdapter } from "./infrastructure/opencode/opencode-model-catalog.adapter.js";
+import { PrismaModelRepositoryAdapter } from "./infrastructure/prisma/prisma-model-repository.adapter.js";
+import { PrismaClient } from "@prisma/client";
+import { PrismaLibSql } from "@prisma/adapter-libsql";
+import path from "node:path";
 
 export type TuiApi = TuiPluginApi;
 
@@ -59,6 +63,17 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
   // Build canonical OpenCodeModelCatalogAdapter from api.client
   const catalogPort = new OpenCodeModelCatalogAdapter(api.client);
 
+  // Build additive Prisma detail query adapter
+  let detailQueryPort: PrismaModelRepositoryAdapter | undefined;
+  try {
+    const dbUrl = process.env.DATABASE_URL ?? `file:${path.resolve(process.cwd(), "opencode-models.db")}`;
+    const prismaAdapter = new PrismaLibSql({ url: dbUrl });
+    const prisma = new PrismaClient({ adapter: prismaAdapter });
+    detailQueryPort = new PrismaModelRepositoryAdapter(prisma);
+  } catch {
+    detailQueryPort = undefined;
+  }
+
   // 2. Register Route
   if (api.route?.register) {
     const routeDisposer = api.route.register([
@@ -73,7 +88,11 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
             });
           }
 
-          return createComponent(ModelControlCenter, { api, catalog: catalogPort });
+          return createComponent(ModelControlCenter, {
+            api,
+            catalog: catalogPort,
+            detailQuery: detailQueryPort,
+          });
         },
       },
     ]);
