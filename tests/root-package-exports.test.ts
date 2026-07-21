@@ -3,9 +3,10 @@
  * Asserts that:
  * 1. The built root package export `dist/bootstrap/index.js` remains callable (exports default SddPlugin / SddPlugin function).
  * 2. The subpath export `./tui` (`dist/tui.js`) exports an object with `{ id, tui }` matching the TUI plugin module contract.
+ * Note: `npm run build` must be executed prior to running this test.
  */
-import RootPlugin, { SddPlugin } from "../src/bootstrap/index.js";
-import TuiModule from "../src/tui.js";
+import RootPlugin, { SddPlugin } from "../dist/bootstrap/index.js";
+import TuiModule from "../dist/tui.js";
 
 const failures: string[] = [];
 

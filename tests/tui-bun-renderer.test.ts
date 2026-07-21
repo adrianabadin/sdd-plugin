@@ -3,6 +3,7 @@
  * Must be executed under Bun runtime (which OpenCode uses in production).
  */
 import { testRender } from "@opentui/solid";
+import { jsx } from "@opentui/solid/jsx-runtime";
 import type { JSX } from "@opentui/solid";
 import { renderPlaceholderRoute } from "../src/tui.js";
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
@@ -12,14 +13,13 @@ async function main(): Promise<void> {
 
   // Verify runtime is Bun
   if (typeof (globalThis as unknown as { Bun?: unknown }).Bun === "undefined") {
-    console.warn(
-      "ENVIRONMENT NOTICE: OpenTUI testRender requires Bun runtime (native FFI). Current runtime is Node.js (" +
+    console.error(
+      "FAIL: OpenTUI testRender requires Bun runtime (native FFI). Current runtime is Node.js (" +
         process.version +
         ")."
     );
-    console.warn("Execute with 'bun tests/tui-bun-renderer.test.ts' or 'npm run test:tui:bun' under Bun.");
-    console.log("Environment gate: Node unsupported-runtime path handled cleanly (skipped Bun FFI execution).");
-    process.exit(0);
+    console.error("Execute with 'bun tests/tui-bun-renderer.test.ts' or 'npm run test:tui:bun' under Bun.");
+    process.exit(1);
   }
 
   console.log("Bun runtime detected. Initializing real OpenTUI testRender...");
@@ -33,16 +33,13 @@ async function main(): Promise<void> {
     mode: { current: () => "base", push: () => () => {} },
     ui: {
       DialogAlert: (props: { title?: string; message?: string }): JSX.Element => {
-        return {
-          type: "box",
-          props: {
-            border: true,
-            children: [
-              { type: "text", props: { children: props.title } },
-              { type: "text", props: { children: props.message } },
-            ],
-          },
-        } as unknown as JSX.Element;
+        return jsx("box", {
+          border: true,
+          children: [
+            jsx("text", { children: props.title ?? "" }),
+            jsx("text", { children: props.message ?? "" }),
+          ],
+        });
       },
       Dialog: (() => null) as never,
       DialogConfirm: (() => null) as never,
@@ -77,34 +74,30 @@ async function main(): Promise<void> {
 
   console.log("Real OpenTUI testRender mounted component tree successfully.");
 
-  // Wait for frame rendering
-  const setupAny = testSetup as unknown as {
-    waitForFrame?: () => Promise<void>;
-    captureCharFrame?: () => string;
-    destroy?: () => void;
-  };
+  // Wait for frame rendering using required predicate
+  const frame = await testSetup.waitForFrame((captured: string) => {
+    return captured.includes("Model Control Center");
+  });
 
-  if (typeof setupAny.waitForFrame === "function") {
-    await setupAny.waitForFrame();
+  if (!frame || frame.length === 0) {
+    console.error("FAIL: Captured frame is empty or unavailable.");
+    process.exit(1);
   }
 
-  // Frame capture assertion
-  let frameChar: string | undefined;
-  if (typeof setupAny.captureCharFrame === "function") {
-    frameChar = setupAny.captureCharFrame();
+  console.log("Captured frame characters length: " + frame.length);
+
+  if (!frame.includes("Model Control Center")) {
+    console.error("FAIL: Captured frame does not contain expected title text 'Model Control Center'");
+    process.exit(1);
   }
 
-  if (frameChar) {
-    console.log("Captured frame characters length: " + frameChar.length);
-    if (!frameChar.includes("Model Control Center")) {
-      console.error("FAIL: Captured frame does not contain expected title text 'Model Control Center'");
-      process.exit(1);
-    }
+  if (!frame.includes("Model Control Center placeholder view")) {
+    console.error("FAIL: Captured frame does not contain expected message text 'Model Control Center placeholder view'");
+    process.exit(1);
   }
 
-  if (typeof setupAny.destroy === "function") {
-    setupAny.destroy();
-  }
+  // Clean up using real renderer API
+  testSetup.renderer.destroy();
 
   console.log("All real OpenTUI renderer assertions passed.");
   process.exit(0);
