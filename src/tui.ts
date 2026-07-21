@@ -3,6 +3,12 @@
  * Handles Model Control Center visualization and management.
  */
 
+declare global {
+  namespace JSX {
+    interface Element {}
+  }
+}
+
 /**
  * OpenCode TUI API contract subsets used by this module.
  */
@@ -31,8 +37,8 @@ export interface TuiApi {
   route?: {
     register: (routes: Array<{
       name: string;
-      render: () => any;
-    }>) => void;
+      render: () => JSX.Element;
+    }>) => () => void;
     navigate: (name: string) => void;
   };
   mode?: {
@@ -85,7 +91,7 @@ export async function tui(api: TuiApi, _options?: TuiOptions) {
      */
     let activeModeDisposer: (() => void) | null = null;
 
-    api.route.register([
+    const routeDisposer = api.route.register([
       {
         name: "model-control-center",
         render: () => {
@@ -93,24 +99,24 @@ export async function tui(api: TuiApi, _options?: TuiOptions) {
           // Idempotent mode management: only push if not already active.
           if (!activeModeDisposer && api.mode?.push) {
             activeModeDisposer = api.mode.push("model-control-center");
+            if (api.lifecycle?.onDispose) {
+              api.lifecycle.onDispose(() => {
+                if (activeModeDisposer) {
+                  activeModeDisposer();
+                  activeModeDisposer = null;
+                }
+              });
+            }
           }
 
-          return {
-            title: "Model Control Center",
-            /**
-             * OpenCode TUI host cleanup contract: the object returned by render()
-             * can expose an onUnmount callback for teardown.
-             */
-            onUnmount: () => {
-              if (activeModeDisposer) {
-                activeModeDisposer();
-                activeModeDisposer = null;
-              }
-            }
-          };
+          return {} as JSX.Element;
         }
       }
     ]);
+
+    if (api.lifecycle?.onDispose && typeof routeDisposer === "function") {
+      api.lifecycle.onDispose(routeDisposer);
+    }
   }
 }
 

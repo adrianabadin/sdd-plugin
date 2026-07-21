@@ -1,7 +1,7 @@
 /**
  * Test for TUI registration and keymap binding with the real OpenCode TUI contract.
  */
-import SddTuiModule from "../src/tui.js";
+import SddTuiModule, { TuiApi } from "../src/tui.js";
 
 const failures: string[] = [];
 
@@ -29,20 +29,33 @@ async function main(): Promise<void> {
   let navigatedRoute: string | null = null;
   let modePushedCount = 0;
   let modeDisposeCalledCount = 0;
-  let lifecycleDisposers: Array<() => void> = [];
+  let layerDisposerCalled = false;
+  let routeDisposerCalled = false;
+  let modeDisposerCalled = false;
+  const lifecycleDisposers: Array<() => void> = [];
 
-  const mockApi = {
+  const mockApi: TuiApi = {
+    lifecycle: {
+      onDispose: (cb: () => void) => {
+        lifecycleDisposers.push(cb);
+      }
+    },
     keymap: {
-      registerLayer: (layer: any) => {
+      registerLayer: (layer) => {
         layerRegistered = true;
         registeredLayer = layer;
-        return () => { /* layer disposer */ };
+        return () => {
+          layerDisposerCalled = true;
+        };
       }
     },
     route: {
-      register: (routes: any[]) => {
+      register: (routes) => {
         routeRegistered = true;
         registeredRoutes = routes;
+        return () => {
+          routeDisposerCalled = true;
+        };
       },
       navigate: (name: string) => {
         navigatedRoute = name;
@@ -51,17 +64,15 @@ async function main(): Promise<void> {
     mode: {
       push: (name: string) => {
         modePushedCount++;
-        return () => { modeDisposeCalledCount++; };
-      }
-    },
-    lifecycle: {
-      onDispose: (cb: () => void) => {
-        lifecycleDisposers.push(cb);
+        return () => {
+          modeDisposerCalled = true;
+          modeDisposeCalledCount++;
+        };
       }
     }
   };
 
-  await SddTuiModule.tui(mockApi as any);
+  await SddTuiModule.tui(mockApi);
 
   // 2. Keymap Registration
   assert(layerRegistered, "api.keymap.registerLayer called");
@@ -88,34 +99,36 @@ async function main(): Promise<void> {
   assert(tuiRoute, "route 'model-control-center' is registered");
   assert(typeof tuiRoute?.render === "function", "route has a render function");
 
-  // 4. Mode Lifecycle (Corrected: No stacking on re-render)
+  // 4. Render Output & Mode Lifecycle
   if (tuiRoute && typeof tuiRoute.render === "function") {
     console.log("  Simulating first render...");
     const result1 = tuiRoute.render();
     assert(modePushedCount === 1, "first render pushes the mode once");
     
+    // Validate host-compatible render output: must not contain title or onUnmount
+    assert(result1 !== null && typeof result1 === "object", "render returns an object (JSX.Element)");
+    assert(!("title" in (result1 as any)), "render result does not contain invented title field");
+    assert(!("onUnmount" in (result1 as any)), "render result does not contain invented onUnmount field");
+
     console.log("  Simulating second render (re-render)...");
     const result2 = tuiRoute.render();
     assert(modePushedCount === 1, "second render DOES NOT push the mode again (idempotent)");
-    
-    // Cleanup check: OpenCode TUI contract for route teardown 
-    // is expected to be via a returned object or a specific lifecycle hook.
-    // Based on review, if it's returning an object with 'onUnmount' or similar.
-    if (result2 && typeof result2.onUnmount === "function") {
-       result2.onUnmount();
-       assert(modeDisposeCalledCount === 1, "onUnmount disposes the mode");
-       
-       console.log("  Simulating third render (after unmount)...");
-       tuiRoute.render();
-       assert(modePushedCount === 2, "rendering after unmount pushes the mode again");
-    } else {
-       // Check for alternative host cleanup (like a signal or returned disposer)
-       assert(false, "Expected a route cleanup mechanism (e.g. onUnmount in render result)");
-    }
+    assert(!("title" in (result2 as any)), "second render result does not contain invented title field");
+    assert(!("onUnmount" in (result2 as any)), "second render result does not contain invented onUnmount field");
   }
 
-  // 5. Lifecycle registration (one-time TUI module cleanup)
-  assert(lifecycleDisposers.length > 0, "disposer registered with api.lifecycle.onDispose");
+  // 5. Lifecycle disposal
+  assert(lifecycleDisposers.length > 0, "disposers registered with api.lifecycle.onDispose");
+  
+  // Trigger cleanup
+  console.log("  Simulating plugin unload (triggering onDispose callbacks)...");
+  for (const dispose of lifecycleDisposers) {
+    dispose();
+  }
+
+  assert(layerDisposerCalled, "keymap layer disposer called on plugin unload");
+  assert(routeDisposerCalled, "route registration disposer called on plugin unload");
+  assert(modeDisposerCalled, "mode push disposer called on plugin unload");
 
   console.log("\n=== TUI TEST SUMMARY ===");
   if (failures.length === 0) {
