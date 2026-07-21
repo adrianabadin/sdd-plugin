@@ -167,6 +167,70 @@ async function main(): Promise<void> {
   detailScreen = transitionScreen(detailScreen, { type: "tab-prev" });
   assert(detailScreen.name === "model-detail" && detailScreen.tab === "pricing", "Tab-prev advances subscription -> pricing");
 
+  // 4b. Task 3 Reducer Extension: Providers, Models, Search Events, Esc Dual-Role, '/' Key
+  console.log("\n4b. Testing Task 3 Reducer Extension & Esc Dual-Role...");
+  let provScreen: ScreenState = { name: "providers", selectedIndex: 0 };
+
+  // Up/down cyclic on providers screen
+  provScreen = transitionScreen(provScreen, { type: "down" }, 3);
+  assert(provScreen.name === "providers" && provScreen.selectedIndex === 1, "Down on providers advances selectedIndex");
+  provScreen = transitionScreen(provScreen, { type: "up" }, 3);
+  assert(provScreen.name === "providers" && provScreen.selectedIndex === 0, "Up on providers decreases selectedIndex");
+
+  // '/' on providers screen is a no-op
+  const provSlash = transitionScreen(provScreen, { type: "search-start" });
+  assert(JSON.stringify(provSlash) === JSON.stringify(provScreen), "'/' (search-start) on providers screen is a no-op");
+
+  // Models screen state with searchActive and query
+  let modScreen: ScreenState = {
+    name: "models",
+    providerId: "openai",
+    selectedIndex: 0,
+    query: "",
+    searchActive: false,
+  };
+
+  // '/' (search-start) on models screen activates search mode
+  modScreen = transitionScreen(modScreen, { type: "search-start" });
+  assert(
+    modScreen.name === "models" && modScreen.searchActive === true,
+    "'/' (search-start) on models screen sets searchActive to true"
+  );
+
+  // search-input updates query
+  modScreen = transitionScreen(modScreen, { type: "search-input", query: "gpt" });
+  assert(
+    modScreen.name === "models" && modScreen.query === "gpt",
+    "search-input updates model search query to 'gpt'"
+  );
+
+  // Esc when searchActive=true triggers search-stop (exits search mode KEEPING query)
+  modScreen = transitionScreen(modScreen, { type: "search-stop" });
+  assert(
+    modScreen.name === "models" && modScreen.searchActive === false && modScreen.query === "gpt",
+    "search-stop (Esc) exits search mode while preserving query ('gpt')"
+  );
+
+  // Back handling in handleNavigation: when searchActive=true, back event emits search-stop instead of popping stack
+  let modStack: ScreenState[] = [
+    { name: "main-menu", selectedIndex: 0 },
+    { name: "providers", selectedIndex: 0 },
+    { name: "models", providerId: "openai", selectedIndex: 0, query: "gpt", searchActive: true },
+  ];
+
+  let navRes = handleNavigation(modStack, { type: "back" });
+  assert(navRes.stack.length === 3, "Esc with searchActive=true does NOT pop stack (height remains 3)");
+  const topScreen = navRes.stack[navRes.stack.length - 1];
+  assert(
+    topScreen?.name === "models" && topScreen.searchActive === false && topScreen.query === "gpt",
+    "Esc with searchActive=true exits search mode and preserves query 'gpt'"
+  );
+
+  // Esc again (searchActive=false) pops stack to providers
+  navRes = handleNavigation(navRes.stack, { type: "back" });
+  assert(navRes.stack.length === 2, "Esc with searchActive=false pops stack (height becomes 2)");
+  assert(navRes.stack[1]?.name === "providers", "Returned to providers screen");
+
   // 5. MainMenu Component Render Structure
   console.log("\n5. Testing MainMenu Component Rendering...");
   let registeredLayer: any = null;

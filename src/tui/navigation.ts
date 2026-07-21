@@ -17,8 +17,14 @@ export const MENU_OPTIONS: readonly MenuOption[] = ["models", "quarantines"] as 
 
 export type ScreenState =
   | { name: "main-menu"; selectedIndex: number }
-  | { name: "providers" }
-  | { name: "models"; providerId: string }
+  | { name: "providers"; selectedIndex: number }
+  | {
+      name: "models";
+      providerId: string;
+      selectedIndex: number;
+      query: string;
+      searchActive: boolean;
+    }
   | { name: "model-detail"; providerId: string; modelId: string; tab: DetailTab }
   | { name: "quarantines" };
 
@@ -28,19 +34,36 @@ export type NavigationEvent =
   | { type: "activate" }
   | { type: "back" }
   | { type: "tab-next" }
-  | { type: "tab-prev" };
+  | { type: "tab-prev" }
+  | { type: "search-start" }
+  | { type: "search-stop" }
+  | { type: "search-input"; query: string };
 
 export function createInitialStack(): ScreenState[] {
   return [{ name: "main-menu", selectedIndex: 0 }];
 }
 
-export function transitionScreen(screen: ScreenState, event: NavigationEvent): ScreenState {
+export function transitionScreen(
+  screen: ScreenState,
+  event: NavigationEvent,
+  maxIndex: number = 0
+): ScreenState {
   switch (event.type) {
     case "up": {
       if (screen.name === "main-menu") {
         const nextIndex =
           (screen.selectedIndex - 1 + MENU_OPTIONS.length) % MENU_OPTIONS.length;
         return { name: "main-menu", selectedIndex: nextIndex };
+      }
+      if (screen.name === "providers") {
+        const total = maxIndex > 0 ? maxIndex : 1;
+        const nextIndex = (screen.selectedIndex - 1 + total) % total;
+        return { name: "providers", selectedIndex: nextIndex };
+      }
+      if (screen.name === "models") {
+        const total = maxIndex > 0 ? maxIndex : 1;
+        const nextIndex = (screen.selectedIndex - 1 + total) % total;
+        return { ...screen, selectedIndex: nextIndex };
       }
       return screen;
     }
@@ -49,6 +72,37 @@ export function transitionScreen(screen: ScreenState, event: NavigationEvent): S
       if (screen.name === "main-menu") {
         const nextIndex = (screen.selectedIndex + 1) % MENU_OPTIONS.length;
         return { name: "main-menu", selectedIndex: nextIndex };
+      }
+      if (screen.name === "providers") {
+        const total = maxIndex > 0 ? maxIndex : 1;
+        const nextIndex = (screen.selectedIndex + 1) % total;
+        return { name: "providers", selectedIndex: nextIndex };
+      }
+      if (screen.name === "models") {
+        const total = maxIndex > 0 ? maxIndex : 1;
+        const nextIndex = (screen.selectedIndex + 1) % total;
+        return { ...screen, selectedIndex: nextIndex };
+      }
+      return screen;
+    }
+
+    case "search-start": {
+      if (screen.name === "models") {
+        return { ...screen, searchActive: true };
+      }
+      return screen;
+    }
+
+    case "search-stop": {
+      if (screen.name === "models") {
+        return { ...screen, searchActive: false };
+      }
+      return screen;
+    }
+
+    case "search-input": {
+      if (screen.name === "models") {
+        return { ...screen, query: event.query, selectedIndex: 0 };
       }
       return screen;
     }
@@ -91,7 +145,10 @@ export function popScreen(stack: ScreenState[]): { stack: ScreenState[]; exited:
 
 export function handleNavigation(
   stack: ScreenState[],
-  event: NavigationEvent
+  event: NavigationEvent,
+  maxIndex: number = 0,
+  selectedProviderId?: string,
+  selectedModelId?: string
 ): { stack: ScreenState[]; exited: boolean } {
   if (stack.length === 0) {
     return { stack: [], exited: true };
@@ -103,6 +160,10 @@ export function handleNavigation(
   }
 
   if (event.type === "back") {
+    if (currentScreen.name === "models" && currentScreen.searchActive) {
+      const updatedScreen: ScreenState = { ...currentScreen, searchActive: false };
+      return { stack: [...stack.slice(0, -1), updatedScreen], exited: false };
+    }
     return popScreen(stack);
   }
 
@@ -110,16 +171,47 @@ export function handleNavigation(
     if (currentScreen.name === "main-menu") {
       const selectedOption = MENU_OPTIONS[currentScreen.selectedIndex];
       if (selectedOption === "models") {
-        return { stack: pushScreen(stack, { name: "providers" }), exited: false };
+        return {
+          stack: pushScreen(stack, { name: "providers", selectedIndex: 0 }),
+          exited: false,
+        };
       }
       if (selectedOption === "quarantines") {
         return { stack: pushScreen(stack, { name: "quarantines" }), exited: false };
       }
     }
+
+    if (currentScreen.name === "providers") {
+      const targetProviderId = selectedProviderId ?? "unknown";
+      return {
+        stack: pushScreen(stack, {
+          name: "models",
+          providerId: targetProviderId,
+          selectedIndex: 0,
+          query: "",
+          searchActive: false,
+        }),
+        exited: false,
+      };
+    }
+
+    if (currentScreen.name === "models") {
+      const targetModelId = selectedModelId ?? "unknown";
+      return {
+        stack: pushScreen(stack, {
+          name: "model-detail",
+          providerId: currentScreen.providerId,
+          modelId: targetModelId,
+          tab: "overview",
+        }),
+        exited: false,
+      };
+    }
+
     return { stack, exited: false };
   }
 
-  const updatedScreen = transitionScreen(currentScreen, event);
+  const updatedScreen = transitionScreen(currentScreen, event, maxIndex);
   const updatedStack = [...stack.slice(0, -1), updatedScreen];
   return { stack: updatedStack, exited: false };
 }

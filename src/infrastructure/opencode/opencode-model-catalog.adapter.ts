@@ -446,7 +446,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 export interface OpenCodeClient {
   app?: {
-    log?: (message: string) => unknown;
+    log?: unknown;
   };
   config?: {
     providers?: () => Promise<unknown>;

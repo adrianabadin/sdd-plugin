@@ -8,6 +8,7 @@ import type { JSX } from "@opentui/solid";
 import { onCleanup } from "solid-js";
 import { createComponent } from "solid-js/web";
 import ModelControlCenter from "./tui/ModelControlCenter.js";
+import { OpenCodeModelCatalogAdapter } from "./infrastructure/opencode/opencode-model-catalog.adapter.js";
 
 export type TuiApi = TuiPluginApi;
 
@@ -55,13 +56,15 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
     }
   }
 
+  // Build canonical OpenCodeModelCatalogAdapter from api.client
+  const catalogPort = new OpenCodeModelCatalogAdapter(api.client);
+
   // 2. Register Route
   if (api.route?.register) {
     const routeDisposer = api.route.register([
       {
         name: "model-control-center",
         render: () => {
-          // Task 1: Foundation registration.
           // Push mode inside Solid route render and register onCleanup to pop mode when leaving route.
           if (api.mode?.push) {
             const popMode = api.mode.push("model-control-center");
@@ -70,7 +73,7 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
             });
           }
 
-          return createComponent(ModelControlCenter, { api });
+          return createComponent(ModelControlCenter, { api, catalog: catalogPort });
         },
       },
     ]);
