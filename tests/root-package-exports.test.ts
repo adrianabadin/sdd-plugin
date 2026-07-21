@@ -5,8 +5,8 @@
  * 2. The subpath export `./tui` (`dist/tui.js`) exports an object with `{ id, tui }` matching the TUI plugin module contract.
  * Note: `npm run build` must be executed prior to running this test.
  */
-import RootPlugin, { SddPlugin } from "../dist/bootstrap/index.js";
-import TuiModule from "../dist/tui.js";
+import RootPlugin, { SddPlugin } from "sdd-plugin2";
+import TuiModule from "sdd-plugin2/tui";
 
 const failures: string[] = [];
 
