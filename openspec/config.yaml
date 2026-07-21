@@ -1,0 +1,64 @@
+schema: spec-driven
+
+context: |
+  Tech stack: TypeScript (ESM), SolidJS, Prisma, LibSQL (SQLite)
+  Architecture: OpenCode TUI interface, SQLite database persists everything, cross-bundle runtime state via globalThis registry
+  Testing: Custom assertion scripts run with tsx (npm run test:all)
+  Style: ESM, TypeScript, SolidJS, English comments and TUI copy
+
+strict_tdd: true
+delivery_strategy: auto-forecast
+review_budget: 800
+
+testing:
+  strict_tdd: true
+  detected: "2026-07-21"
+  runner:
+    command: "npm run test"
+    framework: "Custom Assertions / TSX"
+  layers:
+    unit:
+      available: true
+      tool: "tsx"
+    integration:
+      available: true
+      tool: "tsx"
+    e2e:
+      available: false
+      tool: "—"
+  coverage:
+    available: false
+    command: "—"
+  quality:
+    linter:
+      available: false
+      command: "—"
+    type_checker:
+      available: true
+      command: "npm run build"
+    formatter:
+      available: false
+      command: "—"
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns
+    tdd: true
+    test_command: "npm run test"
+  verify:
+    test_command: "npm run test"
+    build_command: "npm run build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas

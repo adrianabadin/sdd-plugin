@@ -20,6 +20,7 @@ import { OpenCodeModelCatalogAdapter } from "../infrastructure/opencode/opencode
 import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
 import { resolveDatabasePath } from "../infrastructure/runtime/database-path.js";
 import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
+import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 
 export function getPrismaClient(): PrismaClient {
   const dbPath = resolveDatabasePath();
@@ -163,6 +164,30 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
             }
           }
         }
+      }
+
+      // Check quarantine store hydration & active status
+      try {
+        const quarantineStore = getGlobalQuarantineStore();
+        if (quarantineStore.snapshot().length === 0) {
+          try {
+            const quarantines = await repository.listQuarantines();
+            if (quarantines.length > 0) {
+              quarantineStore.hydrate(quarantines);
+            }
+          } catch (err) {
+            logger.error("Failed DB hydration for quarantine store", err);
+          }
+        }
+
+        if (requestedModel && requestedModel.includes("/")) {
+          const [pId, mId] = requestedModel.split("/", 2);
+          if (pId && mId && quarantineStore.isActive(pId, mId)) {
+            logger.info(`Target model ${requestedModel} is currently quarantined.`);
+          }
+        }
+      } catch (err) {
+        logger.error("Quarantine check error during task interception", err);
       }
 
       coordinator.trigger();

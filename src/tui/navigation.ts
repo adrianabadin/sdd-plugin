@@ -32,7 +32,7 @@ export type ScreenState =
       tab: DetailTab;
       focus?: { area: "tabs" } | { area: "fields"; index: number };
     }
-  | { name: "quarantines" };
+  | { name: "quarantines"; selectedIndex: number };
 
 export type NavigationEvent =
   | { type: "up" }
@@ -77,6 +77,12 @@ export function transitionScreen(
         const nextIndex = (screen.selectedIndex - 1 + total) % total;
         return { ...screen, selectedIndex: nextIndex };
       }
+      if (screen.name === "quarantines") {
+        const total = maxIndex > 0 ? maxIndex : 1;
+        const currentIdx = screen.selectedIndex;
+        const nextIndex = (currentIdx - 1 + total) % total;
+        return { ...screen, selectedIndex: nextIndex };
+      }
       return screen;
     }
 
@@ -93,6 +99,12 @@ export function transitionScreen(
       if (screen.name === "models") {
         const total = maxIndex > 0 ? maxIndex : 1;
         const nextIndex = (screen.selectedIndex + 1) % total;
+        return { ...screen, selectedIndex: nextIndex };
+      }
+      if (screen.name === "quarantines") {
+        const total = maxIndex > 0 ? maxIndex : 1;
+        const currentIdx = screen.selectedIndex;
+        const nextIndex = (currentIdx + 1) % total;
         return { ...screen, selectedIndex: nextIndex };
       }
       return screen;
@@ -239,7 +251,7 @@ export function handleNavigation(
         };
       }
       if (selectedOption === "quarantines") {
-        return { stack: pushScreen(stack, { name: "quarantines" }), exited: false };
+        return { stack: pushScreen(stack, { name: "quarantines", selectedIndex: 0 }), exited: false };
       }
     }
 

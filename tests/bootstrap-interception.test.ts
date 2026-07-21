@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { SddPlugin } from '../src/bootstrap/index.js';
 import { getOrCreateModelConfigRegistry } from '../src/infrastructure/runtime/model-config-registry.js';
+import { getGlobalQuarantineStore } from '../src/infrastructure/runtime/quarantine-store.js';
 import { PrismaClient } from '@prisma/client';
 import { PrismaLibSql } from '@prisma/adapter-libsql';
 import { execSync } from 'node:child_process';
@@ -17,11 +18,11 @@ const prismaAdapter = new PrismaLibSql({ url: `file:${dbPath}` });
 const prisma = new PrismaClient({ adapter: prismaAdapter });
 
 async function runTest() {
-  // Seed provider & model in DB
+  // Seed provider & model in DB with a quarantine
   await prisma.provider.upsert({
     where: { id: 'openai' },
-    update: {},
-    create: { id: 'openai', name: 'OpenAI', isBlocked: false },
+    update: { quarantineType: 'permanent' },
+    create: { id: 'openai', name: 'OpenAI', isBlocked: false, quarantineType: 'permanent' },
   });
   await prisma.model.upsert({
     where: { id: 'gpt-4o' },
@@ -49,6 +50,11 @@ async function runTest() {
   assert.equal(cached.providerId, 'openai');
   assert.equal(cached.modelId, 'gpt-4o');
   console.log('  pass: registry-first DB read-through hydration on task interception');
+
+  // Assert QuarantineStore rehydrated from DB
+  const qStore = getGlobalQuarantineStore();
+  assert.equal(qStore.isActive('openai', 'gpt-4o'), true);
+  console.log('  pass: quarantine store DB read-through hydration on task interception');
 
   await prisma.$disconnect();
 }

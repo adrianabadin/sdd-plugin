@@ -11,8 +11,14 @@ import ModelControlCenter from "./tui/ModelControlCenter.js";
 import { OpenCodeModelCatalogAdapter } from "./infrastructure/opencode/opencode-model-catalog.adapter.js";
 import { PrismaModelRepositoryAdapter } from "./infrastructure/prisma/prisma-model-repository.adapter.js";
 import { SaveModelDetailUseCase } from "./application/save-model-detail/save-model-detail.use-case.js";
+import {
+  ListQuarantinesUseCase,
+  SetQuarantineUseCase,
+  ReleaseQuarantineUseCase,
+} from "./application/quarantine/index.js";
 import { resolveDatabasePath } from "./infrastructure/runtime/database-path.js";
 import { getOrCreateModelConfigRegistry } from "./infrastructure/runtime/model-config-registry.js";
+import { getGlobalQuarantineStore } from "./infrastructure/runtime/quarantine-store.js";
 import { PrismaClient } from "@prisma/client";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 
@@ -68,6 +74,10 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
   // Build additive Prisma detail query & write adapters using shared db authority
   let detailQueryPort: PrismaModelRepositoryAdapter | undefined;
   let saveDetailUseCase: SaveModelDetailUseCase | undefined;
+  let quarantinePort: PrismaModelRepositoryAdapter | undefined;
+  let listQuarantinesUseCase: ListQuarantinesUseCase | undefined;
+  let setQuarantineUseCase: SetQuarantineUseCase | undefined;
+  let releaseQuarantineUseCase: ReleaseQuarantineUseCase | undefined;
   try {
     const dbPath = resolveDatabasePath();
     process.env.DATABASE_URL = `file:${dbPath}`;
@@ -75,12 +85,22 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
     const prisma = new PrismaClient({ adapter: prismaAdapter });
     const repositoryAdapter = new PrismaModelRepositoryAdapter(prisma);
     detailQueryPort = repositoryAdapter;
+    quarantinePort = repositoryAdapter;
 
     const registry = getOrCreateModelConfigRegistry();
     saveDetailUseCase = new SaveModelDetailUseCase(repositoryAdapter, registry);
+
+    const qStore = getGlobalQuarantineStore();
+    listQuarantinesUseCase = new ListQuarantinesUseCase(repositoryAdapter, qStore);
+    setQuarantineUseCase = new SetQuarantineUseCase(repositoryAdapter, qStore);
+    releaseQuarantineUseCase = new ReleaseQuarantineUseCase(repositoryAdapter, qStore);
   } catch {
     detailQueryPort = undefined;
     saveDetailUseCase = undefined;
+    quarantinePort = undefined;
+    listQuarantinesUseCase = undefined;
+    setQuarantineUseCase = undefined;
+    releaseQuarantineUseCase = undefined;
   }
 
   // 2. Register Route
@@ -102,6 +122,10 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
             catalog: catalogPort,
             detailQuery: detailQueryPort,
             saveDetailUseCase: saveDetailUseCase,
+            quarantinePort,
+            listQuarantinesUseCase,
+            setQuarantineUseCase,
+            releaseQuarantineUseCase,
           });
         },
       },

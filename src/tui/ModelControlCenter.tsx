@@ -14,6 +14,7 @@ import MainMenu from "./MainMenu.js";
 import ProvidersScreen from "./ProvidersScreen.js";
 import ModelsScreen from "./ModelsScreen.js";
 import ModelDetailScreen from "./ModelDetailScreen.js";
+import QuarantinesScreen from "./QuarantinesScreen.js";
 import {
   mergeModelDetail,
   createDraft,
@@ -30,12 +31,23 @@ import {
 } from "./navigation.js";
 
 import type { SaveModelDetailUseCase } from "../application/save-model-detail/save-model-detail.use-case.js";
+import type { QuarantineWritePort } from "../ports/quarantine-write.port.js";
+import type {
+  ListQuarantinesUseCase,
+  SetQuarantineUseCase,
+  ReleaseQuarantineUseCase,
+} from "../application/quarantine/index.js";
+import type { QuarantineEntry } from "../domain/model/quarantine.js";
 
 export interface ModelControlCenterProps {
   api: TuiPluginApi;
   catalog?: ModelCatalogPort | undefined;
   detailQuery?: ModelDetailQueryPort | undefined;
   saveDetailUseCase?: SaveModelDetailUseCase | undefined;
+  quarantinePort?: QuarantineWritePort | undefined;
+  listQuarantinesUseCase?: ListQuarantinesUseCase | undefined;
+  setQuarantineUseCase?: SetQuarantineUseCase | undefined;
+  releaseQuarantineUseCase?: ReleaseQuarantineUseCase | undefined;
 }
 
 export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element {
@@ -49,7 +61,38 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
   const [detailNotice, setDetailNotice] = createSignal<string | undefined>(undefined);
   const [detailValidation, setDetailValidation] = createSignal<ValidationResult | undefined>(undefined);
 
+  // Task 6 Quarantine signals
+  const [quarantines, setQuarantines] = createSignal<QuarantineEntry[]>([]);
+  const [quarantineLoading, setQuarantineLoading] = createSignal<boolean>(false);
+  const [quarantineError, setQuarantineError] = createSignal<string | undefined>(undefined);
+  const [quarantineNotice, setQuarantineNotice] = createSignal<string | undefined>(undefined);
+
   const initialRouteName = props.api.route?.current?.name ?? "home";
+
+  // Effect to load quarantine entries when entering quarantines screen
+  createEffect(() => {
+    const current = currentScreen();
+    if (current.name === "quarantines") {
+      setQuarantineLoading(true);
+      setQuarantineError(undefined);
+
+      const fetcher = props.listQuarantinesUseCase
+        ? props.listQuarantinesUseCase.execute()
+        : props.quarantinePort
+          ? props.quarantinePort.listQuarantines()
+          : Promise.resolve([]);
+
+      fetcher
+        .then((entries) => {
+          setQuarantines(entries);
+          setQuarantineLoading(false);
+        })
+        .catch((err: unknown) => {
+          setQuarantineError(err instanceof Error ? err.message : String(err));
+          setQuarantineLoading(false);
+        });
+    }
+  });
 
   // Effect to load model detail state when entering model-detail screen
   createEffect(() => {
@@ -116,6 +159,10 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
   });
 
   function getVisibleCount(screen: ScreenState): number {
+    if (screen.name === "quarantines") {
+      return quarantines().length;
+    }
+
     const state = catalogState();
     if (state.status !== "ready") return 0;
 
@@ -367,11 +414,17 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         });
       }
 
-      case "quarantines":
-        return createComponent(props.api.ui.DialogAlert, {
-          title: "Quarantines",
-          message: "Quarantines placeholder view (Task 5)",
-        });
+      case "quarantines": {
+        const screenProps: Record<string, unknown> = {
+          api: props.api,
+          entries: quarantines(),
+          selectedIndex: screen.selectedIndex,
+          loading: quarantineLoading(),
+        };
+        if (quarantineError() !== undefined) screenProps.error = quarantineError();
+        if (quarantineNotice() !== undefined) screenProps.notice = quarantineNotice();
+        return createComponent(QuarantinesScreen, screenProps as never);
+      }
 
       case "models": {
         if (catState.status === "loading") {

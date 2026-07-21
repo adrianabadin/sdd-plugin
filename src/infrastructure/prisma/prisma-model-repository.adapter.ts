@@ -26,13 +26,14 @@ import {
 } from "../../domain/model-detail/metadata.js";
 import type { RefreshTraceContext } from "../../ports/model-catalog.port.js";
 import type { ModelRefreshTraceLogger } from "../logging/model-refresh-trace.logger.js";
-import type { QuarantineType } from "../../domain/model/quarantine.js";
+import type { QuarantineType, QuarantineEntry, QuarantineTarget } from "../../domain/model/quarantine.js";
+import type { QuarantineWritePort, SetQuarantineCommand } from "../../ports/quarantine-write.port.js";
 
 /**
- * Adapter: implement `ModelRepositoryPort`, `ModelDetailQueryPort`, and `ModelDetailWritePort` against Prisma.
+ * Adapter: implement `ModelRepositoryPort`, `ModelDetailQueryPort`, `ModelDetailWritePort`, and `QuarantineWritePort` against Prisma.
  */
 export class PrismaModelRepositoryAdapter
-  implements ModelRepositoryPort, ModelDetailQueryPort, ModelDetailWritePort
+  implements ModelRepositoryPort, ModelDetailQueryPort, ModelDetailWritePort, QuarantineWritePort
 {
   private readonly trace: ModelRefreshTraceLogger | undefined;
 
@@ -533,6 +534,113 @@ export class PrismaModelRepositoryAdapter
       }
       throw error;
     }
+  }
+
+  async setQuarantine(cmd: SetQuarantineCommand): Promise<QuarantineEntry> {
+    const until = cmd.type === "ttl" && cmd.until ? cmd.until : null;
+    await this.prisma.$transaction(async (tx) => {
+      if (cmd.level === "provider") {
+        if (!cmd.providerId) throw new Error("providerId required for provider quarantine");
+        await tx.provider.update({
+          where: { id: cmd.providerId },
+          data: { quarantineType: cmd.type, quarantineUntil: until },
+        });
+      } else if (cmd.level === "model") {
+        if (!cmd.modelId) throw new Error("modelId required for model quarantine");
+        await tx.model.update({
+          where: { id: cmd.modelId },
+          data: { quarantineType: cmd.type, quarantineUntil: until },
+        });
+      } else if (cmd.level === "modelProvider") {
+        if (!cmd.providerId || !cmd.modelId)
+          throw new Error("providerId and modelId required for connection quarantine");
+        await tx.modelProvider.update({
+          where: { modelId_providerId: { modelId: cmd.modelId, providerId: cmd.providerId } },
+          data: { quarantineType: cmd.type, quarantineUntil: until },
+        });
+      }
+    });
+    const entry: QuarantineEntry = {
+      level: cmd.level,
+      type: cmd.type,
+      until,
+    };
+    if (cmd.providerId !== undefined) entry.providerId = cmd.providerId;
+    if (cmd.modelId !== undefined) entry.modelId = cmd.modelId;
+    return entry;
+  }
+
+  async releaseQuarantine(target: QuarantineTarget): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      if (target.level === "provider") {
+        if (!target.providerId) throw new Error("providerId required to release provider quarantine");
+        await tx.provider.update({
+          where: { id: target.providerId },
+          data: { quarantineType: null, quarantineUntil: null },
+        });
+      } else if (target.level === "model") {
+        if (!target.modelId) throw new Error("modelId required to release model quarantine");
+        await tx.model.update({
+          where: { id: target.modelId },
+          data: { quarantineType: null, quarantineUntil: null },
+        });
+      } else if (target.level === "modelProvider") {
+        if (!target.providerId || !target.modelId)
+          throw new Error("providerId and modelId required to release connection quarantine");
+        await tx.modelProvider.update({
+          where: { modelId_providerId: { modelId: target.modelId, providerId: target.providerId } },
+          data: { quarantineType: null, quarantineUntil: null },
+        });
+      }
+    });
+  }
+
+  async listQuarantines(): Promise<QuarantineEntry[]> {
+    const [providers, models, modelProviders] = await Promise.all([
+      this.prisma.provider.findMany({
+        where: { quarantineType: { not: null } },
+      }),
+      this.prisma.model.findMany({
+        where: { quarantineType: { not: null } },
+      }),
+      this.prisma.modelProvider.findMany({
+        where: { quarantineType: { not: null } },
+      }),
+    ]);
+
+    const result: QuarantineEntry[] = [];
+    for (const p of providers) {
+      if (p.quarantineType) {
+        result.push({
+          level: "provider",
+          providerId: p.id,
+          type: p.quarantineType as QuarantineType,
+          until: p.quarantineUntil,
+        });
+      }
+    }
+    for (const m of models) {
+      if (m.quarantineType) {
+        result.push({
+          level: "model",
+          modelId: m.id,
+          type: m.quarantineType as QuarantineType,
+          until: m.quarantineUntil,
+        });
+      }
+    }
+    for (const mp of modelProviders) {
+      if (mp.quarantineType) {
+        result.push({
+          level: "modelProvider",
+          providerId: mp.providerId,
+          modelId: mp.modelId,
+          type: mp.quarantineType as QuarantineType,
+          until: mp.quarantineUntil,
+        });
+      }
+    }
+    return result;
   }
 }
 
