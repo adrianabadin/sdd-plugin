@@ -65,6 +65,12 @@ The `./tui` subpath export provides the OpenCode Model Control Center TUI module
 - **Teardown & Cleanup**: Leaving the route invokes Solid `onCleanup` which pops the mode. Unloading the plugin disposes keymap and route registrations via `api.lifecycle.onDispose`.
 - **Peer / UI dependencies**: Compatible with `@opentui/solid`, `@opentui/core`, and `@opentui/keymap` (`^0.4.5`).
 
+### TUI Validation & Testing Commands:
+- **Node.js Host Contract & Lifecycle Test**: `npm run test:tui`
+  Validates keymap registration, `ctrl+alt+f` binding, command execution route navigation, route mode push/pop (`onCleanup`), and host component props contract.
+- **Bun OpenTUI Real Renderer Test**: `npm run test:tui:bun` (or `bun tests/tui-bun-renderer.test.ts`)
+  Invokes `@opentui/solid` `testRender` against the Solid/OpenTUI route component. OpenCode executes plugins under Bun; this test requires the Bun runtime (with native FFI) and fails with an explicit error under Node.js.
+
 ## CLI Reference
 
 ```

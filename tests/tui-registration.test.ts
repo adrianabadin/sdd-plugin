@@ -37,6 +37,8 @@ async function main(): Promise<void> {
   let routeDisposerCalled = false;
   const lifecycleDisposers: Array<() => void> = [];
 
+  let dialogAlertInvocations: Array<{ title?: string; message?: string }> = [];
+
   const mockApi: TuiPluginApi = {
     app: { version: "1.18.4" },
     attention: {} as never,
@@ -73,16 +75,10 @@ async function main(): Promise<void> {
       }
     },
     ui: {
-      DialogAlert: (props) =>
-        createComponent(
-          (p) =>
-            ({
-              kind: "opentui-element",
-              name: "DialogAlert",
-              props: p,
-            }) as unknown as JSX.Element,
-          props,
-        ),
+      DialogAlert: (props) => {
+        dialogAlertInvocations.push(props);
+        return createComponent((p) => null as unknown as JSX.Element, props);
+      },
       Dialog: (() => null) as never,
       DialogConfirm: (() => null) as never,
       DialogPrompt: (() => null) as never,
@@ -150,10 +146,13 @@ async function main(): Promise<void> {
 
     assert(modePushedCount === 1, "route render pushes route-specific mode on mount");
     assert(modePoppedCount === 0, "mode remains active while route is mounted");
-    assert(renderResult !== null && typeof renderResult === "object", "render returns valid element");
-    const elem = renderResult as unknown as { kind: string; name: string; props: { title: string; message: string } };
-    assert(elem.kind === "opentui-element" && elem.name === "DialogAlert", "rendered route returns DialogAlert OpenTUI element");
-    assert(elem.props.title === "Model Control Center" && elem.props.message === "Model Control Center placeholder view", "DialogAlert receives correct title and message props");
+    assert(dialogAlertInvocations.length === 1, "route render invoked api.ui.DialogAlert host component");
+    const lastInvocation = dialogAlertInvocations[dialogAlertInvocations.length - 1];
+    assert(
+      lastInvocation?.title === "Model Control Center" &&
+        lastInvocation?.message === "Model Control Center placeholder view",
+      "DialogAlert received correct title and message props per host contract"
+    );
 
     console.log("  Simulating route leave (Solid root cleanup)...");
     if (disposeRouteRoot) {
@@ -179,9 +178,15 @@ async function main(): Promise<void> {
   }
 
   // 5. Direct helper render check
-  const placeholderElement = renderPlaceholderRoute(mockApi) as unknown as { kind: string; name: string; props: { title: string; message: string } };
-  assert(placeholderElement !== null && typeof placeholderElement === "object", "renderPlaceholderRoute returns valid element");
-  assert(placeholderElement.kind === "opentui-element" && placeholderElement.props.title === "Model Control Center", "renderPlaceholderRoute returns DialogAlert with correct props");
+  dialogAlertInvocations = [];
+  renderPlaceholderRoute(mockApi);
+  assert(dialogAlertInvocations.length === 1, "renderPlaceholderRoute invoked api.ui.DialogAlert");
+  const directInvocation = dialogAlertInvocations[0];
+  assert(
+    directInvocation?.title === "Model Control Center" &&
+      directInvocation?.message === "Model Control Center placeholder view",
+    "renderPlaceholderRoute passes correct host-contract props to DialogAlert"
+  );
 
   // 6. Lifecycle disposal
   assert(lifecycleDisposers.length > 0, "disposers registered with api.lifecycle.onDispose");
