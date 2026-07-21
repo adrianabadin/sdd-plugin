@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "strict": true,
+    "skipLibCheck": false,
+    "noImplicitAny": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force"
+  },
+  "include": [
+    "tests/tui-registration.test.ts",
+    "tests/tui-bun-renderer.test.ts",
+    "tests/root-package-exports.test.ts",
+    "src/**/*.ts"
+  ],
+  "exclude": ["src/index.ts"]
+}

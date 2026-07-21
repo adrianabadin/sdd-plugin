@@ -49,17 +49,19 @@ pmc sync-context
 
 The `./tui` subpath export provides the OpenCode Model Control Center TUI module (`{ id: "sdd-plugin.tui", tui }`).
 
-> **Configuration Notice**: OpenCode requires TUI modules to be declared in `tui.json` (or under the TUI plugin configuration section), NOT in the main server plugin list (`opencode.json` `plugin: [...]`). Main server plugins operate in non-DOM/headless background node runtimes and lack `@opentui/*` UI primitives.
+> **Configuration Notice**: OpenCode resolves TUI modules from package specifications declared in `tui.json` (or under the host TUI plugin configuration section), NOT by listing `"sdd-plugin2/tui"` directly in `opencode.json` `plugin: [...]`. Main server plugins operate in non-DOM/headless background node runtimes and lack `@opentui/*` UI primitives.
+> When the host encounters a package specifier in `tui.json` (such as `"sdd-plugin2"` or `"/absolute/path/to/sdd-plugin2"`), it resolves the package's `package.json` `exports["./tui"]` mapping (`./dist/tui.js`) to load `{ id, tui }`.
 
 ### Correct TUI Configuration (`tui.json` or TUI plugin config):
 ```json
 {
-  "plugin": ["sdd-plugin2/tui"]
+  "plugin": ["sdd-plugin2"]
 }
 ```
+*Note: Specifying `"sdd-plugin2"` in `tui.json` causes OpenCode host resolution to check `package.json` `exports["./tui"]` and load the `{ id, tui }` module.*
 
 ### Activation Contract:
-- **Module export**: `sdd-plugin2/tui` exports a TUI plugin module matching `{ id: "sdd-plugin.tui", tui: (api) => ... }`.
+- **Module export**: `sdd-plugin2` via `package.json` `exports["./tui"]` exports a TUI plugin module matching `{ id: "sdd-plugin.tui", tui: (api) => ... }`.
 - **Keymap shortcut**: Press `ctrl+alt+f` in `base` mode. This triggers the command `model-control-center.open` registered via `api.keymap.registerLayer`, navigating to the `model-control-center` route.
 - **Route rendering**: The route is registered with `api.route.register`. When entered, it pushes a route-specific mode (`model-control-center`) via `api.mode.push` and renders the Solid interface (`DialogAlert` placeholder component).
 - **Teardown & Cleanup**: Leaving the route invokes Solid `onCleanup` which pops the mode. Unloading the plugin disposes keymap and route registrations via `api.lifecycle.onDispose`.

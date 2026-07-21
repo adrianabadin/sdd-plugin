@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   assert(typeof SddTuiModule.tui === "function", "tui is a function");
 
   let layerRegistered = false;
-  let registeredLayer: Parameters<TuiPluginApi["keymap"]["registerLayer"]>[0] | null = null;
+  let registeredLayer: any = null;
   let routeRegistered = false;
   let registeredRoutes: TuiRouteDefinition[] = [];
   let navigatedRoute: string | null = null;
@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     attention: {} as never,
     keys: {} as never,
     keymap: {
-      registerLayer: (layer) => {
+      registerLayer: (layer: unknown) => {
         layerRegistered = true;
         registeredLayer = layer;
         return () => {
@@ -113,11 +113,11 @@ async function main(): Promise<void> {
   if (registeredLayer) {
     assert(registeredLayer.mode === "base", "layer mode is 'base'");
     assert(Array.isArray(registeredLayer.commands), "layer has commands array");
-    const openCmd = registeredLayer.commands.find((c) => c.name === "model-control-center.open");
+    const openCmd = registeredLayer.commands.find((c: { name?: string; run?: () => Promise<void> | void }) => c.name === "model-control-center.open");
     assert(Boolean(openCmd), "found 'model-control-center.open' command");
     
     assert(Array.isArray(registeredLayer.bindings), "layer has bindings array");
-    const binding = registeredLayer.bindings.find((b) => b.key === "ctrl+alt+f");
+    const binding = registeredLayer.bindings.find((b: { key?: string; cmd?: string }) => b.key === "ctrl+alt+f");
     assert(Boolean(binding && binding.cmd === "model-control-center.open"), "binding 'ctrl+alt+f' points to open command");
 
     // Test command execution

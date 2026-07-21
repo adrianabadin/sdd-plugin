@@ -127,7 +127,7 @@ async function main(): Promise<void> {
     assert(parsed.length === 2, "parsed JSON count matches line count (got " + parsed.length + ")");
 
     const start = parsed[0]!;
-    assert(start.timestamp === "2026-01-01T00:00:00.000Z", "timestamp is ISO 8601 from clock");
+    assert((start as unknown as { timestamp: string }).timestamp === "2026-01-01T00:00:00.000Z", "timestamp is ISO 8601 from clock");
     assert(start.correlationId === "fixed-correlation-id", "correlationId is the factory output");
     assert(start.stage === "discovery.start", "stage is preserved");
     assert(start.status === "start", "status is preserved");
@@ -171,7 +171,6 @@ async function main(): Promise<void> {
     logger.error({
       correlationId: "redact",
       stage: "secret.fail",
-      status: "failure",
       error: {
         message: "auth failed",
         apiKey: "sk-bang",
@@ -181,7 +180,7 @@ async function main(): Promise<void> {
     await flushTrace(logger);
 
     const parsed = sink.parsed();
-    const ok = parsed[0]!;
+    const ok = parsed[0]! as Record<string, any>;
     assert(ok.details?.authorization === "[REDACTED]", "authorization is redacted");
     assert(ok.details?.APIKEY === "[REDACTED]", "APIKEY (uppercase) is redacted");
     assert(ok.details?.apiKey === "[REDACTED]", "apiKey is redacted");
@@ -203,7 +202,7 @@ async function main(): Promise<void> {
       "non-sensitive array items survive"
     );
 
-    const err = parsed[1]!;
+    const err = parsed[1]! as Record<string, any>;
     assert(err.error?.apiKey === "[REDACTED]", "apiKey inside error is redacted");
     assert(err.error?.message === "auth failed", "error message itself is preserved");
   }
@@ -478,7 +477,6 @@ async function main(): Promise<void> {
       logger.error({
         correlationId: "arm",
         stage: "sink.arm",
-        status: "failure",
         error: new Error("down"),
       });
     } catch {
@@ -544,7 +542,7 @@ async function main(): Promise<void> {
     assert(ids.size === 1, "all events share one correlationId (got " + ids.size + ")");
 
     assert(
-      parsed.every((event) => typeof event.timestamp === "string" && /T.*Z$/.test(event.timestamp)),
+      parsed.every((event: unknown) => typeof (event as { timestamp?: string }).timestamp === "string" && /T.*Z$/.test((event as { timestamp: string }).timestamp)),
       "every event has an ISO-8601 timestamp"
     );
   }
