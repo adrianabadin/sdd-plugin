@@ -1,11 +1,7 @@
 /**
- * Test for TUI registration and keymap binding.
- * 
- * Goals:
- * 1. SddTuiPlugin registers a Ctrl+Alt+F keymap layer.
- * 2. SddTuiPlugin registers a route for /model-control-center.
+ * Test for TUI registration and keymap binding with the real OpenCode TUI contract.
  */
-import { SddTuiPlugin } from "../src/tui.js";
+import SddTuiModule from "../src/tui.js";
 
 const failures: string[] = [];
 
@@ -19,48 +15,95 @@ function assert(condition: unknown, message: string): void {
 }
 
 async function main(): Promise<void> {
-  console.log("\n--- TUI Registration Test ---");
+  console.log("\n--- TUI Registration Test (Real Contract) ---");
+
+  // 1. Module shape
+  assert(SddTuiModule && typeof SddTuiModule === "object", "SddTuiModule is an object");
+  assert(SddTuiModule.id === "sdd-plugin.tui", "id is 'sdd-plugin.tui'");
+  assert(typeof SddTuiModule.tui === "function", "tui is a function");
 
   let layerRegistered = false;
-  let routeRegistered = false;
   let registeredLayer: any = null;
-  let registeredRoute: any = null;
+  let routeRegistered = false;
+  let registeredRoutes: any[] = [];
+  let navigatedRoute: string | null = null;
+  let modePushed: string | null = null;
+  let modeDisposeCalled = false;
+  let disposerReturnedByModePush = () => { modeDisposeCalled = true; };
+  let lifecycleDisposers: Array<() => void> = [];
 
-  const mockClient = {
-    api: {
-      keymap: {
-        registerLayer: (layer: any) => {
-          layerRegistered = true;
-          registeredLayer = layer;
-        }
+  const mockApi = {
+    keymap: {
+      registerLayer: (layer: any) => {
+        layerRegistered = true;
+        registeredLayer = layer;
+        return () => { /* layer disposer */ };
+      }
+    },
+    route: {
+      register: (routes: any[]) => {
+        routeRegistered = true;
+        registeredRoutes = routes;
       },
-      router: {
-        register: (route: any) => {
-          routeRegistered = true;
-          registeredRoute = route;
-        }
+      navigate: (name: string) => {
+        navigatedRoute = name;
+      }
+    },
+    mode: {
+      push: (name: string) => {
+        modePushed = name;
+        return disposerReturnedByModePush;
+      }
+    },
+    lifecycle: {
+      onDispose: (cb: () => void) => {
+        lifecycleDisposers.push(cb);
       }
     }
   };
 
-  const ctx: any = {
-    project: "tui-test",
-    client: mockClient,
-    directory: "/test"
-  };
+  await SddTuiModule.tui(mockApi);
 
-  await SddTuiPlugin(ctx);
-
-  assert(layerRegistered, "Ctrl+Alt+F keymap layer registered");
+  // 2. Keymap Registration
+  assert(layerRegistered, "api.keymap.registerLayer called");
   if (registeredLayer) {
-    assert(registeredLayer.key === "f", "key is 'f'");
-    assert(Array.isArray(registeredLayer.mod) && registeredLayer.mod.includes("ctrl") && registeredLayer.mod.includes("alt"), "modifiers include ctrl and alt");
+    assert(registeredLayer.mode === "base", "layer mode is 'base'");
+    assert(Array.isArray(registeredLayer.commands), "layer has commands array");
+    const openCmd = registeredLayer.commands.find((c: any) => c.name === "model-control-center.open");
+    assert(openCmd, "found 'model-control-center.open' command");
+    
+    assert(Array.isArray(registeredLayer.bindings), "layer has bindings array");
+    const binding = registeredLayer.bindings.find((b: any) => b.key === "ctrl+alt+f");
+    assert(binding && binding.cmd === "model-control-center.open", "binding 'ctrl+alt+f' points to open command");
+
+    // Test command execution
+    if (openCmd && typeof openCmd.run === "function") {
+      await openCmd.run();
+      assert(navigatedRoute === "model-control-center", "running command navigates to 'model-control-center'");
+    }
   }
 
-  assert(routeRegistered, "Model Control Center route registered");
-  if (registeredRoute) {
-    assert(registeredRoute.path === "/model-control-center", "route path is '/model-control-center'");
+  // 3. Route Registration
+  assert(routeRegistered, "api.route.register called");
+  const tuiRoute = registeredRoutes.find(r => r.name === "model-control-center");
+  assert(tuiRoute, "route 'model-control-center' is registered");
+  assert(typeof tuiRoute?.render === "function", "route has a render function");
+
+  // 4. Mode Push and Disposal via route render/terminate
+  if (tuiRoute && typeof tuiRoute.render === "function") {
+    const renderResult = tuiRoute.render();
+    assert(modePushed === "model-control-center", "rendering the route pushes the mode");
+    
+    if (renderResult && typeof renderResult.terminate === "function") {
+      renderResult.terminate();
+      assert(modeDisposeCalled, "calling terminate on the render result disposes the mode");
+    } else {
+      assert(false, "render result should have a terminate function for mode cleanup");
+    }
   }
+
+  // 5. Lifecycle registration
+  assert(lifecycleDisposers.length > 0, "disposer registered with api.lifecycle.onDispose");
 
   console.log("\n=== TUI TEST SUMMARY ===");
   if (failures.length === 0) {
