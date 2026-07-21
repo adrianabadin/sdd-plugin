@@ -8,41 +8,49 @@ datasource db {
 }
 
 model Provider {
-  id             String          @id
-  name           String
+  id                   String          @id
+  name                 String
   
   // Si null, es por API. Si tiene valor (small, medium, large), es una suscripción
-  subscription   String?         
-  isBlocked      Boolean         @default(false)
+  subscription         String?         
+  isBlocked            Boolean         @default(false)
+  
+  // Metadata JSON versionada
+  metadata             String?
+  metadataEnvelopeHash String?
   
   // Cuarentena global para todo el proveedor
-  quarantineType   String?   // "ttl", "permanent"
-  quarantineUntil  DateTime? 
+  quarantineType       String?   // "ttl", "permanent"
+  quarantineUntil      DateTime? 
   
-  models         ModelProvider[]
-  updatedAt      DateTime        @updatedAt
+  models               ModelProvider[]
+  updatedAt            DateTime        @updatedAt
 }
 
 model Model {
-  id             String          @id
-  name           String
+  id                   String          @id
+  name                 String
+
+  // Metadata JSON versionada
+  metadata             String?
+  metadataEnvelopeHash String?
 
   // Benchmarks (dependen 100% del modelo, no del proveedor)
-  mmlu           Float?
-  humaneval      Float?
-  sweBench       Float?
-  gpqa           Float?
-  math           Float?
-  bbh            Float?
-  mtBench        Float?
-  multineedle    Float?
+  mmlu                 Float?
+  humaneval            Float?
+  sweBench             Float?
+  gpqa                 Float?
+  math                 Float?
+  bbh                  Float?
+  mtBench              Float?
+  multineedle          Float?
 
   // Cuarentena global para este modelo (en cualquier proveedor)
-  quarantineType   String?   // "ttl", "permanent"
-  quarantineUntil  DateTime? 
+  quarantineType       String?   // "ttl", "permanent"
+  quarantineUntil      DateTime? 
 
-  providers      ModelProvider[]
-  updatedAt      DateTime        @updatedAt
+  providers            ModelProvider[]
+  updatedAt            DateTime        @updatedAt
 }
 
 model ModelProvider {

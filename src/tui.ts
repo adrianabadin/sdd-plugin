@@ -10,9 +10,11 @@ import { createComponent } from "solid-js/web";
 import ModelControlCenter from "./tui/ModelControlCenter.js";
 import { OpenCodeModelCatalogAdapter } from "./infrastructure/opencode/opencode-model-catalog.adapter.js";
 import { PrismaModelRepositoryAdapter } from "./infrastructure/prisma/prisma-model-repository.adapter.js";
+import { SaveModelDetailUseCase } from "./application/save-model-detail/save-model-detail.use-case.js";
+import { resolveDatabasePath } from "./infrastructure/runtime/database-path.js";
+import { getOrCreateModelConfigRegistry } from "./infrastructure/runtime/model-config-registry.js";
 import { PrismaClient } from "@prisma/client";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
-import path from "node:path";
 
 export type TuiApi = TuiPluginApi;
 
@@ -63,15 +65,22 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
   // Build canonical OpenCodeModelCatalogAdapter from api.client
   const catalogPort = new OpenCodeModelCatalogAdapter(api.client);
 
-  // Build additive Prisma detail query adapter
+  // Build additive Prisma detail query & write adapters using shared db authority
   let detailQueryPort: PrismaModelRepositoryAdapter | undefined;
+  let saveDetailUseCase: SaveModelDetailUseCase | undefined;
   try {
-    const dbUrl = process.env.DATABASE_URL ?? `file:${path.resolve(process.cwd(), "opencode-models.db")}`;
-    const prismaAdapter = new PrismaLibSql({ url: dbUrl });
+    const dbPath = resolveDatabasePath();
+    process.env.DATABASE_URL = `file:${dbPath}`;
+    const prismaAdapter = new PrismaLibSql({ url: `file:${dbPath}` });
     const prisma = new PrismaClient({ adapter: prismaAdapter });
-    detailQueryPort = new PrismaModelRepositoryAdapter(prisma);
+    const repositoryAdapter = new PrismaModelRepositoryAdapter(prisma);
+    detailQueryPort = repositoryAdapter;
+
+    const registry = getOrCreateModelConfigRegistry();
+    saveDetailUseCase = new SaveModelDetailUseCase(repositoryAdapter, registry);
   } catch {
     detailQueryPort = undefined;
+    saveDetailUseCase = undefined;
   }
 
   // 2. Register Route
@@ -92,6 +101,7 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
             api,
             catalog: catalogPort,
             detailQuery: detailQueryPort,
+            saveDetailUseCase: saveDetailUseCase,
           });
         },
       },

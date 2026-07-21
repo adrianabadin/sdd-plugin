@@ -12,29 +12,21 @@ import { fileURLToPath } from "node:url";
 
 import { ListConnectedModelsUseCase } from "../application/list-connected-models/list-connected-models.use-case.js";
 import { SyncConnectedModelsUseCase } from "../application/sync-connected-models/sync-connected-models.use-case.js";
+import { SaveModelDetailUseCase } from "../application/save-model-detail/save-model-detail.use-case.js";
 import { BackgroundModelRefreshCoordinator } from "../application/background-model-refresh-coordinator.js";
 import { OpenCodeAppLogNotifierAdapter } from "../infrastructure/logging/opencode-app-log.notifier.adapter.js";
 import { ModelRefreshTraceLogger } from "../infrastructure/logging/model-refresh-trace.logger.js";
 import { OpenCodeModelCatalogAdapter } from "../infrastructure/opencode/opencode-model-catalog.adapter.js";
 import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
+import { resolveDatabasePath } from "../infrastructure/runtime/database-path.js";
+import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
 
-/**
- * Resolve the absolute SQLite path relative to this file (works for
- * `dist/bootstrap/index.js` after tsc) and inject it into the Prisma
- * env. Done once at module load so the PrismaClient below picks it up.
- */
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dbPath = path.resolve(__dirname, "..", "..", "opencode-models.db");
-process.env.DATABASE_URL = `file:${dbPath}`;
-
-/**
- * Prisma 7 requires a driver adapter at runtime (the generator emits a
- * client that runs against `engineType = "client"` by default). We use
- * the `@prisma/adapter-libsql` to support both Node and Bun.
- */
-const prismaAdapter = new PrismaLibSql({ url: `file:${dbPath}` });
-const prisma = new PrismaClient({ adapter: prismaAdapter });
+export function getPrismaClient(): PrismaClient {
+  const dbPath = resolveDatabasePath();
+  process.env.DATABASE_URL = `file:${dbPath}`;
+  const prismaAdapter = new PrismaLibSql({ url: `file:${dbPath}` });
+  return new PrismaClient({ adapter: prismaAdapter });
+}
 
 /**
  * Per-step trace logger for the model refresh pipeline. The default
@@ -65,6 +57,7 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
       console.error(`[${project}] ERROR: ${message}`, err),
   };
 
+  const prisma = getPrismaClient();
   const catalog = new OpenCodeModelCatalogAdapter(client ?? {}, { trace: traceLogger });
   const repository = new PrismaModelRepositoryAdapter(prisma, { trace: traceLogger });
   const notifier = new OpenCodeAppLogNotifierAdapter(client ?? {}, { trace: traceLogger });
@@ -124,16 +117,54 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
      * subagent spawning. We MUST NOT mutate `output` — the task must
      * run exactly as the LLM requested. We catch errors so a sync
      * failure never blocks the task itself.
+     *
+     * Interception is registry-first with DB read-through / hydration fallback.
      */
     "tool.execute.before": async (
       _input: { tool?: string },
-      output: { args?: { subagent_type?: string } },
+      output: { args?: { subagent_type?: string; model?: string } },
     ) => {
       if (_input.tool !== "task") return;
 
+      const subagentType = output.args?.subagent_type ?? "unknown";
       logger.info(
-        `Intercepting task: ${output.args?.subagent_type ?? "unknown"}`,
+        `Intercepting task: ${subagentType}`,
       );
+
+      // Check registry / DB hydration for runtime model allocation
+      const registry = getOrCreateModelConfigRegistry();
+      const requestedModel = output.args?.model;
+      if (requestedModel && requestedModel.includes("/")) {
+        const [pId, mId] = requestedModel.split("/", 2);
+        if (pId && mId) {
+          let cached = registry.get(pId, mId);
+          if (!cached) {
+            try {
+              const detail = await repository.findModelDetail(pId, mId);
+              if (detail) {
+                registry.publish({
+                  providerId: detail.providerId,
+                  modelId: detail.modelId,
+                  contextWindow: detail.modelMetadata?.contextWindow ?? null,
+                  maxOutputTokens: detail.modelMetadata?.maxOutputTokens ?? null,
+                  capabilities: detail.modelMetadata?.capabilities ?? [],
+                  inputPerMillion: detail.pricing?.inputPerMillion ?? null,
+                  outputPerMillion: detail.pricing?.outputPerMillion ?? null,
+                  cachedPerMillion: detail.pricing?.cachedPerMillion ?? null,
+                  currency: detail.pricing?.currency ?? "USD",
+                  isBlocked: detail.providerIsBlocked,
+                  subscription: detail.providerSubscription,
+                  metadataEnvelopeHash: detail.metadataEnvelopeHash ?? null,
+                });
+                cached = registry.get(pId, mId);
+              }
+            } catch (err) {
+              logger.error(`Failed DB read-through hydration for ${requestedModel}`, err);
+            }
+          }
+        }
+      }
+
       coordinator.trigger();
     },
   };

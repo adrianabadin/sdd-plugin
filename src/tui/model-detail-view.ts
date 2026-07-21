@@ -11,13 +11,13 @@ export interface LoadedDetail {
 
   // Overview tab
   readonly isBlocked: boolean;
-  readonly contextWindow: number | null; // pending schema (Task 5)
-  readonly maxOutputTokens: number | null; // pending schema (Task 5)
+  readonly contextWindow: number | null;
+  readonly maxOutputTokens: number | null;
   readonly capabilities: {
     readonly vision: boolean;
     readonly tools: boolean;
     readonly reasoning: boolean;
-  }; // pending schema (Task 5)
+  };
 
   // Benchmarks tab
   readonly benchmarks: BenchmarkScores;
@@ -31,10 +31,15 @@ export interface LoadedDetail {
   // Subscription tab
   readonly subscriptionEnabled: boolean;
   readonly subscriptionTier: string | null;
-  readonly planName: string | null; // pending schema (Task 5)
-  readonly periodicCost: number | null; // pending schema (Task 5)
-  readonly includedUsage: number | null; // pending schema (Task 5)
-  readonly overageRate: number | null; // pending schema (Task 5)
+  readonly subscription: string | null;
+  readonly planName: string | null;
+  readonly periodicCost: number | null;
+  readonly includedUsage: number | null;
+  readonly overageRate: number | null;
+
+  // Task 5 persistence metadata
+  readonly metadataEnvelopeHash?: string | null;
+  readonly updatedAt?: Date;
 }
 
 export type DetailDraft = LoadedDetail;
@@ -68,15 +73,23 @@ export function mergeModelDetail(
 
   const subscriptionTier = persisted?.providerSubscription ?? catalog?.provider?.subscription ?? null;
 
+  const pMeta = persisted?.providerMetadata;
+  const mMeta = persisted?.modelMetadata;
+
+  const capabilitiesArr = mMeta?.capabilities ?? [];
+  const vision = capabilitiesArr.includes("vision");
+  const tools = capabilitiesArr.includes("tools");
+  const reasoning = capabilitiesArr.includes("reasoning");
+
   return {
     providerId,
     modelId,
     providerName,
     modelName,
     isBlocked,
-    contextWindow: null,
-    maxOutputTokens: null,
-    capabilities: { vision: false, tools: false, reasoning: false },
+    contextWindow: mMeta?.contextWindow ?? null,
+    maxOutputTokens: mMeta?.maxOutputTokens ?? null,
+    capabilities: { vision, tools, reasoning },
     benchmarks,
     inputPerMillion,
     outputPerMillion,
@@ -84,10 +97,13 @@ export function mergeModelDetail(
     currency,
     subscriptionEnabled: Boolean(subscriptionTier),
     subscriptionTier,
-    planName: null,
-    periodicCost: null,
-    includedUsage: null,
-    overageRate: null,
+    subscription: subscriptionTier,
+    planName: pMeta?.planName ?? null,
+    periodicCost: pMeta?.periodicCost ?? null,
+    includedUsage: pMeta?.includedUsage ?? null,
+    overageRate: pMeta?.overageRate ?? null,
+    metadataEnvelopeHash: persisted?.metadataEnvelopeHash ?? null,
+    ...(persisted?.updatedAt ? { updatedAt: persisted.updatedAt } : {}),
   };
 }
 

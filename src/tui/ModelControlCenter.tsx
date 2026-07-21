@@ -29,10 +29,13 @@ import {
   type ScreenState,
 } from "./navigation.js";
 
+import type { SaveModelDetailUseCase } from "../application/save-model-detail/save-model-detail.use-case.js";
+
 export interface ModelControlCenterProps {
   api: TuiPluginApi;
   catalog?: ModelCatalogPort | undefined;
   detailQuery?: ModelDetailQueryPort | undefined;
+  saveDetailUseCase?: SaveModelDetailUseCase | undefined;
 }
 
 export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element {
@@ -146,17 +149,87 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
     return {};
   }
 
-  function handleSaveIntent(): void {
+  async function handleSaveIntent(): Promise<void> {
     const draft = detailDraft();
     if (!draft) return;
     const res = validateDraft(draft);
-    if (res.isValid) {
-      setLoadedBaseline(draft);
-      setDetailNotice("Validated — persistence lands in Task 5");
-      setDetailValidation(undefined);
-    } else {
+    if (!res.isValid) {
       setDetailValidation(res);
       setDetailNotice(undefined);
+      return;
+    }
+
+    const current = currentScreen();
+    if (current.name !== "model-detail") return;
+    const { providerId, modelId } = current;
+    const base = loadedBaseline();
+
+    if (props.saveDetailUseCase) {
+      try {
+        const saveRes = await props.saveDetailUseCase.execute({
+          providerId,
+          modelId,
+          providerName: draft.providerName,
+          modelName: draft.modelName,
+          isBlocked: draft.isBlocked,
+          subscription: draft.subscriptionTier,
+          planName: draft.planName || null,
+          periodicCost: draft.periodicCost !== null ? Number(draft.periodicCost) : null,
+          includedUsage: draft.includedUsage !== null ? Number(draft.includedUsage) : null,
+          overageRate: draft.overageRate !== null ? Number(draft.overageRate) : null,
+          contextWindow: draft.contextWindow !== null ? Number(draft.contextWindow) : null,
+          maxOutputTokens: draft.maxOutputTokens !== null ? Number(draft.maxOutputTokens) : null,
+          capabilities: Object.entries(draft.capabilities)
+            .filter(([_, enabled]) => Boolean(enabled))
+            .map(([cap]) => cap),
+          benchmarks: {
+            mmlu: draft.benchmarks.mmlu !== null ? Number(draft.benchmarks.mmlu) : null,
+            humaneval: draft.benchmarks.humaneval !== null ? Number(draft.benchmarks.humaneval) : null,
+            sweBench: draft.benchmarks.sweBench !== null ? Number(draft.benchmarks.sweBench) : null,
+          },
+          pricing: {
+            inputPerMillion: draft.inputPerMillion !== null ? Number(draft.inputPerMillion) : null,
+            outputPerMillion: draft.outputPerMillion !== null ? Number(draft.outputPerMillion) : null,
+            cachedPerMillion: draft.cachedPerMillion !== null ? Number(draft.cachedPerMillion) : null,
+            currency: draft.currency || 'USD',
+          },
+          expectedEnvelopeHash: base?.metadataEnvelopeHash ?? null,
+        });
+
+        const newBase: LoadedDetail = {
+          ...draft,
+          metadataEnvelopeHash: saveRes.envelopeHash,
+          updatedAt: saveRes.updatedAt,
+        };
+        setLoadedBaseline(newBase);
+        setDetailDraft(createDraft(newBase));
+        setDetailValidation(undefined);
+        if (saveRes.warning) {
+          setDetailNotice(`Saved & committed (Warn: ${saveRes.warning})`);
+        } else {
+          setDetailNotice("Saved & applied to running plugin");
+        }
+      } catch (err: any) {
+        if (err.message && err.message.includes("Conflict")) {
+          setDetailNotice("Conflict: state was modified by another operation. Re-reading...");
+          // Conflict re-read
+          if (props.detailQuery) {
+            const reloaded = await props.detailQuery.findModelDetail(providerId, modelId);
+            if (reloaded) {
+              const catalogMatch = rawModels().find(m => m.providerId === providerId && m.modelId === modelId) ?? null;
+              const merged = mergeModelDetail(catalogMatch, reloaded, providerId, modelId);
+              setLoadedBaseline(merged);
+              setDetailDraft(createDraft(merged));
+            }
+          }
+        } else {
+          setDetailNotice(`Save error: ${err.message}`);
+        }
+      }
+    } else {
+      setLoadedBaseline(draft);
+      setDetailNotice("Validated — in-memory baseline updated");
+      setDetailValidation(undefined);
     }
   }
 

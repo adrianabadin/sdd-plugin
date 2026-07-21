@@ -13,26 +13,27 @@ import type {
   ModelDetailQueryPort,
   PersistedModelDetail,
 } from "../../ports/model-detail-query.port.js";
+import type {
+  ModelDetailWritePort,
+  SaveModelDetailCommand,
+} from "../../ports/model-detail-write.port.js";
+import {
+  parseProviderMetadata,
+  serializeProviderMetadata,
+  parseModelMetadata,
+  serializeModelMetadata,
+  computeEnvelopeHash,
+} from "../../domain/model-detail/metadata.js";
 import type { RefreshTraceContext } from "../../ports/model-catalog.port.js";
 import type { ModelRefreshTraceLogger } from "../logging/model-refresh-trace.logger.js";
 import type { QuarantineType } from "../../domain/model/quarantine.js";
 
 /**
- * Adapter: implement the `ModelRepositoryPort` and `ModelDetailQueryPort` against Prisma.
- *
- * This module is the ONLY place that imports `@prisma/client`. The
- * domain and use case layers see only port interfaces and domain
- * types.
- *
- * Trace instrumentation: the optional `ModelRefreshTraceLogger`
- * receives `persistence.start` / `persistence.finish` /
- * `persistence.failure` events on every write. When the logger is
- * absent the adapter behaves exactly as before — no I/O, no
- * overhead. Adapters are the only place that may import the trace
- * logger because they are the only layer that knows how a particular
- * persistence sink reports its result counts.
+ * Adapter: implement `ModelRepositoryPort`, `ModelDetailQueryPort`, and `ModelDetailWritePort` against Prisma.
  */
-export class PrismaModelRepositoryAdapter implements ModelRepositoryPort, ModelDetailQueryPort {
+export class PrismaModelRepositoryAdapter
+  implements ModelRepositoryPort, ModelDetailQueryPort, ModelDetailWritePort
+{
   private readonly trace: ModelRefreshTraceLogger | undefined;
 
   constructor(
@@ -40,6 +41,154 @@ export class PrismaModelRepositoryAdapter implements ModelRepositoryPort, ModelD
     options: { trace?: ModelRefreshTraceLogger } = {},
   ) {
     this.trace = options.trace;
+  }
+
+  async saveModelDetail(cmd: SaveModelDetailCommand): Promise<{ updatedAt: Date; envelopeHash: string }> {
+    const correlationId = this.trace?.newCorrelationId() ?? "";
+    const startedAt = Date.now();
+    if (this.trace) {
+      this.trace.trace({
+        correlationId,
+        stage: "detail.save.start",
+        status: "start",
+        details: { providerId: cmd.providerId, modelId: cmd.modelId },
+      });
+    }
+
+    try {
+      const envelopeHash = computeEnvelopeHash(cmd.provider.metadata, cmd.model.metadata);
+      const serializedProviderMeta = serializeProviderMetadata(cmd.provider.metadata);
+      const serializedModelMeta = serializeModelMetadata(cmd.model.metadata);
+      const now = new Date();
+
+      const result = await this.prisma.$transaction(async (tx) => {
+        // Optimistic check on envelope hash if client expected a specific baseline
+        if (cmd.expectedEnvelopeHash !== null) {
+          const currentProvider = await tx.provider.findUnique({
+            where: { id: cmd.providerId },
+            select: { metadataEnvelopeHash: true },
+          });
+          const currentModel = await tx.model.findUnique({
+            where: { id: cmd.modelId },
+            select: { metadataEnvelopeHash: true },
+          });
+
+          // Check if either entity has a different hash
+          if (
+            (currentProvider?.metadataEnvelopeHash && currentProvider.metadataEnvelopeHash !== cmd.expectedEnvelopeHash) ||
+            (currentModel?.metadataEnvelopeHash && currentModel.metadataEnvelopeHash !== cmd.expectedEnvelopeHash)
+          ) {
+            throw new Error(`Conflict: persistent metadata envelope was modified by another operation.`);
+          }
+        }
+
+        // 1. Update Provider
+        const updatedProvider = await tx.provider.upsert({
+          where: { id: cmd.providerId },
+          update: {
+            name: cmd.provider.name,
+            subscription: cmd.provider.subscription,
+            isBlocked: cmd.provider.isBlocked,
+            metadata: serializedProviderMeta,
+            metadataEnvelopeHash: envelopeHash,
+            updatedAt: now,
+          },
+          create: {
+            id: cmd.providerId,
+            name: cmd.provider.name,
+            subscription: cmd.provider.subscription,
+            isBlocked: cmd.provider.isBlocked,
+            metadata: serializedProviderMeta,
+            metadataEnvelopeHash: envelopeHash,
+            updatedAt: now,
+          },
+        });
+
+        // 2. Update Model
+        const updatedModel = await tx.model.upsert({
+          where: { id: cmd.modelId },
+          update: {
+            name: cmd.model.name,
+            mmlu: cmd.model.benchmarks.mmlu,
+            humaneval: cmd.model.benchmarks.humaneval,
+            sweBench: cmd.model.benchmarks.sweBench,
+            metadata: serializedModelMeta,
+            metadataEnvelopeHash: envelopeHash,
+            updatedAt: now,
+          },
+          create: {
+            id: cmd.modelId,
+            name: cmd.model.name,
+            mmlu: cmd.model.benchmarks.mmlu,
+            humaneval: cmd.model.benchmarks.humaneval,
+            sweBench: cmd.model.benchmarks.sweBench,
+            metadata: serializedModelMeta,
+            metadataEnvelopeHash: envelopeHash,
+            updatedAt: now,
+          },
+        });
+
+        // 3. Upsert ModelProvider link
+        const mp = await tx.modelProvider.upsert({
+          where: {
+            modelId_providerId: {
+              modelId: cmd.modelId,
+              providerId: cmd.providerId,
+            },
+          },
+          update: {},
+          create: {
+            modelId: cmd.modelId,
+            providerId: cmd.providerId,
+          },
+        });
+
+        // 4. Insert Pricing row if pricing details provided
+        if (cmd.pricing) {
+          // Close prior pricing validity
+          await tx.modelProviderPricing.updateMany({
+            where: { modelProviderId: mp.id, effectiveUntil: null },
+            data: { effectiveUntil: now },
+          });
+
+          await tx.modelProviderPricing.create({
+            data: {
+              modelProviderId: mp.id,
+              inputPerMillion: cmd.pricing.inputPerMillion,
+              outputPerMillion: cmd.pricing.outputPerMillion,
+              cachedPerMillion: cmd.pricing.cachedPerMillion,
+              currency: cmd.pricing.currency || 'USD',
+              effectiveFrom: now,
+            },
+          });
+        }
+
+        return { updatedAt: now, envelopeHash };
+      });
+
+      if (this.trace) {
+        this.trace.trace({
+          correlationId,
+          stage: "detail.save.finish",
+          status: "success",
+          durationMs: Date.now() - startedAt,
+          details: { providerId: cmd.providerId, modelId: cmd.modelId, envelopeHash },
+        });
+      }
+
+      return result;
+    } catch (error) {
+      if (this.trace) {
+        this.trace.error({
+          correlationId,
+          stage: "detail.save.failure",
+          durationMs: Date.now() - startedAt,
+          details: { providerId: cmd.providerId, modelId: cmd.modelId },
+          error,
+        });
+      }
+      throw error;
+    }
   }
 
   async upsertProvider(input: ProviderData, context: RefreshTraceContext = {}): Promise<void> {
@@ -285,6 +434,7 @@ export class PrismaModelRepositoryAdapter implements ModelRepositoryPort, ModelD
       providerIsBlocked: mp.provider.isBlocked,
       providerQuarantineType: (mp.provider.quarantineType as QuarantineType) ?? null,
       providerQuarantineUntil: mp.provider.quarantineUntil,
+      providerMetadata: parseProviderMetadata(mp.provider.metadata),
       modelId: mp.model.id,
       modelName: mp.model.name,
       benchmarks: {
@@ -299,6 +449,9 @@ export class PrismaModelRepositoryAdapter implements ModelRepositoryPort, ModelD
       },
       modelQuarantineType: (mp.model.quarantineType as QuarantineType) ?? null,
       modelQuarantineUntil: mp.model.quarantineUntil,
+      modelMetadata: parseModelMetadata(mp.model.metadata),
+      updatedAt: mp.model.updatedAt,
+      metadataEnvelopeHash: mp.model.metadataEnvelopeHash || mp.provider.metadataEnvelopeHash || null,
       modelProviderQuarantineType: (mp.quarantineType as QuarantineType) ?? null,
       modelProviderQuarantineUntil: mp.quarantineUntil,
       pricing,
