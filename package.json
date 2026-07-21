@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "",
   "main": "dist/bootstrap/index.js",
+  "exports": {
+    ".": "./dist/bootstrap/index.js",
+    "./tui": "./dist/tui.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "npm run test:all",
@@ -10,7 +14,8 @@
     "test:focused": "npx tsx tests/background-model-refresh-coordinator.test.ts",
     "test:adapter": "npx tsx tests/opencode-model-catalog.adapter.test.ts",
     "test:trace": "npx tsx tests/model-refresh-trace-logger.test.ts",
-    "test:all": "npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace",
+    "test:tui": "npx tsx tests/tui-registration.test.ts",
+    "test:all": "npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace && npm run test:tui",
     "trace:tail": "node -e \"const fs=require('fs'),os=require('os'),path=require('path');const p=process.env.SDD_PLUGIN_TRACE_PATH||path.join(os.homedir(),'.cache','sdd-plugin','model-refresh.log');try{const lines=fs.readFileSync(p,'utf8').trimEnd().split('\\n');for(const l of lines.slice(-50))process.stdout.write(l+'\\n');}catch(e){console.error('no trace yet:',e.message);}\""
   },
   "repository": {
