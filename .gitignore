@@ -1,0 +1,14 @@
+
+# PMC (Project Memory Context)
+.worktrees/
+.planning/project-memory-context/enrichment/
+.planning/project-memory-context/intake/
+.planning/project-memory-context/graph/graph.db
+.planning/project-memory-context/graph/graph.db-shm
+.planning/project-memory-context/graph/graph.db-wal
+graphify-out/
+
+# Test-only SQLite database and sidecar files
+/opencode-models.test.db*
+
+/src/generated/prisma

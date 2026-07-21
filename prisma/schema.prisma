@@ -1,0 +1,78 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Provider {
+  id             String          @id
+  name           String
+  
+  // Si null, es por API. Si tiene valor (small, medium, large), es una suscripción
+  subscription   String?         
+  isBlocked      Boolean         @default(false)
+  
+  // Cuarentena global para todo el proveedor
+  quarantineType   String?   // "ttl", "permanent"
+  quarantineUntil  DateTime? 
+  
+  models         ModelProvider[]
+  updatedAt      DateTime        @updatedAt
+}
+
+model Model {
+  id             String          @id
+  name           String
+
+  // Benchmarks (dependen 100% del modelo, no del proveedor)
+  mmlu           Float?
+  humaneval      Float?
+  sweBench       Float?
+  gpqa           Float?
+  math           Float?
+  bbh            Float?
+  mtBench        Float?
+  multineedle    Float?
+
+  // Cuarentena global para este modelo (en cualquier proveedor)
+  quarantineType   String?   // "ttl", "permanent"
+  quarantineUntil  DateTime? 
+
+  providers      ModelProvider[]
+  updatedAt      DateTime        @updatedAt
+}
+
+model ModelProvider {
+  id               String    @id @default(uuid())
+  modelId          String
+  providerId       String
+  
+  // Cuarentena específica de la instancia (ej. el modelo Claude vía Anthropic)
+  quarantineType   String?   // "ttl", "permanent"
+  quarantineUntil  DateTime? 
+
+  model            Model     @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  provider         Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  
+  pricing          ModelProviderPricing[]
+  
+  @@unique([modelId, providerId])
+}
+
+model ModelProviderPricing {
+  id                 String        @id @default(uuid())
+  modelProviderId    String
+  inputPerMillion    Float?
+  outputPerMillion   Float?
+  cachedPerMillion   Float?
+  currency           String        @default("USD")
+  effectiveFrom      DateTime      @default(now())
+  effectiveUntil     DateTime?
+
+  modelProvider      ModelProvider @relation(fields: [modelProviderId], references: [id], onDelete: Cascade)
+
+  @@index([modelProviderId, effectiveFrom])
+}
