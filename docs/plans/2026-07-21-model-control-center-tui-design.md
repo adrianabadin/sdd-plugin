@@ -6,12 +6,12 @@ Draft approved for planning. Implementation has not started.
 
 ## Goal
 
-Provide a native OpenCode TUI opened with `Ctrl+Alt+F` for browsing and manually configuring connected model metadata and managing quarantines.
+Provide a native OpenCode TUI opened with `Alt+Shift+M` (Model) for browsing and manually configuring connected model metadata and managing quarantines. The original `Ctrl+Alt+F` mnemonic was abandoned during investigation because OpenCode 1.18.4 already binds it to the built-in `messages_page_down` command — the regression test in `tests/integration-route-cleanup.test.ts` guards against re-introducing it.
 
 ## User flow
 
 ```text
-Ctrl+Alt+F
+Alt+Shift+M
   ├── Models
   │   ├── Connected providers
   │   ├── Provider model list and search
@@ -29,7 +29,7 @@ Model detail sections are navigated with `Tab` and `Shift+Tab`. Forms use `Enter
 
 The implementation uses OpenCode's native plugin TUI route and a plugin-specific mode:
 
-- Register `Ctrl+Alt+F` through `api.keymap.registerLayer`.
+- Register the verified-free mnemonic `Alt+Shift+M` (Model) through `api.keymap.registerLayer`. The legacy `Ctrl+Alt+F` collides with OpenCode 1.18.4's built-in `messages_page_down` binding and MUST NOT be re-registered.
 - Navigate to a plugin route for the Model Control Center.
 - Push a plugin-specific mode while the route is active.
 - Register route-specific bindings for navigation, editing, saving, and closing.
@@ -78,7 +78,7 @@ Each entry shows target, expiration, status, and actions to inspect, create, or 
 - TUI exports must remain isolated through the package export for `./tui`.
 - The implementation must preserve the existing Bun-compatible Prisma LibSQL adapter.
 - Cross-bundle state sharing must use a stable mechanism, such as a `globalThis` registry, while every durable update is written to SQLite.
-- Keymap collision behavior for `Ctrl+Alt+F` must be tested against the host binding before release.
+- Keymap collision behavior must be tested against the host binding before release. The legacy `Ctrl+Alt+F` mnemonic was discarded after confirming it collides with OpenCode 1.18.4's built-in `messages_page_down`; `tests/integration-route-cleanup.test.ts` asserts both that `alt+shift+m` is registered and that `ctrl+alt+f` is absent (regression guard).
 
 ## Error handling
 

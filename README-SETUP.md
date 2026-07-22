@@ -62,14 +62,14 @@ The `./tui` subpath export provides the OpenCode Model Control Center TUI module
 
 ### Activation Contract:
 - **Module export**: `sdd-plugin2` via `package.json` `exports["./tui"]` exports a TUI plugin module matching `{ id: "sdd-plugin.tui", tui: (api) => ... }`.
-- **Keymap shortcut**: Press `ctrl+alt+f` in `base` mode. This triggers the command `model-control-center.open` registered via `api.keymap.registerLayer`, navigating to the `model-control-center` route.
+- **Keymap shortcut**: Press `alt+shift+m` in `base` mode. This triggers the command `model-control-center.open` registered via `api.keymap.registerLayer`, navigating to the `model-control-center` route. The mnemonic is "**M**odel" and was chosen because the host keymap in OpenCode 1.18.4 already binds `ctrl+alt+f` to the built-in `messages_page_down` command — re-introducing `ctrl+alt+f` would silently swallow the keypress without warning.
 - **Route rendering**: The route is registered with `api.route.register`. When entered, it pushes a route-specific mode (`model-control-center`) via `api.mode.push` and renders the Solid interface (`DialogAlert` placeholder component).
 - **Teardown & Cleanup**: Leaving the route invokes Solid `onCleanup` which pops the mode. Unloading the plugin disposes keymap and route registrations via `api.lifecycle.onDispose`.
 - **Peer / UI dependencies**: Compatible with `@opentui/solid`, `@opentui/core`, and `@opentui/keymap` (`^0.4.5`).
 
 ### TUI Validation & Testing Commands:
 - **Node.js Host Contract & Lifecycle Test**: `npm run test:tui`
-  Validates keymap registration, `ctrl+alt+f` binding, command execution route navigation, route mode push/pop (`onCleanup`), and host component props contract.
+  Validates keymap registration, `alt+shift+m` binding, command execution route navigation, route mode push/pop (`onCleanup`), and host component props contract. The test also asserts the legacy `ctrl+alt+f` binding is absent (host collision guard).
 - **Bun OpenTUI Real Renderer Test**: `npm run test:tui:bun` (or `bun tests/tui-bun-renderer.test.ts`)
   Invokes `@opentui/solid` `testRender` against the Solid/OpenTUI route component. OpenCode executes plugins under Bun; this test requires the Bun runtime (with native FFI) and fails with an explicit error under Node.js.
 
@@ -80,7 +80,7 @@ The CI pipeline enforces release safety before any artifact is shipped:
 1. **Forbidden staged artifacts** — `.gitignore` and the CI gate `npm run verify:release-safety` ensure that `.env` files, `opencode-models.db` (production DB), `dist/`, `node_modules/`, generated Prisma client, and incremental build state are never staged for commit.
 2. **Test database isolation** — every integration test writes to a unique `opencode-models.test-<uuid>.db` path via the shared `resolveDatabasePath()` resolver; production DBs are never touched.
 3. **Bun release gate** — `npm run test:tui:bun` runs only on Bun (the runtime OpenCode uses in production). The Node suite `npm test` is split from the Bun gate so a Bun-less local environment cannot falsely claim renderer coverage.
-4. **End-to-end integration suite** — `npm run test:integration` covers model edit immediate application, quarantine set/release interception, publish-failure resilience, route open/close cleanup, Ctrl+Alt+F host collision, public exports after build, and staged-artifact protection.
+4. **End-to-end integration suite** — `npm run test:integration` covers model edit immediate application, quarantine set/release interception, publish-failure resilience, route open/close cleanup, `alt+shift+m` binding (formerly `ctrl+alt+f`; corrected after the OpenCode 1.18.4 host collision was confirmed) and a guard that the legacy `ctrl+alt+f` binding is absent, public exports after build, and staged-artifact protection.
 5. **Migration safety** — the committed Prisma migration only adds nullable columns (`metadata`, `metadataEnvelopeHash`, `quarantineType`, `quarantineUntil`); rollback is `prisma migrate resolve --rolled-back` followed by `prisma migrate deploy`. Existing rows are preserved because every new column is nullable.
 
 ### CI gate commands

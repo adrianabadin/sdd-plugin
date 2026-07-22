@@ -37,6 +37,13 @@ export function renderPlaceholderRoute(api: TuiPluginApi): JSX.Element {
 
 export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unknown) {
   // 1. Register Keymap Layer
+  //
+  // The host keymap in OpenCode 1.18.4 already binds `ctrl+alt+f` to the
+  // built-in `messages_page_down` command, so the legacy shortcut collides
+  // and silently swallows the keypress. We use the verified-free mnemonic
+  // `alt+shift+m` ("Model") instead. Do NOT reintroduce `ctrl+alt+f` here
+  // without re-verifying the host keymap against the supported OpenCode
+  // version contract (peer dependency >= 1.17.11).
   if (api.keymap?.registerLayer) {
     const layerDisposer = api.keymap.registerLayer({
       mode: "base",
@@ -56,7 +63,7 @@ export async function tui(api: TuiPluginApi, _options?: TuiOptions, _meta?: unkn
       ],
       bindings: [
         {
-          key: "ctrl+alt+f",
+          key: "alt+shift+m",
           cmd: "model-control-center.open",
           desc: "Open Model Control Center",
         },

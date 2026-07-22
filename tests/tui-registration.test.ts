@@ -117,8 +117,12 @@ async function main(): Promise<void> {
     assert(Boolean(openCmd), "found 'model-control-center.open' command");
     
     assert(Array.isArray(registeredLayer.bindings), "layer has bindings array");
-    const binding = registeredLayer.bindings.find((b: { key?: string; cmd?: string }) => b.key === "ctrl+alt+f");
-    assert(Boolean(binding && binding.cmd === "model-control-center.open"), "binding 'ctrl+alt+f' points to open command");
+    const binding = registeredLayer.bindings.find((b: { key?: string; cmd?: string }) => b.key === "alt+shift+m");
+    assert(Boolean(binding && binding.cmd === "model-control-center.open"), "binding 'alt+shift+m' points to open command");
+    // Guard against silent revert: the legacy 'ctrl+alt+f' binding collides with the host's
+    // built-in `messages_page_down` (OpenCode 1.18.4) and MUST NOT be re-introduced.
+    const legacyCollision = registeredLayer.bindings.find((b: { key?: string; cmd?: string }) => b.key === "ctrl+alt+f");
+    assert(!legacyCollision, "legacy 'ctrl+alt+f' binding is absent (collides with host messages_page_down)");
 
     // Test command execution
     if (openCmd && typeof openCmd.run === "function") {

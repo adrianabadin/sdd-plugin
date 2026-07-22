@@ -6,6 +6,84 @@
 **Commit**: `80d3547` (chore(release-safety): add Task 7 evidence, packaging, and release-safety gates)
 **PR Slice**: single PR (size:exception — see Workload / PR Boundary below)
 
+---
+
+# Apply Progress — Shortcut Correction (`alt+shift+m` instead of `ctrl+alt+f`)
+
+**Change**: `model-control-center-tui`
+**Task**: Targeted shortcut correction (post-Task-7 follow-up)
+**Mode**: Strict TDD Mode
+**Commit**: see "Status" below
+**PR Slice**: targeted correction — single autonomous scope (binding + tests + docs)
+
+## Status
+
+Strict-TDD correction applied in the isolated worktree
+`.worktrees/model-control-center-tui` on branch `feat/model-control-center-tui`. Main worktree untouched.
+No new product features introduced; only the binding mnemonic and the regression guard were
+updated. All Node test suites green, `npm run build` and `npm run test:typecheck:strict` both pass.
+
+## Root cause
+
+OpenCode 1.18.4 already binds `ctrl+alt+f` to the built-in `messages_page_down` command at the
+host keymap. The plugin structurally mirrors `subagentsplugin`, but its base-layer binding on the
+same chord silently loses every keypress to the host's `messages_page_down` handler. The chord is
+unusable in production for this plugin.
+
+## Fix
+
+Replaced the base-layer binding in `src/tui.ts` with the verified-free mnemonic `alt+shift+m`
+("Model") and added a regression guard that asserts the legacy `ctrl+alt+f` binding is absent
+from every layer (base or route-scoped). The plugin command, the layer mode (`base`), the
+command name (`model-control-center.open`), the route name (`model-control-center`), and the
+keymap / route / mode lifecycle contracts are unchanged.
+
+## Completed Tasks (this apply batch)
+- [x] 1. Update focused shortcut assertions in `tests/tui-registration.test.ts` to expect `alt+shift+m` and add a regression guard for `ctrl+alt+f`.
+- [x] 2. Update integration assertion in `tests/integration-route-cleanup.test.ts` to expect `alt+shift+m` on the base layer AND assert `ctrl+alt+f` is absent from every registered layer (not just the base).
+- [x] 3. Replace `ctrl+alt+f` with `alt+shift+m` in `src/tui.ts` and document the collision rationale in a code comment.
+- [x] 4. Update `README-SETUP.md` to advertise `alt+shift+m` and document the collision rationale (formerly `ctrl+alt+f`).
+- [x] 5. Update `openspec/changes/model-control-center-tui/apply-progress.md` (this section) and `task-7-design.md` "Runtime and collision checks" to reflect `alt+shift+m` + the legacy guard.
+- [x] 6. Update design docs in `docs/plans/` (`2026-07-21-model-control-center-tui-design.md`, `2026-07-21-model-control-center-tui-implementation-plan.md`) and `openspec/changes/.../task-2-design.md` so no stale `Ctrl+Alt+F` claims remain.
+- [x] 7. Persist discovery to PMC/Engram for project `sdd-plugin`.
+- [x] 8. Commit a new conventional fix commit (never amend).
+
+## TDD Cycle Evidence
+| Step | Action | Outcome |
+|------|--------|---------|
+| RED  | Updated `tests/tui-registration.test.ts` and `tests/integration-route-cleanup.test.ts` to expect `alt+shift+m` + guard `ctrl+alt+f` absence | 2 + 4 assertions failed for the expected reason (binding missing in production code) |
+| GREEN | Changed `src/tui.ts` to bind `alt+shift+m` | Focused tests pass; guard catches the absent legacy binding |
+| REFACTOR | Strengthened the regression guard to iterate every registered layer, then updated README + design + apply-progress + plan docs | All test, build, and typecheck gates green |
+| VERIFY | `npm run test:tui`, `npm run test:exports`, `npm run test:integration`, `npm run build`, `npm run test:typecheck:strict` | All PASS |
+
+## Verification Evidence (this batch)
+- `npm run test:tui` → PASS (3 suites, 91+ assertions; includes the new `alt+shift+m` focused assertion and the legacy `ctrl+alt+f` absence guard)
+- `npm run test:exports` → PASS (7 assertions)
+- `npm run test:integration` → PASS (5 integration suites, ~150 assertions; includes the strengthened per-layer regression guard)
+- `npm run build` → PASS (TypeScript compiles)
+- `npm run test:typecheck:strict` → PASS (strict typecheck)
+
+## Workload / PR Boundary
+- Mode: targeted fix (no `size:exception` required)
+- Current work unit: shortcut correction + docs sync
+- Boundary: binding mnemonic + tests + docs; route / keymap / mode / package / config contracts preserved.
+- Estimated review budget impact: well under 400 changed lines. Autonomous scope, clear rollback (single commit revert).
+
+## Files Changed (this batch)
+- `src/tui.ts` — binding changed from `ctrl+alt+f` to `alt+shift+m`; explanatory comment added.
+- `tests/tui-registration.test.ts` — focused assertion now expects `alt+shift+m`; legacy `ctrl+alt+f` absence guard added.
+- `tests/integration-route-cleanup.test.ts` — focused assertion now expects `alt+shift+m`; legacy `ctrl+alt+f` absence guard strengthened to iterate every registered layer; header JSDoc updated.
+- `README-SETUP.md` — keymap shortcut, test description, and integration suite description updated.
+- `openspec/changes/model-control-center-tui/apply-progress.md` — this section added.
+- `openspec/changes/model-control-center-tui/task-7-design.md` — "Runtime and collision checks" updated; ASCII diagram updated.
+- `openspec/changes/model-control-center-tui/task-2-design.md` — user-visible contract updated.
+- `docs/plans/2026-07-21-model-control-center-tui-design.md` — Goal, ASCII diagram, and runtime constraint updated.
+- `docs/plans/2026-07-21-model-control-center-tui-implementation-plan.md` — Goal, cover bullets, ASCII trace, and step-2 verification note updated.
+
+## Risks
+- Alt+Shift+M is free on OpenCode 1.18.4 but a future host release could bind it differently. The strengthened regression guard only catches the historical collision (`ctrl+alt+f`); a future host collision on `alt+shift+m` would not be auto-detected. The supported OpenCode version contract is `>= 1.17.11`; a release-notes check before each plugin release is recommended.
+- The correction only touches the base layer binding. The route-scoped keymap layer in `src/tui/ModelControlCenter.tsx` already uses different chords (`up`/`down`/`enter`/`esc`/`tab`/`shift+tab`/`ctrl+s`) and was not affected.
+
 ## Status
 Completed Task 7 implementation under Strict TDD cycle. All previous Task 2-6 work preserved. Five integration tests added covering the five contract areas from `task-7-design.md`. All Node test suites green. Strict typecheck, build, public exports, and release-safety verification all pass locally. Bun release gate could not be exercised locally (no `bun` binary in this environment); CI executes it on `oven-sh/setup-bun@v2`.
 
@@ -15,13 +93,13 @@ Completed Task 7 implementation under Strict TDD cycle. All previous Task 2-6 wo
 - [x] 3. Model detail view & tabbed interface (Task 4)
 - [x] 4. Durable model-detail persistence & immediate runtime application (Task 5)
 - [x] 5. Quarantine management: TTL/precedence helpers, QuarantineWritePort, use cases, runtime store, screen, navigation integration, and bootstrap interception gate (Task 6)
-- [x] 6. Task 7 — Final integration: end-to-end integration tests, route open/close cleanup, Ctrl+Alt+F host collision, public root & `./tui` package self-reference exports after build, Bun/OpenTUI renderer CI gate with Node/Bun test separation, Prisma migration / database-path / test DB isolation, staged-artifact protection, README + CI updates.
+- [x] 6. Task 7 — Final integration: end-to-end integration tests, route open/close cleanup, `alt+shift+m` host-collision-free binding (replaces the legacy `ctrl+alt+f` which collides with OpenCode 1.18.4's built-in `messages_page_down`), public root & `./tui` package self-reference exports after build, Bun/OpenTUI renderer CI gate with Node/Bun test separation, Prisma migration / database-path / test DB isolation, staged-artifact protection, README + CI updates.
 
 ## Completed Work (Task 7)
 - **Five integration tests** aligned with the 5 design bullets:
   - `tests/integration-model-edit-flow.test.ts` — `SaveModelDetailUseCase` → adapter → DB → `ModelConfigRegistry` publish → next `SddPlugin` interception observes update. Includes the publish-failure resilience path (use case surfaces warning when registry throws, DB persists, next interception rehydrates from DB) and cross-process rehydration (delete `globalThis[Symbol.for('sdd-plugin.model-config-registry.v1')]` then trigger the hook).
   - `tests/integration-quarantine-interception.test.ts` — provider- and model-level set/release; bootstrap interception observes `isActive`; release clears `quarantineType` AND `quarantineUntil` in DB; missing-store fallback (`delete globalThis[Symbol.for('sdd-plugin.quarantine-store.v1')]` → hook re-creates and hydrates from DB).
-  - `tests/integration-route-cleanup.test.ts` — 5 mount/unmount cycles verifying mode push/pop parity, no duplicate route registrations, base keymap layer registered exactly once, route-scoped layer (from `ModelControlCenter`) registered once per mount and disposed on `onCleanup`, plugin unload disposes both layers. Includes Ctrl+Alt+F host collision check: binding registered ONLY on the base layer, command executes `route.navigate('model-control-center')`, supported OpenCode version contract (`>= 1.17.11`) verified.
+  - `tests/integration-route-cleanup.test.ts` — 5 mount/unmount cycles verifying mode push/pop parity, no duplicate route registrations, base keymap layer registered exactly once, route-scoped layer (from `ModelControlCenter`) registered once per mount and disposed on `onCleanup`, plugin unload disposes both layers. Includes host-collision check: base layer registers `alt+shift+m` (the verified-free "Model" mnemonic) bound to `model-control-center.open`, command executes `route.navigate('model-control-center')`, supported OpenCode version contract (`>= 1.17.11`) verified, and a regression guard that the legacy `ctrl+alt+f` binding (which collides with OpenCode 1.18.4's built-in `messages_page_down`) is absent from every layer.
   - `tests/integration-package-exports.test.ts` — `dist/bootstrap/index.js` and `dist/tui.js` exist after build; `package.json` exports map correct; root call as factory returns `tool.execute.before` hook; `./tui` exports `{ id: 'sdd-plugin.tui', tui }`; Bun renderer test source contains the runtime guard + `process.exit(1)` + actionable error message; CI workflow installs Bun and runs `npm run test:tui:bun`; Node test suite does NOT include `tui-bun-renderer`.
   - `tests/integration-release-safety.test.ts` — `resolveDatabasePath()` honors `SDD_PLUGIN_DB_PATH` and falls back to `<repo>/opencode-models.db`; three parallel test DBs are independent files; production DB mtime unchanged after test pushes; `.gitignore` patterns verified; `git check-ignore` confirms `.env`, `dist`, `node_modules`, `opencode-models.db` are ignored; `git status --short` reports no untracked forbidden paths; `git status --ignored` lists `dist/`, `node_modules/`, `opencode-models.db*` as ignored.
 - **Release-safety helpers**:

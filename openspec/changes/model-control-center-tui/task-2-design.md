@@ -8,7 +8,7 @@ One host route, one internal screen state machine. The host route `model-control
 
 ## Screen / State Contract (user-visible)
 
-On `Ctrl+Alt+F` the user sees the **Model Control Center main menu**:
+On `Alt+Shift+M` (Model) the user sees the **Model Control Center main menu**:
 
 ```
 Model Control Center

@@ -1,14 +1,16 @@
 /**
  * Task 7 Integration Test — Route open/close cleanup, listener leak detection,
- * and Ctrl+Alt+F host collision check.
+ * and `alt+shift+m` host collision check.
  *
  * Acceptance scenarios (design.md):
  *   - "Verify route-specific layers and modes are removed on route leave and
  *      plugin unload."
  *   - "Open and close the route repeatedly to detect duplicate registrations
  *      or stale globalThis listeners."
- *   - "Register Ctrl+Alt+F only in the base layer and verify host collision
- *      behavior against the supported OpenCode version."
+ *   - "Register the verified-free mnemonic `alt+shift+m` (Model) in the base
+ *      layer only. The legacy `ctrl+alt+f` is known to collide with OpenCode
+ *      1.18.4's built-in `messages_page_down` (the host keymap owns that
+ *      binding), so it MUST NOT be re-registered by the plugin."
  *   - "Repeated route open/close cycles leave no mode, keymap, listener, or
  *      registry leak."
  */
@@ -145,8 +147,9 @@ async function run() {
   assertOk(layers[0]?.mode === "base", "keymap layer is registered with mode='base'");
   assertOk(typeof layers[0]?.priority === "number", "keymap layer carries a numeric priority");
 
-  // === Host collision: Ctrl+Alt+F is bound on the base layer ONLY ===
-  // The supported OpenCode version contract (peer dependency >= 1.17.11).
+  // === Host collision: the chosen mnemonic MUST be on the base layer ONLY ===
+  // OpenCode 1.18.4 already binds `ctrl+alt+f` to the built-in `messages_page_down`
+  // command, so the plugin uses the verified-free mnemonic `alt+shift+m` ("Model").
   assertOk(api.app.version === "1.18.4", "host API reports supported OpenCode version 1.18.4");
   const [major, minor] = api.app.version.split(".").map(Number) as [number, number];
   assertOk(
@@ -154,15 +157,29 @@ async function run() {
     "host version satisfies >= 1.17.11 peer dependency contract",
   );
 
-  const ctrlAltF = layers[0]?.bindings.find((b: { key?: string; cmd?: string }) => b.key === "ctrl+alt+f");
-  assertOk(ctrlAltF !== undefined, "base layer registers binding 'ctrl+alt+f'");
+  const altShiftM = layers[0]?.bindings.find((b: { key?: string; cmd?: string }) => b.key === "alt+shift+m");
+  assertOk(altShiftM !== undefined, "base layer registers binding 'alt+shift+m'");
   assertOk(
-    ctrlAltF?.cmd === "model-control-center.open",
-    "ctrl+alt+f binding points to command 'model-control-center.open'",
+    altShiftM?.cmd === "model-control-center.open",
+    "alt+shift+m binding points to command 'model-control-center.open'",
   );
   assertOk(
-    typeof ctrlAltF?.desc === "string" && ctrlAltF.desc.length > 0,
-    "ctrl+alt+f binding carries a non-empty description",
+    typeof altShiftM?.desc === "string" && altShiftM.desc.length > 0,
+    "alt+shift+m binding carries a non-empty description",
+  );
+
+  // Regression guard: the legacy 'ctrl+alt+f' binding collides with the host's
+  // built-in `messages_page_down` command on OpenCode 1.18.4 and must NOT be
+  // re-introduced in any layer (base or route-scoped). Iterate every registered
+  // layer to catch a silent re-introduction in any of them.
+  const legacyCollisions = layers.flatMap((layer, layerIndex) =>
+    (layer.bindings as Array<{ key?: string }>)
+      .filter((b) => b.key === "ctrl+alt+f")
+      .map((b) => ({ layerIndex, key: b.key })),
+  );
+  assertOk(
+    legacyCollisions.length === 0,
+    `legacy 'ctrl+alt+f' binding is absent from every layer (host collision guard; found ${legacyCollisions.length} occurrence(s))`,
   );
 
   const openCmd = layers[0]?.commands.find((c: { name?: string; run?: () => unknown }) => c.name === "model-control-center.open");

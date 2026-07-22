@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a native OpenCode TUI opened by `Ctrl+Alt+F` for browsing, editing, and immediately applying model metadata and managing quarantines.
+**Goal:** Add a native OpenCode TUI opened by `Alt+Shift+M` (Model) for browsing, editing, and immediately applying model metadata and managing quarantines. The originally proposed `Ctrl+Alt+F` mnemonic was replaced after investigation showed OpenCode 1.18.4 binds it to `messages_page_down`; an integration regression test guards against re-introducing `Ctrl+Alt+F`.
 
 **Architecture:** Keep the existing plugin factory and refresh pipeline intact. Add a separate TUI bundle with a registered route and plugin-specific keymap mode, backed by the existing Prisma/LibSQL repositories. Persist changes to SQLite first, then update a stable cross-bundle runtime registry so the main plugin observes edits without restart.
 
@@ -23,7 +23,7 @@
 Cover:
 
 - The TUI bundle exposes a plugin-compatible entrypoint without changing the main plugin export.
-- `Ctrl+Alt+F` registers a command that navigates to the Model Control Center route.
+- `Alt+Shift+M` (Model) registers a command that navigates to the Model Control Center route. The originally proposed `Ctrl+Alt+F` was discarded after investigation showed it collides with OpenCode 1.18.4's built-in `messages_page_down` binding; the regression test asserts the legacy `Ctrl+Alt+F` is absent.
 - Route cleanup removes the plugin-specific mode and bindings.
 
 ### Step 2: Run the focused tests
@@ -35,7 +35,7 @@ Expected: FAIL because the TUI entrypoint and route do not exist.
 ### Step 3: Implement the minimum route registration
 
 - Register a route named for the Model Control Center.
-- Register a base-mode command and `ctrl+alt+f` binding through `api.keymap.registerLayer`.
+- Register a base-mode command and `alt+shift+m` binding (verified free of host collisions on OpenCode 1.18.4) through `api.keymap.registerLayer`. The original `ctrl+alt+f` shortcut was abandoned because OpenCode 1.18.4 already binds it to the built-in `messages_page_down` command — the legacy binding must NOT be re-introduced.
 - Push a route-specific mode while the route is mounted and clean it up on unmount.
 - Keep the root package export callable and expose the TUI only through the dedicated `./tui` export if the current package layout requires it.
 
@@ -276,14 +276,14 @@ feat: manage model quarantines in tui
 Verify the complete flow:
 
 ```text
-Ctrl+Alt+F -> Models -> provider -> model -> edit -> Ctrl+S -> runtime observes change
+Alt+Shift+M -> Models -> provider -> model -> edit -> Ctrl+S -> runtime observes change
 ```
 
 Also verify opening Quarantines and returning to the main menu.
 
 ### Step 2: Verify host shortcut behavior
 
-Run the integration test against the supported OpenCode host API and document whether `Ctrl+Alt+F` overrides or coexists with the host binding. Do not silently change the requested shortcut.
+Run the integration test against the supported OpenCode host API and document whether the chosen mnemonic (`Alt+Shift+M`) overrides or coexists with the host binding. Original task used `Ctrl+Alt+F`, but it was confirmed to collide with OpenCode 1.18.4's built-in `messages_page_down` and was replaced with `Alt+Shift+M` — a regression test now guards against re-introducing `ctrl+alt+f`.
 
 ### Step 3: Run all verification gates
 

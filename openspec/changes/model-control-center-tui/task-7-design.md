@@ -5,7 +5,7 @@
 ## Acceptance flows
 
 ```text
-Ctrl+Alt+F
+Alt+Shift+M
   -> Models
   -> connected provider
   -> model
@@ -44,7 +44,7 @@ Main menu -> Quarantines -> set/release -> SQLite -> QuarantineStore -> intercep
 
 ## Runtime and collision checks
 
-- Register `Ctrl+Alt+F` only in the base layer and verify host collision behavior against the supported OpenCode version.
+- Register the **verified-free** mnemonic `alt+shift+m` ("Model") in the base layer only. The legacy `ctrl+alt+f` is known to collide with OpenCode 1.18.4's built-in `messages_page_down` (the host keymap owns that binding), so it MUST NOT be re-registered by the plugin. Integration tests assert `alt+shift+m` is bound on the base layer AND that `ctrl+alt+f` is absent from every layer (regression guard).
 - Verify route-specific layers and modes are removed on route leave and plugin unload.
 - Open and close the route repeatedly to detect duplicate registrations or stale globalThis listeners.
 - Verify a missing registry/store never breaks task interception; SQLite read-through remains the fallback.
