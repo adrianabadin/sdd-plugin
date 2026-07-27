@@ -8,6 +8,7 @@ CREATE TABLE "Provider" (
     "metadataEnvelopeHash" TEXT,
     "quarantineType" TEXT,
     "quarantineUntil" DATETIME,
+    "quarantineReason" TEXT,
     "updatedAt" DATETIME NOT NULL
 );
 
@@ -27,6 +28,7 @@ CREATE TABLE "Model" (
     "multineedle" REAL,
     "quarantineType" TEXT,
     "quarantineUntil" DATETIME,
+    "quarantineReason" TEXT,
     "updatedAt" DATETIME NOT NULL
 );
 
@@ -37,6 +39,7 @@ CREATE TABLE "ModelProvider" (
     "providerId" TEXT NOT NULL,
     "quarantineType" TEXT,
     "quarantineUntil" DATETIME,
+    "quarantineReason" TEXT,
     CONSTRAINT "ModelProvider_modelId_fkey" FOREIGN KEY ("modelId") REFERENCES "Model" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "ModelProvider_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "Provider" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );

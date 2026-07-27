@@ -15,6 +15,11 @@ export interface SaveModelDetailCommand {
       mmlu: number | null;
       humaneval: number | null;
       sweBench: number | null;
+      gpqa: number | null;
+      math: number | null;
+      bbh: number | null;
+      mtBench: number | null;
+      multineedle: number | null;
     };
     metadata: ModelMetadata;
   };

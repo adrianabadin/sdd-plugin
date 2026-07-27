@@ -18,10 +18,21 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  createSchemaDatabase,
+  makeTempDir,
+  removeTempDir,
+  restoreEnv,
+  snapshotEnv,
+} from "./helpers/temp-database.js";
 
 console.log("--- Task 7 Integration: Package Self-Reference Exports + Bun Runtime Gate ---");
 
 const failures: string[] = [];
+
+/** Environment isolation so the real per-user database is never involved. */
+const exportsEnvSnapshot = snapshotEnv();
+const exportsTmpDir = makeTempDir("sdd-pkg-exports-");
 
 function assertOk(condition: unknown, message: string): void {
   if (!condition) {
@@ -54,6 +65,21 @@ async function run() {
   assertOk(typeof rootMod["SddPlugin"] === "function", "dist/bootstrap/index.js exports callable SddPlugin");
   assertOk(typeof rootMod["default"] === "function", "dist/bootstrap/index.js exports callable default");
   assertOk(rootMod["SddPlugin"] === rootMod["default"], "root default and named SddPlugin exports refer to the same function");
+  // Invoke the built plugin against an ISOLATED temp user-data directory with a
+  // temp legacy source. Without this the call would silently resolve the real
+  // per-user database and could pass purely because that database is already
+  // populated.
+  const isolatedDataDir = path.join(exportsTmpDir, "user-data");
+  const isolatedLegacyDb = path.join(exportsTmpDir, "legacy", "opencode-models.db");
+  const isolatedDestDb = path.join(isolatedDataDir, "opencode-models.db");
+  createSchemaDatabase(isolatedLegacyDb);
+
+  process.env.SDD_PLUGIN_DATA_DIR = isolatedDataDir;
+  process.env.SDD_PLUGIN_LEGACY_DB_PATH = isolatedLegacyDb;
+  delete process.env.SDD_PLUGIN_DB_PATH;
+
+  assertOk(!existsSync(isolatedDestDb), "isolated user-data database does not exist before first run");
+
   const hookMap = await (rootMod["SddPlugin"] as (ctx: unknown) => Promise<Record<string, unknown>>)({
     project: "self-reference",
     client: {},
@@ -62,6 +88,10 @@ async function run() {
   assertOk(
     hookMap !== null && typeof hookMap["tool.execute.before"] === "function",
     "root SddPlugin invocation returns hook map with tool.execute.before",
+  );
+  assertOk(
+    existsSync(isolatedDestDb),
+    "built bootstrap performed first-run migration into the isolated temp user-data directory",
   );
 
   // === TUI self-reference resolves and exports { id, tui } ===
@@ -101,14 +131,22 @@ async function run() {
   console.log("\n=== INTEGRATION PACKAGE EXPORTS + BUN GATE SUMMARY ===");
   if (failures.length === 0) {
     console.log("All package self-reference and Bun runtime gate assertions passed.");
+    cleanup();
     process.exit(0);
   } else {
     console.error(failures.length + " assertion(s) failed.");
+    cleanup();
     process.exit(1);
   }
 }
 
+function cleanup(): void {
+  restoreEnv(exportsEnvSnapshot);
+  removeTempDir(exportsTmpDir);
+}
+
 run().catch((err) => {
   console.error(err);
+  cleanup();
   process.exit(1);
 });

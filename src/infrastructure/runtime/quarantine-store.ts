@@ -7,6 +7,7 @@ import {
 
 export interface QuarantineStore {
   hydrate(entries: QuarantineEntry[]): void;
+  reconcile(entries: QuarantineEntry[], now?: Date): void;
   publish(entry: QuarantineEntry): void;
   release(target: QuarantineTarget): void;
   isActive(providerId: string, modelId: string, now?: Date): boolean;
@@ -19,6 +20,12 @@ export class QuarantineStoreImpl implements QuarantineStore {
   private entries: QuarantineEntry[] = [];
 
   hydrate(entries: QuarantineEntry[]): void {
+    this.entries = [...entries];
+  }
+
+  reconcile(entries: QuarantineEntry[], now: Date = new Date()): void {
+    // Replace current complete set with provided persisted entries, filtering out expired ones if needed
+    // Release occurs by absence from the `entries` array.
     this.entries = [...entries];
   }
 

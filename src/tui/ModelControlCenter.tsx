@@ -1,6 +1,7 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { JSX } from "@opentui/solid";
-import { createSignal, createEffect, onCleanup, onMount } from "solid-js";
+import { jsx, jsxs } from "@opentui/solid/jsx-runtime";
+import { createSignal, createEffect, createMemo, onCleanup, onMount } from "solid-js";
 import { createComponent } from "solid-js/web";
 import type { ModelCatalogPort } from "../ports/model-catalog.port.js";
 import type { ModelDetailQueryPort } from "../ports/model-detail-query.port.js";
@@ -22,6 +23,41 @@ import {
   type LoadedDetail,
   type DetailDraft,
 } from "./model-detail-view.js";
+import {
+  appendNumericEdit,
+  backspaceNumericEdit,
+  getNumericFieldDescriptor,
+  parseNumericEdit,
+  startNumericEdit,
+  updateNumericDetailField,
+  type NumericDetailTab,
+  type NumericEditSession,
+} from "./model-detail-numeric-edit.js";
+import {
+  startFieldEdit,
+  appendFieldEdit,
+  backspaceFieldEdit,
+  commitFieldEdit,
+  getSubscriptionFieldDescriptors,
+  type FieldDescriptor,
+  type FieldEditSession,
+  ACTIVE_FIELD_EDIT_PRIORITY,
+} from "./model-detail-field-edit.js";
+import {
+  type QuarantineOverlayState,
+  type QuarantineOverlayFocus,
+  createQuarantineOverlay,
+  updateQuarantineOverlayBuffer,
+  setQuarantineOverlayFocus,
+  cycleQuarantineOverlayFocus,
+  setQuarantineOverlayDuration,
+  setQuarantineOverlayLevel,
+  setQuarantineOverlayError,
+  buildQuarantineDraft,
+  validateQuarantineOverlayBuffers,
+  buildQuarantineTarget,
+} from "./quarantine-overlay.js";
+import { deriveQuarantineView } from "./quarantine-view.js";
 import { validateDraft, type ValidationResult } from "./detail-validation.js";
 import {
   createInitialStack,
@@ -31,13 +67,15 @@ import {
 } from "./navigation.js";
 
 import type { SaveModelDetailUseCase } from "../application/save-model-detail/save-model-detail.use-case.js";
-import type { QuarantineWritePort } from "../ports/quarantine-write.port.js";
+import type { QuarantineWritePort, SetQuarantineCommand } from "../ports/quarantine-write.port.js";
 import type {
   ListQuarantinesUseCase,
   SetQuarantineUseCase,
   ReleaseQuarantineUseCase,
 } from "../application/quarantine/index.js";
 import type { QuarantineEntry } from "../domain/model/quarantine.js";
+
+const NUMERIC_DIGIT_KEYS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] as const;
 
 export interface ModelControlCenterProps {
   api: TuiPluginApi;
@@ -48,6 +86,21 @@ export interface ModelControlCenterProps {
   listQuarantinesUseCase?: ListQuarantinesUseCase | undefined;
   setQuarantineUseCase?: SetQuarantineUseCase | undefined;
   releaseQuarantineUseCase?: ReleaseQuarantineUseCase | undefined;
+  /**
+   * When persistence initialization failed the parent supplies a normalized
+   * reason. Save is blocked and the rendered notice surfaces the actionable
+   * cause. This avoids the silent in-memory fallback that would otherwise
+   * make Save look successful without durable storage.
+   */
+  persistenceUnavailableReason?: string | undefined;
+  /**
+   * Optional close callback invoked when the user requests explicit close
+   * (root Escape on the main menu). If omitted, the component falls back
+   * to `api.ui.dialog.clear()` for the dialog stack to consume.
+   * The host dialog `onClose` (not this callback) is what the
+   * host invokes after the user closes the dialog via host means.
+   */
+  onClose?: () => void;
 }
 
 export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element {
@@ -60,16 +113,262 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
   const [detailDraft, setDetailDraft] = createSignal<DetailDraft | null>(null);
   const [detailNotice, setDetailNotice] = createSignal<string | undefined>(undefined);
   const [detailValidation, setDetailValidation] = createSignal<ValidationResult | undefined>(undefined);
+  const [numericEdit, setNumericEdit] = createSignal<(
+    NumericEditSession & { tab: NumericDetailTab; index: number }
+  ) | null>(null);
+  const [genericFieldEdit, setGenericFieldEdit] = createSignal<FieldEditSession<unknown> | null>(null);
 
   // Task 6 Quarantine signals
   const [quarantines, setQuarantines] = createSignal<QuarantineEntry[]>([]);
   const [quarantineLoading, setQuarantineLoading] = createSignal<boolean>(false);
   const [quarantineError, setQuarantineError] = createSignal<string | undefined>(undefined);
   const [quarantineNotice, setQuarantineNotice] = createSignal<string | undefined>(undefined);
+  const [quarantineOverlay, setQuarantineOverlay] = createSignal<QuarantineOverlayState | null>(null);
 
-  const initialRouteName = props.api.route?.current?.name ?? "home";
+  // NOTE: removed `initialRouteName` (route presentation migration). The
+  // Model Control Center no longer captures a host route to return to;
+  // root-exit calls `props.onClose` (or `api.ui.dialog.clear()` as a
+  // fallback) so the host dialog stack handles the close surface.
 
-  // Effect to load quarantine entries when entering quarantines screen
+  // Priority 300 active capture layer effect (field editing & quarantine overlay)
+  createEffect(() => {
+    const isEditingField = genericFieldEdit() !== null;
+    const isOverlayActive = quarantineOverlay() !== null;
+
+    if (!isEditingField && !isOverlayActive) return;
+    if (!props.api.keymap?.registerLayer) return;
+
+    const layerDisposer = props.api.keymap.registerLayer({
+      priority: ACTIVE_FIELD_EDIT_PRIORITY,
+      commands: [
+        {
+          name: "mcc.capture.char",
+          title: "Capture Printable Input",
+          run: (ctx?: unknown) => {
+            const ch = (ctx && typeof ctx === "object" && "ch" in ctx && typeof (ctx as { ch?: unknown }).ch === "string") ? (ctx as { ch: string }).ch : "";
+            if (!ch) return;
+            if (genericFieldEdit()) {
+              setGenericFieldEdit((prev) => (prev ? appendFieldEdit(prev, ch) : null));
+            } else if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              if (ov.mode === "release") return;
+              if (ov.focus === "scope") {
+                const nextLevel = ov.level === "provider" ? "model" : "provider";
+                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+              } else if (ov.focus === "duration") {
+                const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
+                setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
+              } else if (ov.focus === "id") {
+                const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, ch));
+              } else if (ov.focus === "reason") {
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "reason", ch));
+              } else if (ov.focus === "ttl") {
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "ttlHours", ch));
+              }
+            }
+          },
+        },
+        {
+          name: "mcc.capture.backspace",
+          title: "Capture Backspace",
+          run: () => {
+            if (genericFieldEdit()) {
+              setGenericFieldEdit((prev) => (prev ? backspaceFieldEdit(prev) : null));
+            } else if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              if (ov.mode === "release") return;
+              if (ov.focus === "id") {
+                const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, "<backspace>"));
+              } else if (ov.focus === "reason") {
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "reason", "<backspace>"));
+              } else if (ov.focus === "ttl") {
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "ttlHours", "<backspace>"));
+              }
+            }
+          },
+        },
+        {
+          name: "mcc.capture.tab",
+          title: "Capture Tab / Focus Next",
+          run: () => {
+            if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              setQuarantineOverlay(cycleQuarantineOverlayFocus(ov, "next"));
+            }
+          },
+        },
+        {
+          name: "mcc.capture.shift-tab",
+          title: "Capture Shift+Tab / Focus Prev",
+          run: () => {
+            if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              setQuarantineOverlay(cycleQuarantineOverlayFocus(ov, "prev"));
+            }
+          },
+        },
+        {
+          name: "mcc.capture.left",
+          title: "Capture Left Arrow",
+          run: () => {
+            if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              if (ov.focus === "scope") {
+                const nextLevel = ov.level === "provider" ? "model" : "provider";
+                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+              } else if (ov.focus === "duration") {
+                const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
+                setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
+              }
+            }
+          },
+        },
+        {
+          name: "mcc.capture.right",
+          title: "Capture Right Arrow",
+          run: () => {
+            if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              if (ov.focus === "scope") {
+                const nextLevel = ov.level === "provider" ? "model" : "provider";
+                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+              } else if (ov.focus === "duration") {
+                const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
+                setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
+              }
+            }
+          },
+        },
+        {
+          name: "mcc.capture.commit",
+          title: "Commit Active Input",
+          run: () => {
+            if (genericFieldEdit()) {
+              const session = genericFieldEdit()!;
+              const committed = commitFieldEdit(session);
+              if (!committed.ok) {
+                setGenericFieldEdit({ ...session, error: committed.error });
+                return;
+              }
+              const draft = detailDraft();
+              if (draft) {
+                setDetailDraft(session.descriptor.update(draft, committed.value));
+              }
+              setGenericFieldEdit(null);
+              setDetailValidation(undefined);
+              setDetailNotice(undefined);
+            } else if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              if (ov.mode === "release") {
+                const view = deriveQuarantineView(quarantines());
+                const targetItem = ov.targetIndex !== undefined ? view.items[ov.targetIndex] : undefined;
+                if (!targetItem) {
+                  setQuarantineOverlay(null);
+                  return;
+                }
+                const target = buildQuarantineTarget(ov, targetItem.entry);
+                setQuarantineOverlay(null);
+                setQuarantineLoading(true);
+
+                const releaser = props.releaseQuarantineUseCase
+                  ? props.releaseQuarantineUseCase.releaseFromTarget(target)
+                  : props.quarantinePort
+                    ? props.quarantinePort.releaseQuarantine(target)
+                    : Promise.resolve();
+
+                releaser
+                  .then(() => {
+                    setQuarantineNotice("Quarantine released");
+                    const fetcher = props.listQuarantinesUseCase
+                      ? props.listQuarantinesUseCase.execute()
+                      : props.quarantinePort
+                        ? props.quarantinePort.listQuarantines()
+                        : Promise.resolve([]);
+                    return fetcher.then((entries) => setQuarantines(entries));
+                  })
+                  .catch((err: unknown) => {
+                    setQuarantineOverlay(setQuarantineOverlayError(ov, err instanceof Error ? err.message : String(err)));
+                  })
+                  .finally(() => setQuarantineLoading(false));
+              } else {
+                // create or modify mode
+                try {
+                  const draft = buildQuarantineDraft(ov);
+                  const valRes = validateQuarantineOverlayBuffers(draft);
+                  if (!valRes.ok) {
+                    setQuarantineOverlay(setQuarantineOverlayError(ov, valRes.error));
+                    return;
+                  }
+                  setQuarantineOverlay(null);
+                  setQuarantineLoading(true);
+
+                  const cmd: SetQuarantineCommand = {
+                    level: valRes.draft.level,
+                    type: valRes.draft.duration.kind,
+                    reason: valRes.draft.reason,
+                    ...(valRes.draft.providerId ? { providerId: valRes.draft.providerId } : {}),
+                    ...(valRes.draft.modelId ? { modelId: valRes.draft.modelId } : {}),
+                    ...(valRes.draft.duration.kind === "ttl" ? { until: new Date(Date.now() + valRes.draft.duration.hours * 3600000) } : {}),
+                  };
+                  const submitter = props.setQuarantineUseCase
+                    ? props.setQuarantineUseCase.submitDraft(valRes.draft)
+                    : props.quarantinePort
+                      ? props.quarantinePort.setQuarantine(cmd)
+                      : Promise.reject(new Error("No quarantine use case or port available"));
+
+                  submitter
+                    .then(() => {
+                      setQuarantineNotice(ov.mode === "create" ? "Quarantine created" : "Quarantine modified");
+                      const fetcher = props.listQuarantinesUseCase
+                        ? props.listQuarantinesUseCase.execute()
+                        : props.quarantinePort
+                          ? props.quarantinePort.listQuarantines()
+                          : Promise.resolve([]);
+                      return fetcher.then((entries) => setQuarantines(entries));
+                    })
+                    .catch((err: unknown) => {
+                      setQuarantineOverlay(setQuarantineOverlayError(ov, err instanceof Error ? err.message : String(err)));
+                    })
+                    .finally(() => setQuarantineLoading(false));
+                } catch (err: unknown) {
+                  setQuarantineOverlay(setQuarantineOverlayError(ov, err instanceof Error ? err.message : String(err)));
+                }
+              }
+            }
+          },
+        },
+        {
+          name: "mcc.capture.cancel",
+          title: "Cancel Active Input",
+          run: () => {
+            if (genericFieldEdit()) {
+              setGenericFieldEdit(null);
+            } else if (quarantineOverlay()) {
+              setQuarantineOverlay(null);
+            }
+          },
+        },
+      ],
+      bindings: [
+        { key: "<character>", cmd: "mcc.capture.char" },
+        { key: "backspace", cmd: "mcc.capture.backspace" },
+        { key: "tab", cmd: "mcc.capture.tab" },
+        { key: "shift+tab", cmd: "mcc.capture.shift-tab" },
+        { key: "left", cmd: "mcc.capture.left" },
+        { key: "right", cmd: "mcc.capture.right" },
+        { key: "enter", cmd: "mcc.capture.commit" },
+        { key: "esc", cmd: "mcc.capture.cancel" },
+      ],
+    });
+
+    onCleanup(() => {
+      if (typeof layerDisposer === "function") {
+        layerDisposer();
+      }
+    });
+  });
   createEffect(() => {
     const current = currentScreen();
     if (current.name === "quarantines") {
@@ -113,12 +412,14 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
             setDetailDraft(createDraft(merged));
             setDetailNotice(persisted ? undefined : "No saved metadata record; showing catalog defaults.");
             setDetailValidation(undefined);
+            setNumericEdit(null);
           })
           .catch((err: unknown) => {
             const merged = mergeModelDetail(catalogMatch, null, providerId, modelId);
             setLoadedBaseline(merged);
             setDetailDraft(createDraft(merged));
             setDetailNotice(`Error querying persisted detail: ${String(err)}`);
+            setNumericEdit(null);
           });
       } else {
         const merged = mergeModelDetail(catalogMatch, null, providerId, modelId);
@@ -126,6 +427,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         setDetailDraft(createDraft(merged));
         setDetailNotice(undefined);
         setDetailValidation(undefined);
+        setNumericEdit(null);
       }
     }
   });
@@ -196,7 +498,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
     return {};
   }
 
-  async function handleSaveIntent(): Promise<void> {
+async function handleSaveIntent(): Promise<void> {
     const draft = detailDraft();
     if (!draft) return;
     const res = validateDraft(draft);
@@ -206,13 +508,20 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
       return;
     }
 
+    // Persistence is unavailable: block Save entirely (no in-memory fallback).
+    if (!props.saveDetailUseCase) {
+      const why = props.persistenceUnavailableReason ?? 'Save use case is not wired';
+      setDetailValidation(undefined);
+      setDetailNotice(`Persistence unavailable: ${why}. Save is disabled.`);
+      return;
+    }
+
     const current = currentScreen();
     if (current.name !== "model-detail") return;
     const { providerId, modelId } = current;
     const base = loadedBaseline();
 
-    if (props.saveDetailUseCase) {
-      try {
+    try {
         const saveRes = await props.saveDetailUseCase.execute({
           providerId,
           modelId,
@@ -233,6 +542,11 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
             mmlu: draft.benchmarks.mmlu !== null ? Number(draft.benchmarks.mmlu) : null,
             humaneval: draft.benchmarks.humaneval !== null ? Number(draft.benchmarks.humaneval) : null,
             sweBench: draft.benchmarks.sweBench !== null ? Number(draft.benchmarks.sweBench) : null,
+            gpqa: draft.benchmarks.gpqa !== null ? Number(draft.benchmarks.gpqa) : null,
+            math: draft.benchmarks.math !== null ? Number(draft.benchmarks.math) : null,
+            bbh: draft.benchmarks.bbh !== null ? Number(draft.benchmarks.bbh) : null,
+            mtBench: draft.benchmarks.mtBench !== null ? Number(draft.benchmarks.mtBench) : null,
+            multineedle: draft.benchmarks.multineedle !== null ? Number(draft.benchmarks.multineedle) : null,
           },
           pricing: {
             inputPerMillion: draft.inputPerMillion !== null ? Number(draft.inputPerMillion) : null,
@@ -243,18 +557,39 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
           expectedEnvelopeHash: base?.metadataEnvelopeHash ?? null,
         });
 
-        const newBase: LoadedDetail = {
-          ...draft,
-          metadataEnvelopeHash: saveRes.envelopeHash,
-          updatedAt: saveRes.updatedAt,
-        };
-        setLoadedBaseline(newBase);
-        setDetailDraft(createDraft(newBase));
-        setDetailValidation(undefined);
-        if (saveRes.warning) {
-          setDetailNotice(`Saved & committed (Warn: ${saveRes.warning})`);
+        // Branch on the typed outcome. Verified swaps baseline/draft and
+        // renders the success notice; committed-unverified KEEPS the prior
+        // baseline/draft (no swap, no in-memory "clean" promotion), does
+        // NOT publish to the runtime registry (the use case guarantees
+        // that), and renders a truthful fix-forward warning with the
+        // mismatches/guidance so the user can identify what committed.
+        if (saveRes.outcome === 'verified') {
+          const newBase: LoadedDetail = {
+            ...draft,
+            metadataEnvelopeHash: saveRes.envelopeHash,
+            updatedAt: saveRes.updatedAt,
+          };
+          setLoadedBaseline(newBase);
+          setDetailDraft(createDraft(newBase));
+          setDetailValidation(undefined);
+          setDetailNotice(
+            saveRes.warning
+              ? `Database persistence verified but live runtime application failed.`
+              : `Persisted and verified`,
+          );
         } else {
-          setDetailNotice("Saved & applied to running plugin");
+          // committed-unverified: prior baseline/draft remain unchanged.
+          // Render the warning/guidance notice so the user can identify
+          // what committed and what to reconcile.
+          const mismatchLines = (saveRes.mismatches ?? []).slice(0, 3).join('; ');
+          const more = (saveRes.mismatches ?? []).length > 3 ? '…' : '';
+          const guidance = saveRes.guidance ?? 'Verification disagreed after commit.';
+          const notice =
+            `Save committed (hash ${saveRes.envelopeHash}) but verifier disagrees — no live publication.` +
+            (mismatchLines ? ` Mismatches: ${mismatchLines}${more}.` : '') +
+            ` ${guidance}`;
+          setDetailValidation(undefined);
+          setDetailNotice(notice);
         }
       } catch (err: any) {
         if (err.message && err.message.includes("Conflict")) {
@@ -272,19 +607,106 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         } else {
           setDetailNotice(`Save error: ${err.message}`);
         }
-      }
-    } else {
-      setLoadedBaseline(draft);
-      setDetailNotice("Validated — in-memory baseline updated");
-      setDetailValidation(undefined);
     }
+  }
+
+  function appendNumericInput(input: string): void {
+    setNumericEdit((current) => {
+      if (!current) return current;
+      const next = appendNumericEdit(current, input);
+      return { tab: current.tab, index: current.index, buffer: next.buffer };
+    });
+  }
+
+  function deleteNumericInput(): void {
+    setNumericEdit((current) => {
+      if (!current) return current;
+      const next = backspaceNumericEdit(current);
+      return { tab: current.tab, index: current.index, buffer: next.buffer };
+    });
+  }
+
+  function commitNumericEdit(): void {
+    const edit = numericEdit();
+    const draft = detailDraft();
+    if (!edit || !draft) return;
+
+    const parsed = parseNumericEdit(edit);
+    if (!parsed.ok) {
+      setNumericEdit({ ...edit, error: parsed.error });
+      return;
+    }
+
+    setDetailDraft(updateNumericDetailField(draft, edit.tab, edit.index, parsed.value));
+    setNumericEdit(null);
+    setDetailValidation(undefined);
+    setDetailNotice(undefined);
   }
 
   function dispatch(event: NavigationEvent): void {
     const current = currentScreen();
 
+    if (numericEdit()) {
+      if (event.type === "activate") {
+        commitNumericEdit();
+        return;
+      }
+      if (event.type === "back") {
+        setNumericEdit(null);
+        return;
+      }
+      if (event.type === "tab-next" || event.type === "tab-prev") {
+        return;
+      }
+    }
+
+    if (
+      event.type === "activate" &&
+      current.name === "model-detail" &&
+      current.focus?.area === "fields"
+    ) {
+      const draft = detailDraft();
+      if (draft) {
+        if (current.tab === "subscription" && current.focus.index >= 2) {
+          const descriptor = getSubscriptionFieldDescriptors()[current.focus.index - 2];
+          if (descriptor) {
+            setGenericFieldEdit(startFieldEdit(descriptor, descriptor.read(draft)));
+            return;
+          }
+        } else {
+          const descriptor = getNumericFieldDescriptor(current.tab, current.focus.index);
+          if (descriptor) {
+            setNumericEdit({
+              tab: descriptor.tab,
+              index: descriptor.index,
+              ...startNumericEdit(descriptor.read(draft)),
+            });
+            return;
+          }
+        }
+      }
+    }
+
     if (event.type === "save-intent") {
       if (current.name === "model-detail") {
+        if (genericFieldEdit()) {
+          const session = genericFieldEdit()!;
+          const committed = commitFieldEdit(session);
+          if (!committed.ok) {
+            setGenericFieldEdit({ ...session, error: committed.error });
+            return; // Invalid active generic buffer blocks Save
+          }
+          const draft = detailDraft();
+          if (draft) {
+            setDetailDraft(session.descriptor.update(draft, committed.value));
+          }
+          setGenericFieldEdit(null);
+        } else if (numericEdit()) {
+          commitNumericEdit();
+          if (numericEdit()?.error) {
+            return; // Invalid/incomplete active numeric buffer blocks Save
+          }
+        }
         handleSaveIntent();
       }
       return;
@@ -307,18 +729,26 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
 
     const result = handleNavigation(stack(), event, maxIndex, providerId, modelId);
     if (result.exited) {
-      if (props.api.route?.navigate) {
-        props.api.route.navigate(initialRouteName);
+      // Root escape: ask the host to close the dialog. If the parent
+      // (`tui.ts` renderDialog) provided an onClose, it owns the close
+      // ordering (idempotent dispose + slot clear + dialog.clear()).
+      // Otherwise fall back to clearing the host dialog stack directly.
+      if (props.onClose) {
+        props.onClose();
+      } else if (props.api.ui?.dialog?.clear) {
+        props.api.ui.dialog.clear();
       }
     } else {
       setStack(result.stack);
     }
   }
 
-  // Register mode-scoped keymap layer for Model Control Center TUI
+  // Register component-lifetime keymap layer (modeless, priority 200).
+  // No `mode` field — the MCC layer preempts host default-priority
+  // bindings for the component lifetime; host already owns the modal
+  // surface (no competing mode push).
   if (props.api.keymap?.registerLayer) {
     const layerDisposer = props.api.keymap.registerLayer({
-      mode: "model-control-center",
       priority: 200,
       commands: [
         {
@@ -335,6 +765,48 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
           name: "mcc.nav.activate",
           title: "Activate Selection",
           run: () => dispatch({ type: "activate" }),
+        },
+        {
+          name: "mcc.quarantine.create",
+          title: "Create Quarantine Overlay",
+          run: () => {
+            const current = currentScreen();
+            if (current.name === "quarantines" && !quarantineOverlay()) {
+              setQuarantineOverlay(createQuarantineOverlay("create"));
+            }
+          },
+        },
+        {
+          name: "mcc.quarantine.modify",
+          title: "Modify Quarantine Overlay",
+          run: () => {
+            const current = currentScreen();
+            if (current.name === "quarantines" && !quarantineOverlay()) {
+              const view = deriveQuarantineView(quarantines());
+              const selectedItem = view.items[current.selectedIndex];
+              if (selectedItem) {
+                setQuarantineOverlay(
+                  createQuarantineOverlay("modify", current.selectedIndex, selectedItem.entry)
+                );
+              }
+            }
+          },
+        },
+        {
+          name: "mcc.quarantine.release",
+          title: "Release Quarantine Overlay",
+          run: () => {
+            const current = currentScreen();
+            if (current.name === "quarantines" && !quarantineOverlay()) {
+              const view = deriveQuarantineView(quarantines());
+              const selectedItem = view.items[current.selectedIndex];
+              if (selectedItem) {
+                setQuarantineOverlay(
+                  createQuarantineOverlay("release", current.selectedIndex, selectedItem.entry)
+                );
+              }
+            }
+          },
         },
         {
           name: "mcc.nav.back",
@@ -361,16 +833,40 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
           title: "Validate / Save Draft Intent",
           run: () => dispatch({ type: "save-intent" }),
         },
+        ...NUMERIC_DIGIT_KEYS.map((digit) => ({
+          name: `mcc.form.numeric-${digit}`,
+          title: `Append Numeric Digit ${digit}`,
+          run: () => appendNumericInput(digit),
+        })),
+        {
+          name: "mcc.form.numeric-decimal",
+          title: "Append Numeric Decimal Point",
+          run: () => appendNumericInput("."),
+        },
+        {
+          name: "mcc.form.numeric-backspace",
+          title: "Delete Numeric Character",
+          run: () => deleteNumericInput(),
+        },
       ],
       bindings: [
         { key: "up", cmd: "mcc.nav.up" },
         { key: "down", cmd: "mcc.nav.down" },
         { key: "enter", cmd: "mcc.nav.activate" },
+        { key: "c", cmd: "mcc.quarantine.create" },
+        { key: "m", cmd: "mcc.quarantine.modify" },
+        { key: "r", cmd: "mcc.quarantine.release" },
         { key: "esc", cmd: "mcc.nav.back" },
         { key: "/", cmd: "mcc.nav.search-start" },
         { key: "tab", cmd: "mcc.nav.tab-next" },
         { key: "shift+tab", cmd: "mcc.nav.tab-prev" },
         { key: "ctrl+s", cmd: "mcc.form.save" },
+        ...NUMERIC_DIGIT_KEYS.map((digit) => ({
+          key: digit,
+          cmd: `mcc.form.numeric-${digit}`,
+        })),
+        { key: ".", cmd: "mcc.form.numeric-decimal" },
+        { key: "backspace", cmd: "mcc.form.numeric-backspace" },
       ],
     });
 
@@ -390,22 +886,37 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
     const screen = currentScreen();
     const catState = catalogState();
 
+    // Plain non-focusable box/text JSX for loading/error states. Host
+    // DialogAlert owns Return/Esc which would steal MCC keymap ownership.
+    const plainStatus = (title: string, message: string, isError: boolean): JSX.Element =>
+      jsxs("box", {
+        flexDirection: "column",
+        borderStyle: "single",
+        padding: 1,
+        children: [
+          jsx("text", {
+            bold: true,
+            color: isError ? "red" : "yellow",
+            children: title,
+          }),
+          jsx("text", { marginTop: 1, children: message }),
+        ],
+      });
+
     switch (screen.name) {
       case "main-menu":
         return createComponent(MainMenu, { selectedIndex: screen.selectedIndex, api: props.api });
 
       case "providers": {
         if (catState.status === "loading") {
-          return createComponent(props.api.ui.DialogAlert, {
-            title: "Connected Providers",
-            message: "Loading connected providers...",
-          });
+          return plainStatus("Connected Providers", "Loading connected providers...", false);
         }
         if (catState.status === "error") {
-          return createComponent(props.api.ui.DialogAlert, {
-            title: "Connected Providers Error",
-            message: `Error loading catalog: ${catState.message}`,
-          });
+          return plainStatus(
+            "Connected Providers Error",
+            `Error loading catalog: ${catState.message}`,
+            true,
+          );
         }
         return createComponent(ProvidersScreen, {
           api: props.api,
@@ -420,6 +931,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
           entries: quarantines(),
           selectedIndex: screen.selectedIndex,
           loading: quarantineLoading(),
+          overlay: quarantineOverlay(),
         };
         if (quarantineError() !== undefined) screenProps.error = quarantineError();
         if (quarantineNotice() !== undefined) screenProps.notice = quarantineNotice();
@@ -428,16 +940,18 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
 
       case "models": {
         if (catState.status === "loading") {
-          return createComponent(props.api.ui.DialogAlert, {
-            title: `Models (${screen.providerId})`,
-            message: "Loading models...",
-          });
+          return plainStatus(
+            `Models (${screen.providerId})`,
+            "Loading models...",
+            false,
+          );
         }
         if (catState.status === "error") {
-          return createComponent(props.api.ui.DialogAlert, {
-            title: `Models Error (${screen.providerId})`,
-            message: `Error loading models: ${catState.message}`,
-          });
+          return plainStatus(
+            `Models Error (${screen.providerId})`,
+            `Error loading models: ${catState.message}`,
+            true,
+          );
         }
         const allForProv = catState.modelsByProvider.get(screen.providerId) ?? [];
         const visibleModels = filterModels(allForProv, screen.query);
@@ -456,11 +970,13 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         const base = loadedBaseline();
         const draft = detailDraft();
         if (!base || !draft) {
-          return createComponent(props.api.ui.DialogAlert, {
-            title: `Model Detail (${screen.modelId})`,
-            message: "Loading model detail...",
-          });
+          return plainStatus(
+            `Model Detail (${screen.modelId})`,
+            "Loading model detail...",
+            false,
+          );
         }
+        const genericEdit = genericFieldEdit();
         return createComponent(ModelDetailScreen, {
           api: props.api,
           providerId: screen.providerId,
@@ -471,12 +987,34 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
           draft,
           validation: detailValidation(),
           notice: detailNotice(),
+          numericEdit: numericEdit() ?? undefined,
+          fieldEdit: genericEdit
+            ? genericEdit.error !== undefined
+              ? { descriptor: genericEdit.descriptor, buffer: genericEdit.buffer, error: genericEdit.error }
+              : { descriptor: genericEdit.descriptor, buffer: genericEdit.buffer }
+            : undefined,
         });
       }
     }
   };
 
-  return renderActiveScreen();
+  // Phase 4: active screen reactive inside this owned component
+  // (component-lifetime reactive owner). The accessor body approach
+  // (`createMemo(() => renderActiveScreen())`) was tested and the
+  // OpenTUI renderer did NOT re-insert on signal change. Per the
+  // design's explicit fallback, use a getter-based children prop so
+  // the children expression is re-evaluated on signal change. The
+  // Switch/Match wrapper and the explicit IIFE were also tried and
+  // did not produce re-insertion in this renderer. Module-scope memo
+  // or bare accessor root are FORBIDDEN.
+  const activeScreen = createMemo(() => renderActiveScreen());
+
+  return jsx("box", {
+    flexDirection: "column",
+    get children() {
+      return activeScreen();
+    },
+  });
 }
 
 export default ModelControlCenter;

@@ -6,6 +6,13 @@ export interface QuarantineItemView {
   targetLabel: string;
   statusLabel: string;
   isActive: boolean;
+  /**
+   * Trimmed, non-empty reason for the entry. `null` when the entry has no
+   * reason (legacy rows or a release/empty state). The PR3 overlay and
+   * list surface this verbatim; the screen does NOT fabricate text for
+   * missing reasons.
+   */
+  reasonLabel: string | null;
 }
 
 export interface QuarantineViewResult {
@@ -46,12 +53,22 @@ export function deriveQuarantineView(
       }
     }
 
+    // Trim the reason at view time so legacy rows that stored a leading
+    // whitespace value still display cleanly. The persisted column is
+    // preserved verbatim — only the rendered label is trimmed.
+    const rawReason = entry.reason ?? null;
+    const reasonLabel =
+      typeof rawReason === "string" && rawReason.trim().length > 0
+        ? rawReason.trim()
+        : null;
+
     return {
       entry,
       level: entry.level,
       targetLabel,
       statusLabel,
       isActive: active,
+      reasonLabel,
     };
   });
 

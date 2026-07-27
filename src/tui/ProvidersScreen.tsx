@@ -1,5 +1,6 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { JSX } from "@opentui/solid";
+import { jsx, jsxs } from "@opentui/solid/jsx-runtime";
 import type { ProviderSummary } from "./catalog-view.js";
 
 export interface ProvidersScreenProps {
@@ -9,22 +10,36 @@ export interface ProvidersScreenProps {
 }
 
 export function ProvidersScreen(props: ProvidersScreenProps): JSX.Element {
-  if (props.providers.length === 0) {
-    return props.api.ui.DialogAlert({
-      title: "Connected Providers",
-      message: "No connected providers",
-    });
-  }
-
-  const items = props.providers.map((p, idx) => {
-    const isSelected = idx === props.selectedIndex;
-    const prefix = isSelected ? "> " : "  ";
-    return `${prefix}${p.providerId} (${p.modelCount} models)`;
-  });
-
-  return props.api.ui.DialogAlert({
-    title: "Connected Providers",
-    message: items.join("\n"),
+  // Plain non-focusable OpenTUI box/text JSX. The `api` prop is
+  // retained for type compatibility but is not consulted here.
+  void props.api;
+  return jsxs("box", {
+    flexDirection: "column",
+    borderStyle: "single",
+    padding: 1,
+    children: [
+      jsx("text", { bold: true, color: "cyan", children: "Connected Providers" }),
+      props.providers.length === 0
+        ? jsx("text", { marginTop: 1, dimColor: true, children: "No connected providers" })
+        : jsxs("box", {
+            flexDirection: "column",
+            marginTop: 1,
+            children: props.providers.map((p, idx) => {
+              const isSelected = idx === props.selectedIndex;
+              const prefix = isSelected ? "> " : "  ";
+              return jsx("text", {
+                color: isSelected ? "green" : "white",
+                bold: isSelected,
+                children: `${prefix}${p.providerId} (${p.modelCount} models)`,
+              });
+            }),
+          }),
+      jsx("text", {
+        dimColor: true,
+        marginTop: 1,
+        children: "↑/↓ move · Enter open · Esc back",
+      }),
+    ],
   });
 }
 

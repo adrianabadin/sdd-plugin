@@ -13,20 +13,86 @@ import { fileURLToPath } from "node:url";
 import { ListConnectedModelsUseCase } from "../application/list-connected-models/list-connected-models.use-case.js";
 import { SyncConnectedModelsUseCase } from "../application/sync-connected-models/sync-connected-models.use-case.js";
 import { SaveModelDetailUseCase } from "../application/save-model-detail/save-model-detail.use-case.js";
+import { ListQuarantinesUseCase } from "../application/quarantine/index.js";
 import { BackgroundModelRefreshCoordinator } from "../application/background-model-refresh-coordinator.js";
 import { OpenCodeAppLogNotifierAdapter } from "../infrastructure/logging/opencode-app-log.notifier.adapter.js";
 import { ModelRefreshTraceLogger } from "../infrastructure/logging/model-refresh-trace.logger.js";
 import { OpenCodeModelCatalogAdapter } from "../infrastructure/opencode/opencode-model-catalog.adapter.js";
 import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
-import { resolveDatabasePath } from "../infrastructure/runtime/database-path.js";
+import { resolveDatabasePath, initializeDatabase } from "../infrastructure/runtime/database-path.js";
 import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 
+/**
+ * Clients created by this composition root.
+ *
+ * The OpenCode bootstrap contract (`SddPluginContext`) exposes no lifecycle or
+ * dispose callback, so there is no host hook to register against. Ownership is
+ * therefore explicit: every client built here is tracked and released by
+ * `disposeBootstrapPersistence()`, which is idempotent and single-flight.
+ */
+const bootstrapClients = new Set<PrismaClient>();
+let bootstrapDisposePromise: Promise<void> | null = null;
+
+/**
+ * Apply the runtime PRAGMAs every bootstrap connection must enforce:
+ * `foreign_keys = ON`, `synchronous = FULL`, and `busy_timeout = 5000`. libSQL
+ * opens a fresh native SQLite connection per Prisma client and inherits the
+ * file's journal_mode; `foreign_keys`, `synchronous`, and `busy_timeout` are
+ * per-connection settings that must be applied directly through the Prisma
+ * client. The async call is dispatched so the synchronous getPrismaClient()
+ * boundary stays compatible with the existing composition contract; any
+ * failure is logged, never swallowed.
+ *
+ * `busy_timeout` enforces the bounded contention bound the persistence spec
+ * requires: writers wait up to 5000ms for the SQLite writer lock to clear
+ * before failing explicitly. The value is the same constant the TUI writer
+ * and verifier use so the bootstrap client honors the same contract.
+ */
+async function applyRuntimePragmas(client: PrismaClient): Promise<void> {
+  await client.$executeRawUnsafe('PRAGMA foreign_keys = ON;');
+  await client.$executeRawUnsafe('PRAGMA synchronous = FULL;');
+  await client.$executeRawUnsafe('PRAGMA busy_timeout = 5000;');
+}
+
 export function getPrismaClient(): PrismaClient {
-  const dbPath = resolveDatabasePath();
-  process.env.DATABASE_URL = `file:${dbPath}`;
-  const prismaAdapter = new PrismaLibSql({ url: `file:${dbPath}` });
-  return new PrismaClient({ adapter: prismaAdapter });
+  const dbPath = initializeDatabase();
+  const prismaAdapter = new PrismaLibSql({
+    url: `file:${dbPath}`,
+    // libsql's open-time timeout is what governs SQLITE_BUSY behavior in
+    // practice; `PRAGMA busy_timeout` alone is insufficient. Setting the
+    // timeout at construction pins the bounded contention bound the spec
+    // requires and matches the PRAGMA readback invariant.
+    timeout: BOOTSTRAP_BUSY_TIMEOUT_MS,
+  });
+  const client = new PrismaClient({ adapter: prismaAdapter });
+  bootstrapClients.add(client);
+  void applyRuntimePragmas(client).catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[sdd-plugin.bootstrap] runtime PRAGMA failure: ${message}`);
+  });
+  bootstrapDisposePromise = null;
+  return client;
+}
+
+/** Per-connection busy_timeout applied to the bootstrap Prisma client. */
+export const BOOTSTRAP_BUSY_TIMEOUT_MS = 5000;
+
+/**
+ * Release every Prisma client owned by the bootstrap composition root.
+ *
+ * Safe to call repeatedly and concurrently: each tracked client receives
+ * exactly one `$disconnect()` per shutdown cycle.
+ */
+export function disposeBootstrapPersistence(): Promise<void> {
+  if (!bootstrapDisposePromise) {
+    const owned = [...bootstrapClients];
+    bootstrapClients.clear();
+    bootstrapDisposePromise = (async () => {
+      await Promise.allSettled(owned.map((client) => client.$disconnect()));
+    })();
+  }
+  return bootstrapDisposePromise;
 }
 
 /**
@@ -167,27 +233,24 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
       }
 
       // Check quarantine store hydration & active status
+      let isQuarantined = false;
       try {
         const quarantineStore = getGlobalQuarantineStore();
-        if (quarantineStore.snapshot().length === 0) {
-          try {
-            const quarantines = await repository.listQuarantines();
-            if (quarantines.length > 0) {
-              quarantineStore.hydrate(quarantines);
-            }
-          } catch (err) {
-            logger.error("Failed DB hydration for quarantine store", err);
-          }
-        }
+        const listQuarantinesUseCase = new ListQuarantinesUseCase(repository, quarantineStore);
+        const quarantines = await listQuarantinesUseCase.execute();
+        quarantineStore.reconcile(quarantines);
 
         if (requestedModel && requestedModel.includes("/")) {
           const [pId, mId] = requestedModel.split("/", 2);
-          if (pId && mId && quarantineStore.isActive(pId, mId)) {
-            logger.info(`Target model ${requestedModel} is currently quarantined.`);
-          }
+          isQuarantined = Boolean(pId && mId && quarantineStore.isActive(pId, mId));
         }
       } catch (err) {
         logger.error("Quarantine check error during task interception", err);
+        throw err;
+      }
+      if (isQuarantined) {
+        logger.info(`Blocking task because model ${requestedModel} is quarantined.`);
+        throw new Error(`Task invocation blocked: model ${requestedModel} is quarantined.`);
       }
 
       coordinator.trigger();

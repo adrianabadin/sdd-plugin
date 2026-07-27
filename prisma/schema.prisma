@@ -22,6 +22,7 @@ model Provider {
   // Cuarentena global para todo el proveedor
   quarantineType       String?   // "ttl", "permanent"
   quarantineUntil      DateTime? 
+  quarantineReason     String?
   
   models               ModelProvider[]
   updatedAt            DateTime        @updatedAt
@@ -48,6 +49,7 @@ model Model {
   // Cuarentena global para este modelo (en cualquier proveedor)
   quarantineType       String?   // "ttl", "permanent"
   quarantineUntil      DateTime? 
+  quarantineReason     String?
 
   providers            ModelProvider[]
   updatedAt            DateTime        @updatedAt
@@ -61,6 +63,7 @@ model ModelProvider {
   // Cuarentena específica de la instancia (ej. el modelo Claude vía Anthropic)
   quarantineType   String?   // "ttl", "permanent"
   quarantineUntil  DateTime? 
+  quarantineReason String?
 
   model            Model     @relation(fields: [modelId], references: [id], onDelete: Cascade)
   provider         Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)

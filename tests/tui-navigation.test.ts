@@ -17,6 +17,7 @@ import ModelControlCenter from "../src/tui/ModelControlCenter.js";
 import MainMenu from "../src/tui/MainMenu.js";
 import SddTuiModule from "../src/tui.js";
 import type { TuiPluginApi, TuiRouteDefinition } from "@opencode-ai/plugin/tui";
+import type { JSX } from "@opentui/solid";
 import { createRoot } from "solid-js";
 
 const failures: string[] = [];
@@ -28,6 +29,29 @@ function assert(condition: unknown, message: string): void {
   } else {
     console.log("  pass: " + message);
   }
+}
+
+/**
+ * OpenTUI's real intrinsic elements (`jsx("box"/"text")`) require the
+ * native FFI renderer, which is only available under Bun. This process
+ * runs under Node (`tsx`), so directly invoking MainMenu/ModelControlCenter
+ * (which construct plain-JSX production content) throws here by design —
+ * it is NOT a lifecycle or keymap-contract bug. Keymap layer registration
+ * happens synchronously BEFORE the JSX construction point inside these
+ * components, so registration/binding assertions remain valid even when
+ * this guard swallows the downstream content-construction error. Content
+ * correctness is proven by `test:tui:bun` and the real-host PTY gate.
+ */
+function isRendererUnavailable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /No renderer found|native FFI is not available/.test(msg);
+}
+
+function logRendererSkip(context: string, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.log(
+    `  SKIP (environment limitation, ${context}): OpenTUI intrinsic content requires Bun native FFI, unavailable under Node/tsx (${msg}). Content assertions deferred to test:tui:bun / real-host PTY.`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -276,7 +300,7 @@ async function main(): Promise<void> {
   console.log("\n5. Testing MainMenu Component Rendering...");
   let registeredLayer: any = null;
   let layerDisposed = false;
-  let navigatedToRoute: string | null = null;
+  let onCloseCallback: (() => void) | null = null;
 
   const mockApi: TuiPluginApi = {
     app: { version: "1.18.4" },
@@ -292,10 +316,8 @@ async function main(): Promise<void> {
     } as never,
     route: {
       register: () => () => {},
-      navigate: (name: string) => {
-        navigatedToRoute = name;
-      },
-      current: { name: "custom-previous-route" },
+      navigate: () => {},
+      current: { name: "home" },
     },
     mode: {
       current: () => "model-control-center",
@@ -328,10 +350,20 @@ async function main(): Promise<void> {
   };
 
   createRoot((dispose) => {
-    const element0 = MainMenu({ selectedIndex: 0, api: mockApi });
-    assert(Boolean(element0), "MainMenu renders element for index 0");
-    const element1 = MainMenu({ selectedIndex: 1, api: mockApi });
-    assert(Boolean(element1), "MainMenu renders element for index 1");
+    try {
+      const element0 = MainMenu({ selectedIndex: 0, api: mockApi });
+      assert(Boolean(element0), "MainMenu renders element for index 0");
+    } catch (err) {
+      if (!isRendererUnavailable(err)) throw err;
+      logRendererSkip("MainMenu renders element for index 0", err);
+    }
+    try {
+      const element1 = MainMenu({ selectedIndex: 1, api: mockApi });
+      assert(Boolean(element1), "MainMenu renders element for index 1");
+    } catch (err) {
+      if (!isRendererUnavailable(err)) throw err;
+      logRendererSkip("MainMenu renders element for index 1", err);
+    }
     dispose();
   });
 
@@ -339,10 +371,28 @@ async function main(): Promise<void> {
   console.log("\n6. Testing ModelControlCenter Component & Keymap Layer...");
 
   createRoot((dispose) => {
-    const rootElement = ModelControlCenter({ api: mockApi });
-    assert(Boolean(rootElement), "ModelControlCenter returns root element");
-    assert(Boolean(registeredLayer), "Mode-scoped keymap layer was registered");
-    assert(registeredLayer.mode === "model-control-center", "Keymap layer mode is 'model-control-center'");
+    try {
+      const rootElement = ModelControlCenter({
+        api: mockApi,
+        onClose: () => {
+          onCloseCallback = () => {};
+          onCloseCallback();
+        },
+      });
+      assert(Boolean(rootElement), "ModelControlCenter returns root element");
+    } catch (err) {
+      if (!isRendererUnavailable(err)) throw err;
+      logRendererSkip("ModelControlCenter returns root element", err);
+    }
+    assert(Boolean(registeredLayer), "Component-lifetime keymap layer was registered");
+    // After Phase 2: the MCC keymap layer is modeless (no `mode` field)
+    // and priority-200. Host owns the modal surface; we do not push a
+    // competing mode.
+    assert(
+      !("mode" in registeredLayer),
+      "Keymap layer has NO 'mode' field (modeless; host owns modal)",
+    );
+    assert(registeredLayer.priority === 200, "Keymap layer priority is 200");
     assert(Array.isArray(registeredLayer.commands), "Keymap layer has commands array");
     assert(Array.isArray(registeredLayer.bindings), "Keymap layer has bindings array");
 
@@ -361,49 +411,131 @@ async function main(): Promise<void> {
     assert(Boolean(tabBinding && tabBinding.cmd === "mcc.nav.tab-next"), "Binding 'tab' -> 'mcc.nav.tab-next'");
     assert(Boolean(shiftTabBinding && shiftTabBinding.cmd === "mcc.nav.tab-prev"), "Binding 'shift+tab' -> 'mcc.nav.tab-prev'");
 
-    // Test Esc at root navigates back to captured route ('custom-previous-route')
+    // Test Esc at root invokes onClose (native dialog contract).
+    let onCloseFired = false;
+    try {
+      const rootElement2 = ModelControlCenter({
+        api: mockApi,
+        onClose: () => {
+          onCloseFired = true;
+        },
+      });
+      assert(Boolean(rootElement2), "ModelControlCenter with onClose returns root element");
+    } catch (err) {
+      if (!isRendererUnavailable(err)) throw err;
+      logRendererSkip("ModelControlCenter with onClose returns root element", err);
+    }
     const backCmd = registeredLayer.commands.find((c: any) => c.name === "mcc.nav.back");
     assert(Boolean(backCmd && typeof backCmd.run === "function"), "Found 'mcc.nav.back' command");
     if (backCmd && typeof backCmd.run === "function") {
       backCmd.run();
-      assert(
-        navigatedToRoute === "custom-previous-route",
-        "Esc at main menu root navigates to captured entry route ('custom-previous-route')"
-      );
+      assert(onCloseFired, "Esc at main menu root invokes props.onClose (native dialog contract)");
     }
 
     dispose();
     assert(layerDisposed, "Keymap layer is disposed when ModelControlCenter unmounts (cleanup)");
   });
 
-  // 7. Integrated Host Route Render
-  console.log("\n7. Testing SddTuiModule Route Mounting...");
-  let routeRegistered = false;
-  let registeredRoutes: TuiRouteDefinition[] = [];
-  const fullMockApi: TuiPluginApi = {
+  // 7. Integrated Host Dialog Mounting (native dialog replacement for route mounting)
+  console.log("\n7. Testing SddTuiModule Dialog Mounting (native dialog contract)...");
+  let baseLayerRegistrations = 0;
+  let componentLayerDisposals = 0;
+  let dialogReplaceInvocations = 0;
+  let dialogClearInvocations = 0;
+  let capturedDialogRender: (() => JSX.Element) | null = null;
+  let capturedDialogOnClose: (() => void) | null = null;
+  const dialogMockApi: TuiPluginApi = {
     ...mockApi,
-    route: {
-      register: (routes) => {
-        routeRegistered = true;
-        registeredRoutes = routes;
-        return () => {};
+    keymap: {
+      registerLayer: (layer: any) => {
+        if (layer.mode === "base") {
+          baseLayerRegistrations++;
+        }
+        registeredLayer = layer;
+        return () => {
+          layerDisposed = true;
+          if (layer.mode !== "base") {
+            componentLayerDisposals++;
+          }
+        };
       },
+    } as never,
+    route: {
+      register: () => () => {},
       navigate: () => {},
       current: { name: "home" },
     },
+    ui: {
+      DialogAlert: (props: any) => props,
+      Dialog: (() => null) as never,
+      DialogConfirm: (() => null) as never,
+      DialogPrompt: (() => null) as never,
+      DialogSelect: (() => null) as never,
+      Slot: (() => null) as never,
+      Prompt: (() => null) as never,
+      toast: () => {},
+      dialog: {
+        replace: (render, onClose) => {
+          dialogReplaceInvocations++;
+          capturedDialogRender = render;
+          capturedDialogOnClose = onClose ?? null;
+        },
+        clear: () => {
+          dialogClearInvocations++;
+        },
+        setSize: () => {},
+        get size() {
+          return "medium" as const;
+        },
+        get depth() {
+          return 0;
+        },
+        get open() {
+          return true;
+        },
+      },
+    },
   };
 
-  await SddTuiModule.tui(fullMockApi, undefined, {} as never);
-  assert(routeRegistered, "TUI module registered route");
-  const mccRoute = registeredRoutes.find((r) => r.name === "model-control-center");
-  assert(Boolean(mccRoute), "Route 'model-control-center' registered");
+  await SddTuiModule.tui(dialogMockApi, undefined, {} as never);
+  assert(baseLayerRegistrations === 1, "tui() registers the base keymap layer exactly once");
+  // The open command is on the base layer; trigger it to call dialog.replace.
+  const openCmd = registeredLayer?.commands?.find((c: any) => c.name === "model-control-center.open");
+  assert(Boolean(openCmd && typeof openCmd.run === "function"), "open command is registered on the base layer");
+  if (openCmd && typeof openCmd.run === "function") {
+    (openCmd.run as () => void)();
+    assert(dialogReplaceInvocations === 1, "open command invokes api.ui.dialog.replace");
 
-  if (mccRoute && typeof mccRoute.render === "function") {
     createRoot((dispose) => {
-      const element = mccRoute.render({ params: {} });
-      assert(Boolean(element), "Route render returns component element");
+      try {
+        (capturedDialogRender as (() => JSX.Element) | null)?.();
+      } catch (err) {
+        if (!isRendererUnavailable(err)) throw err;
+        logRendererSkip("integrated root-Escape lifecycle", err);
+      }
+
+      const rootBackCmd = registeredLayer?.commands?.find((c: any) => c.name === "mcc.nav.back");
+      assert(Boolean(rootBackCmd), "mounted dialog registers mcc.nav.back");
+      assert(componentLayerDisposals === 0, "mounted dialog layer is active before root Escape");
+      assert(dialogClearInvocations === 0, "dialog is not cleared before root Escape");
+
+      rootBackCmd?.run();
+      assert(componentLayerDisposals === 1, "root Escape synchronously disposes the instance layer once");
+      assert(dialogClearInvocations === 1, "root Escape explicitly clears the host dialog once");
+
+      capturedDialogOnClose?.();
+      capturedDialogOnClose?.();
+      assert(componentLayerDisposals === 1, "delayed/repeated host onClose remains idempotent");
+
       dispose();
+      assert(componentLayerDisposals === 1, "outer disposal does not repeat the instance layer disposer");
     });
+
+    const firstDialogRender = capturedDialogRender;
+    (openCmd.run as () => void)();
+    assert(dialogReplaceInvocations === 2, "reopen creates a fresh dialog replacement");
+    assert(capturedDialogRender !== firstDialogRender, "reopen receives a fresh render closure");
+    assert(componentLayerDisposals === 1, "reopen does not revive or redispose the prior layer");
   }
 
   console.log("\n=== TUI NAVIGATION TEST SUMMARY ===");

@@ -18,6 +18,8 @@
     "tests/tui-registration.test.ts",
     "tests/tui-navigation.test.ts",
     "tests/tui-bun-renderer.test.ts",
+    "tests/tui-quarantine-overlay.test.ts",
+    "tests/tui-subscription-editing.test.ts",
     "tests/root-package-exports.test.ts",
     "src/**/*.ts",
     "src/**/*.tsx"

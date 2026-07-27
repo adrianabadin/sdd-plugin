@@ -1,0 +1,59 @@
+{
+  // Scoped typecheck for the durable-persistence suite.
+  //
+  // Mirrors the production strictness (`noUncheckedIndexedAccess`,
+  // `exactOptionalPropertyTypes`) so these tests cannot rely on looser rules
+  // than the code they exercise. Scope is deliberately limited to the
+  // persistence tests plus src/, to avoid pulling in unrelated legacy tests.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+
+    "strict": true,
+    "noImplicitAny": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": [
+    "tests/types/node-sqlite.d.ts",
+    "tests/helpers/temp-database.ts",
+    "tests/helpers/init-child-runner.ts",
+    "tests/runtime-database-path.test.ts",
+    "tests/c1-legacy-discovery.test.ts",
+    "tests/c3-schema-readiness.test.ts",
+    "tests/schema-ddl-drift.test.ts",
+    "tests/c4-verifier-required.test.ts",
+    "tests/c6-prisma-cleanup.test.ts",
+    "tests/awaitable-cleanup.test.ts",
+    "tests/quarantine-reconcile.test.ts",
+    "tests/c6-bootstrap-cleanup.test.ts",
+    "tests/c9-ctrls-buffer.test.ts",
+    "tests/prisma-dependency-versions.test.ts",
+    "tests/error-normalization.test.ts",
+    "tests/all-benchmarks-contract.test.ts",
+    "tests/read-after-write-verification.test.ts",
+    "tests/use-case-save-model-detail.test.ts",
+    "tests/pragma-and-null-semantics.test.ts",
+    "tests/runtime-additive-migration.test.ts",
+    "tests/persistence-unavailable-state.test.ts",
+    "tests/built-tui-persistence.test.ts",
+    "tests/dist-firstrun-probe.test.ts",
+    "tests/rapid-pricing-saves.test.ts",
+    "tests/sqlite-contention.test.ts",
+    "tests/persistence-guard.test.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "exclude": ["node_modules", "dist", "src/index.ts"]
+}

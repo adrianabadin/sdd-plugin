@@ -7,21 +7,30 @@
     ".": "./dist/bootstrap/index.js",
     "./tui": "./dist/tui.js"
   },
+  "files": [
+    "dist/"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsup --config tsup.tui.config.ts",
     "test": "npm run test:all",
     "test:verification": "npx tsx test-verification.ts",
     "test:focused": "npx tsx tests/background-model-refresh-coordinator.test.ts",
     "test:adapter": "npx tsx tests/opencode-model-catalog.adapter.test.ts",
     "test:trace": "npx tsx tests/model-refresh-trace-logger.test.ts",
-    "test:tui": "npx tsx tests/tui-registration.test.ts && npx tsx tests/tui-navigation.test.ts && npx tsx tests/tui-catalog-view.test.ts",
-    "test:tui:bun": "bun tests/tui-bun-renderer.test.ts",
+    "test:tui": "npx tsx tests/tui-registration.test.ts && npx tsx tests/tui-navigation.test.ts && npx tsx tests/tui-catalog-view.test.ts && npx tsx tests/tui-field-editing.test.ts && npx tsx tests/tui-quarantine-overlay.test.ts && npx tsx tests/tui-subscription-editing.test.ts && node tests/tui-built-artifact.test.mjs && npm run test:persistence",
+    "test:persistence": "node scripts/run-persistence-tests.mjs",
+    "test:persistence:guard": "node scripts/persistence-guard.mjs test:persistence",
+    "test:typecheck:persistence": "npx tsc --project tsconfig.persistence-tests.json --noEmit",
+    "test:tui:bun": "node scripts/run-bun-tests.mjs tests/tui-bun-renderer.test.ts tests/tui-numeric-editing.test.ts tests/c9-ctrls-save.bun.test.ts tests/tui-quarantine-overlay.bun.test.ts tests/tui-subscription-editing.bun.test.ts",
     "test:exports": "npx tsx tests/root-package-exports.test.ts",
     "test:typecheck:strict": "npx tsc --project tsconfig.test.json --noEmit",
     "test:integration": "npx tsx tests/integration-model-edit-flow.test.ts && npx tsx tests/integration-quarantine-interception.test.ts && npx tsx tests/integration-route-cleanup.test.ts && npx tsx tests/integration-package-exports.test.ts && npx tsx tests/integration-release-safety.test.ts",
     "test:release-safety": "npm run test:integration && npm run test:exports && npm run test:typecheck:strict",
     "verify:release-safety": "node scripts/verify-release-safety.mjs",
-    "test:all": "npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace && npm run test:tui && npm run test:exports && npm run test:typecheck:strict && npm run test:integration",
+    "test:all": "npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace && npm run build && npm run test:tui && npm run test:exports && npm run test:typecheck:strict && npm run test:typecheck:persistence && npm run test:integration && npm run test:persistence:guard",
     "trace:tail": "node -e \"const fs=require('fs'),os=require('os'),path=require('path');const p=process.env.SDD_PLUGIN_TRACE_PATH||path.join(os.homedir(),'.cache','sdd-plugin','model-refresh.log');try{const lines=fs.readFileSync(p,'utf8').trimEnd().split('\\n');for(const l of lines.slice(-50))process.stdout.write(l+'\\n');}catch(e){console.error('no trace yet:',e.message);)}\""
   },
   "repository": {
@@ -42,16 +51,17 @@
   "devDependencies": {
     "@opentui/core": "^0.4.5",
     "@opentui/keymap": "^0.4.5",
-    "@opentui/solid": "^0.4.5",
     "@types/node": "^20.17.0",
+    "tsup": "8.5.1",
     "tsx": "^4.23.1",
     "typescript": "5.9.3"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
-    "@prisma/adapter-libsql": "^7.9.0",
-    "@prisma/client": "^7.8.0",
-    "prisma": "^7.8.0",
+    "@opentui/solid": "^0.4.5",
+    "@prisma/adapter-libsql": "7.8.0",
+    "@prisma/client": "7.8.0",
+    "prisma": "7.8.0",
     "solid-js": "1.9.12"
   }
 }

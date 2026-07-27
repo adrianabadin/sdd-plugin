@@ -1,7 +1,6 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { JSX } from "@opentui/solid";
 import { jsx, jsxs } from "@opentui/solid/jsx-runtime";
-import { createComponent } from "solid-js/web";
 import { MENU_OPTIONS } from "./navigation.js";
 
 export interface MainMenuProps {
@@ -10,17 +9,11 @@ export interface MainMenuProps {
 }
 
 export function MainMenu(props: MainMenuProps): JSX.Element {
-  const selectedOption = MENU_OPTIONS[props.selectedIndex] ?? "models";
-  const selectedLabel = selectedOption === "models" ? "Models" : "Quarantines";
-
-  // Fallback to api.ui.DialogAlert when running in test/mock environment without OpenTUI renderer
-  if (props.api?.ui?.DialogAlert) {
-    return createComponent(props.api.ui.DialogAlert, {
-      title: "Model Control Center",
-      message: `Selected: ${selectedLabel}\n\n1. Models\n2. Quarantines\n\n↑/↓ move · Enter open · Esc close`,
-    });
-  }
-
+  // Plain non-focusable OpenTUI box/text JSX. No DialogAlert for normal
+  // navigation screens — host alert primitives own Return/Esc, which
+  // would steal keyboard ownership from the MCC keymap. The `api` prop
+  // is retained for type compatibility but is not consulted here.
+  void props.api;
   return jsxs("box", {
     flexDirection: "column",
     borderStyle: "single",

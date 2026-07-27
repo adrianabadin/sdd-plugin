@@ -109,7 +109,8 @@ async function run() {
 
   // === Use case wires through shared resolver + adapter ===
   const adapter = new PrismaModelRepositoryAdapter(prisma);
-  const useCase = new SaveModelDetailUseCase(adapter, registry);
+  const verifierAdapter = new PrismaModelRepositoryAdapter(prisma);
+  const useCase = new SaveModelDetailUseCase(adapter, registry, verifierAdapter);
 
   const result = await useCase.execute({
     providerId: "anthropic",
@@ -125,7 +126,16 @@ async function run() {
     contextWindow: 200_000,
     maxOutputTokens: 8192,
     capabilities: ["coding", "vision"],
-    benchmarks: { mmlu: 88.7, humaneval: 92.0, sweBench: 49.0 },
+    benchmarks: {
+      mmlu: 88.7,
+      humaneval: 92.0,
+      sweBench: 49.0,
+      gpqa: null,
+      math: null,
+      bbh: null,
+      mtBench: null,
+      multineedle: null,
+    },
     pricing: {
       inputPerMillion: 3.0,
       outputPerMillion: 15.0,
@@ -135,7 +145,7 @@ async function run() {
     expectedEnvelopeHash: null,
   });
 
-  assertOk(result.success === true, "use case reports success");
+  assertOk(result.outcome === "verified", "use case reports verified");
   assertOk(typeof result.envelopeHash === "string" && result.envelopeHash.length > 0, "envelope hash returned");
 
   // Registry reflects the immediate application
@@ -163,6 +173,25 @@ async function run() {
   // DB has the persisted record
   const persisted = await prisma.provider.findUnique({ where: { id: "anthropic" } });
   assertOk(persisted !== null && persisted.name === "Anthropic", "DB provider row persists updated name");
+  assertOk(persisted !== null && persisted.metadata !== null, "DB provider row has non-null metadata");
+  if (persisted && persisted.metadata) {
+    const meta = JSON.parse(persisted.metadata);
+    assertOk(meta.planName === "Team", "subscription planName persisted in Provider.metadata JSON");
+    assertOk(meta.periodicCost === 30, "subscription periodicCost persisted in Provider.metadata JSON");
+    assertOk(meta.includedUsage === 500, "subscription includedUsage persisted in Provider.metadata JSON");
+    assertOk(meta.overageRate === 0.02, "subscription overageRate persisted in Provider.metadata JSON");
+  }
+
+  // Verification readback via independent adapter query confirms exact values
+  const verifiedDetail = await verifierAdapter.findModelDetail("anthropic", "claude-3-5-sonnet");
+  assertOk(verifiedDetail !== null, "verifier adapter readback succeeds");
+  if (verifiedDetail) {
+    const pMeta = verifiedDetail.providerMetadata as { planName?: string; periodicCost?: number; includedUsage?: number; overageRate?: number } | null;
+    assertOk(pMeta?.planName === "Team", "verifier readback confirms planName");
+    assertOk(pMeta?.periodicCost === 30, "verifier readback confirms periodicCost");
+    assertOk(pMeta?.includedUsage === 500, "verifier readback confirms includedUsage");
+    assertOk(pMeta?.overageRate === 0.02, "verifier readback confirms overageRate");
+  }
   const persistedModel = await prisma.model.findUnique({ where: { id: "claude-3-5-sonnet" } });
   assertOk(
     persistedModel !== null && persistedModel.mmlu === 88.7 && persistedModel.humaneval === 92.0,
@@ -234,12 +263,12 @@ async function run() {
   });
 
   const throwOnce = new ThrowOnFirstPublishRegistry();
-  const failUseCase = new SaveModelDetailUseCase(adapter, throwOnce);
+  const failUseCase = new SaveModelDetailUseCase(adapter, throwOnce, verifierAdapter);
   const failResult = await failUseCase.execute({
     providerId: "google",
     modelId: "gemini-1-5-pro",
     providerName: "Google",
-    modelName: "Gemini 1.5 Pro",
+    modelName: "Gemini 1.5 Pro v2",
     isBlocked: false,
     subscription: null,
     planName: null,
@@ -248,17 +277,31 @@ async function run() {
     overageRate: null,
     contextWindow: 1_000_000,
     maxOutputTokens: 8192,
-    capabilities: ["coding"],
-    benchmarks: { mmlu: 80, humaneval: 70, sweBench: 30 },
-    pricing: null,
+    capabilities: ["vision", "reasoning"],
+    benchmarks: {
+      mmlu: 85.9,
+      humaneval: 84.1,
+      sweBench: 41.5,
+      gpqa: null,
+      math: null,
+      bbh: null,
+      mtBench: null,
+      multineedle: null,
+    },
+    pricing: {
+      inputPerMillion: 1.25,
+      outputPerMillion: 5.0,
+      cachedPerMillion: 0.3,
+      currency: "USD",
+    },
     expectedEnvelopeHash: null,
   });
-  assertOk(failResult.success === true, "save with failing publish reports success");
+  assertOk(failResult.outcome === "verified", "save with failing publish reports verified");
   assertOk(typeof failResult.warning === "string", "save with failing publish surfaces warning");
   assertOk(throwOnce.publishCount === 1, "failing publish attempted exactly once");
 
   const persistedAfterFail = await prisma.model.findUnique({ where: { id: "gemini-1-5-pro" } });
-  assertOk(persistedAfterFail?.mmlu === 80, "DB persists benchmark despite publish failure");
+  assertOk(persistedAfterFail?.mmlu === 85.9, "DB persists benchmark despite publish failure");
 
   // Next interception rehydrates from DB
   delete (globalThis as Record<symbol, unknown>)[REGISTRY_SYMBOL];

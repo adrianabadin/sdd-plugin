@@ -28,12 +28,13 @@ import type { RefreshTraceContext } from "../../ports/model-catalog.port.js";
 import type { ModelRefreshTraceLogger } from "../logging/model-refresh-trace.logger.js";
 import type { QuarantineType, QuarantineEntry, QuarantineTarget } from "../../domain/model/quarantine.js";
 import type { QuarantineWritePort, SetQuarantineCommand } from "../../ports/quarantine-write.port.js";
+import type { QuarantineQueryPort, PersistedQuarantine } from "../../ports/quarantine-query.port.js";
 
 /**
- * Adapter: implement `ModelRepositoryPort`, `ModelDetailQueryPort`, `ModelDetailWritePort`, and `QuarantineWritePort` against Prisma.
+ * Adapter: implement `ModelRepositoryPort`, `ModelDetailQueryPort`, `ModelDetailWritePort`, `QuarantineWritePort`, and `QuarantineQueryPort` against Prisma.
  */
 export class PrismaModelRepositoryAdapter
-  implements ModelRepositoryPort, ModelDetailQueryPort, ModelDetailWritePort, QuarantineWritePort
+  implements ModelRepositoryPort, ModelDetailQueryPort, ModelDetailWritePort, QuarantineWritePort, QuarantineQueryPort
 {
   private readonly trace: ModelRefreshTraceLogger | undefined;
 
@@ -44,7 +45,52 @@ export class PrismaModelRepositoryAdapter
     this.trace = options.trace;
   }
 
+  /**
+   * Bounded in-flight gate for saveModelDetail.
+   *
+   * If another save is already executing, the second caller awaits the
+   * first's completion rather than racing it. Pricing history uses a
+   * millisecond `now`, so overlapping transactions would otherwise pile
+   * onto the same timestamp and produce a non-deterministic active row.
+   *
+   * The gate chain is one-deep per instance: sequential calls run in
+   * order, never concurrently. This is the simplest contract that
+   * preserves determinism; a more elaborate per-model queueing would be
+   * overkill for the current call patterns.
+   */
+  private saveChain: Promise<unknown> = Promise.resolve();
+
   async saveModelDetail(cmd: SaveModelDetailCommand): Promise<{ updatedAt: Date; envelopeHash: string }> {
+    const previous = this.saveChain;
+    let release: () => void = () => undefined;
+    this.saveChain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this.runSave(cmd);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Per-instance monotonically-increasing timestamp counter.
+   *
+   * `effectiveFrom` is stored at millisecond resolution. When many saves
+   * arrive in the same millisecond we still need strictly increasing
+   * timestamps so the readback's ORDER BY effectiveFrom DESC, id DESC is
+   * unambiguous. The counter feeds the `now` value used for both the
+   * provider/model `updatedAt` and the pricing row's `effectiveFrom`.
+   */
+  private monotonicNowMs: number = 0;
+  private nextNow(): number {
+    const candidate = Date.now();
+    this.monotonicNowMs = candidate > this.monotonicNowMs ? candidate : this.monotonicNowMs + 1;
+    return this.monotonicNowMs;
+  }
+
+  private async runSave(cmd: SaveModelDetailCommand): Promise<{ updatedAt: Date; envelopeHash: string }> {
     const correlationId = this.trace?.newCorrelationId() ?? "";
     const startedAt = Date.now();
     if (this.trace) {
@@ -60,7 +106,7 @@ export class PrismaModelRepositoryAdapter
       const envelopeHash = computeEnvelopeHash(cmd.provider.metadata, cmd.model.metadata);
       const serializedProviderMeta = serializeProviderMetadata(cmd.provider.metadata);
       const serializedModelMeta = serializeModelMetadata(cmd.model.metadata);
-      const now = new Date();
+      const now = new Date(this.nextNow());
 
       const result = await this.prisma.$transaction(async (tx) => {
         // Optimistic check on envelope hash if client expected a specific baseline
@@ -113,6 +159,11 @@ export class PrismaModelRepositoryAdapter
             mmlu: cmd.model.benchmarks.mmlu,
             humaneval: cmd.model.benchmarks.humaneval,
             sweBench: cmd.model.benchmarks.sweBench,
+            gpqa: cmd.model.benchmarks.gpqa,
+            math: cmd.model.benchmarks.math,
+            bbh: cmd.model.benchmarks.bbh,
+            mtBench: cmd.model.benchmarks.mtBench,
+            multineedle: cmd.model.benchmarks.multineedle,
             metadata: serializedModelMeta,
             metadataEnvelopeHash: envelopeHash,
             updatedAt: now,
@@ -123,6 +174,11 @@ export class PrismaModelRepositoryAdapter
             mmlu: cmd.model.benchmarks.mmlu,
             humaneval: cmd.model.benchmarks.humaneval,
             sweBench: cmd.model.benchmarks.sweBench,
+            gpqa: cmd.model.benchmarks.gpqa,
+            math: cmd.model.benchmarks.math,
+            bbh: cmd.model.benchmarks.bbh,
+            mtBench: cmd.model.benchmarks.mtBench,
+            multineedle: cmd.model.benchmarks.multineedle,
             metadata: serializedModelMeta,
             metadataEnvelopeHash: envelopeHash,
             updatedAt: now,
@@ -144,14 +200,23 @@ export class PrismaModelRepositoryAdapter
           },
         });
 
-        // 4. Insert Pricing row if pricing details provided
-        if (cmd.pricing) {
-          // Close prior pricing validity
-          await tx.modelProviderPricing.updateMany({
-            where: { modelProviderId: mp.id, effectiveUntil: null },
-            data: { effectiveUntil: now },
-          });
+        // 4. Pricing truthfulness.
+        //
+        // The Save contract must close any active pricing row regardless of
+        // whether new pricing data was provided:
+        //   - pricing: <obj>   -> close active row, then insert the new row.
+        //   - pricing: null    -> close the active row; durable state now has
+        //                       no active pricing and registry publish must
+        //                       also reflect that (pricing = null).
+        //
+        // Leaving stale rows active while the runtime reports null would
+        // split the save contract, so we always normalize here.
+        await tx.modelProviderPricing.updateMany({
+          where: { modelProviderId: mp.id, effectiveUntil: null },
+          data: { effectiveUntil: now },
+        });
 
+        if (cmd.pricing) {
           await tx.modelProviderPricing.create({
             data: {
               modelProviderId: mp.id,
@@ -404,8 +469,15 @@ export class PrismaModelRepositoryAdapter
       include: {
         provider: true,
         model: true,
+        // Latest pricing is the active row (effectiveUntil IS NULL), ordered by
+        // effectiveFrom desc with id desc as a stable tiebreaker. The include
+        // filter ensures stale rows are never returned to readers.
         pricing: {
-          orderBy: { effectiveFrom: "desc" },
+          where: { effectiveUntil: null },
+          orderBy: [
+            { effectiveFrom: "desc" },
+            { id: "desc" },
+          ],
           take: 1,
         },
       },
@@ -538,25 +610,32 @@ export class PrismaModelRepositoryAdapter
 
   async setQuarantine(cmd: SetQuarantineCommand): Promise<QuarantineEntry> {
     const until = cmd.type === "ttl" && cmd.until ? cmd.until : null;
+    // Persist the trimmed non-empty reason or NULL; the use case is
+    // expected to have validated non-emptiness, but we re-trim defensively
+    // so a stray whitespace-only value never lands in storage.
+    const reason =
+      typeof cmd.reason === "string" && cmd.reason.trim().length > 0
+        ? cmd.reason.trim()
+        : null;
     await this.prisma.$transaction(async (tx) => {
       if (cmd.level === "provider") {
         if (!cmd.providerId) throw new Error("providerId required for provider quarantine");
         await tx.provider.update({
           where: { id: cmd.providerId },
-          data: { quarantineType: cmd.type, quarantineUntil: until },
+          data: { quarantineType: cmd.type, quarantineUntil: until, quarantineReason: reason },
         });
       } else if (cmd.level === "model") {
         if (!cmd.modelId) throw new Error("modelId required for model quarantine");
         await tx.model.update({
           where: { id: cmd.modelId },
-          data: { quarantineType: cmd.type, quarantineUntil: until },
+          data: { quarantineType: cmd.type, quarantineUntil: until, quarantineReason: reason },
         });
       } else if (cmd.level === "modelProvider") {
         if (!cmd.providerId || !cmd.modelId)
           throw new Error("providerId and modelId required for connection quarantine");
         await tx.modelProvider.update({
           where: { modelId_providerId: { modelId: cmd.modelId, providerId: cmd.providerId } },
-          data: { quarantineType: cmd.type, quarantineUntil: until },
+          data: { quarantineType: cmd.type, quarantineUntil: until, quarantineReason: reason },
         });
       }
     });
@@ -564,6 +643,7 @@ export class PrismaModelRepositoryAdapter
       level: cmd.level,
       type: cmd.type,
       until,
+      reason,
     };
     if (cmd.providerId !== undefined) entry.providerId = cmd.providerId;
     if (cmd.modelId !== undefined) entry.modelId = cmd.modelId;
@@ -576,20 +656,20 @@ export class PrismaModelRepositoryAdapter
         if (!target.providerId) throw new Error("providerId required to release provider quarantine");
         await tx.provider.update({
           where: { id: target.providerId },
-          data: { quarantineType: null, quarantineUntil: null },
+          data: { quarantineType: null, quarantineUntil: null, quarantineReason: null },
         });
       } else if (target.level === "model") {
         if (!target.modelId) throw new Error("modelId required to release model quarantine");
         await tx.model.update({
           where: { id: target.modelId },
-          data: { quarantineType: null, quarantineUntil: null },
+          data: { quarantineType: null, quarantineUntil: null, quarantineReason: null },
         });
       } else if (target.level === "modelProvider") {
         if (!target.providerId || !target.modelId)
           throw new Error("providerId and modelId required to release connection quarantine");
         await tx.modelProvider.update({
           where: { modelId_providerId: { modelId: target.modelId, providerId: target.providerId } },
-          data: { quarantineType: null, quarantineUntil: null },
+          data: { quarantineType: null, quarantineUntil: null, quarantineReason: null },
         });
       }
     });
@@ -616,6 +696,7 @@ export class PrismaModelRepositoryAdapter
           providerId: p.id,
           type: p.quarantineType as QuarantineType,
           until: p.quarantineUntil,
+          reason: p.quarantineReason ?? null,
         });
       }
     }
@@ -626,6 +707,7 @@ export class PrismaModelRepositoryAdapter
           modelId: m.id,
           type: m.quarantineType as QuarantineType,
           until: m.quarantineUntil,
+          reason: m.quarantineReason ?? null,
         });
       }
     }
@@ -637,10 +719,66 @@ export class PrismaModelRepositoryAdapter
           modelId: mp.modelId,
           type: mp.quarantineType as QuarantineType,
           until: mp.quarantineUntil,
+          reason: mp.quarantineReason ?? null,
         });
       }
     }
     return result;
+  }
+
+  /**
+   * Independent readback of a single quarantine row by target tuple.
+   * Returns `null` when the target has no quarantine row (release already
+   * cleared it, or it was never set). The use case treats `null` as a
+   * verification failure on the `set` path and as the expected outcome
+   * on the `release` path.
+   */
+  async findQuarantine(target: QuarantineTarget): Promise<PersistedQuarantine | null> {
+    if (target.level === "provider") {
+      if (!target.providerId) return null;
+      const row = await this.prisma.provider.findUnique({
+        where: { id: target.providerId },
+        select: { id: true, quarantineType: true, quarantineUntil: true, quarantineReason: true },
+      });
+      if (!row || !row.quarantineType) return null;
+      return {
+        level: "provider",
+        providerId: row.id,
+        type: row.quarantineType as QuarantineType,
+        until: row.quarantineUntil ?? null,
+        reason: row.quarantineReason ?? null,
+      };
+    }
+    if (target.level === "model") {
+      if (!target.modelId) return null;
+      const row = await this.prisma.model.findUnique({
+        where: { id: target.modelId },
+        select: { id: true, quarantineType: true, quarantineUntil: true, quarantineReason: true },
+      });
+      if (!row || !row.quarantineType) return null;
+      return {
+        level: "model",
+        modelId: row.id,
+        type: row.quarantineType as QuarantineType,
+        until: row.quarantineUntil ?? null,
+        reason: row.quarantineReason ?? null,
+      };
+    }
+    // modelProvider
+    if (!target.providerId || !target.modelId) return null;
+    const row = await this.prisma.modelProvider.findUnique({
+      where: { modelId_providerId: { modelId: target.modelId, providerId: target.providerId } },
+      select: { providerId: true, modelId: true, quarantineType: true, quarantineUntil: true, quarantineReason: true },
+    });
+    if (!row || !row.quarantineType) return null;
+    return {
+      level: "modelProvider",
+      providerId: row.providerId,
+      modelId: row.modelId,
+      type: row.quarantineType as QuarantineType,
+      until: row.quarantineUntil ?? null,
+      reason: row.quarantineReason ?? null,
+    };
   }
 }
 

@@ -46,12 +46,11 @@ function run() {
   const resolved = resolveDatabasePath();
   assertOk(resolved === testDbPath, "resolver returns SDD_PLUGIN_DB_PATH when set");
 
-  // === Resolver falls back to project-root DB when env not set ===
+  // === Resolver falls back to platform default / repo DB when env not set ===
   const previousEnv = process.env.SDD_PLUGIN_DB_PATH;
   delete process.env.SDD_PLUGIN_DB_PATH;
   const fallback = resolveDatabasePath();
-  const expectedFallback = path.resolve("opencode-models.db");
-  assertOk(fallback === expectedFallback, `resolver fallback is <repo>/opencode-models.db (got ${fallback})`);
+  assertOk(path.isAbsolute(fallback) && fallback.endsWith('opencode-models.db'), `resolver fallback is absolute opencode-models.db path (got ${fallback})`);
   if (previousEnv !== undefined) process.env.SDD_PLUGIN_DB_PATH = previousEnv;
   else process.env.SDD_PLUGIN_DB_PATH = testDbPath;
 
@@ -101,6 +100,12 @@ function run() {
     { pattern: /^\/?opencode-models\.test(\.|\-|\*)/m, label: "opencode-models.test db variants" },
     { pattern: /\/?src\/generated\/prisma/m, label: "src/generated/prisma" },
     { pattern: /\*\.tsbuildinfo/m, label: "*.tsbuildinfo" },
+    { pattern: /^\/?\.planning\/?$/m, label: ".planning/ local state" },
+    { pattern: /^\/?\.pmc\/?$/m, label: ".pmc/ local state" },
+    { pattern: /^\/?\.mcp\.json$/m, label: ".mcp.json local configuration" },
+    { pattern: /^\/?\.opencode\/?$/m, label: ".opencode/ local state" },
+    { pattern: /^\/?\.atl\/?$/m, label: ".atl/ local state" },
+    { pattern: /^\/?opencode-models\*\.db\*$/m, label: "all opencode-models*.db* artifacts" },
   ];
   for (const { pattern, label } of requiredPatterns) {
     assertOk(pattern.test(gitignore), `.gitignore ignores ${label}`);
@@ -118,10 +123,16 @@ function run() {
     path.resolve("dist"),
     path.resolve("node_modules"),
     path.resolve("opencode-models.db"),
+    path.resolve(".planning"),
+    path.resolve(".pmc"),
+    path.resolve(".mcp.json"),
+    path.resolve(".opencode"),
+    path.resolve(".atl"),
+    path.resolve("opencode-models-smoke.db"),
   ];
   for (const file of forbiddenPaths) {
     try {
-      const out = execSync(`git check-ignore -v "${file}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const out = execSync(`git check-ignore --no-index -v "${file}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
       assertOk(out.length > 0, `git check-ignore reports ${path.basename(file) || file} is ignored`);
     } catch (err: unknown) {
       const e = err as { status?: number; stdout?: string };
@@ -136,7 +147,17 @@ function run() {
     .split("\n")
     .filter((line) => line.startsWith("??"))
     .map((line) => line.substring(3).trim().replace(/^"(.*)"$/, "$1"));
-  const forbiddenSubstrings = ["dist/", "node_modules/", ".env", "opencode-models.db"];
+  const forbiddenSubstrings = [
+    "dist/",
+    "node_modules/",
+    ".env",
+    ".planning/",
+    ".pmc/",
+    ".mcp.json",
+    ".opencode/",
+    ".atl/",
+    "opencode-models",
+  ];
   const forbiddenHits = untrackedPaths.filter((p) => forbiddenSubstrings.some((sub) => p.includes(sub)));
   assertOk(
     forbiddenHits.length === 0,
@@ -149,6 +170,49 @@ function run() {
   assertOk(ignoredHits.some((p) => p === "dist" || p.startsWith("dist/")), "dist/ is listed under ignored paths");
   assertOk(ignoredHits.some((p) => p === "node_modules" || p.startsWith("node_modules/")), "node_modules/ is listed under ignored paths");
   assertOk(ignoredHits.some((p) => p.startsWith("opencode-models.db")), "opencode-models.db* is listed under ignored paths");
+
+  // === .atl hygiene (PR4) — .atl MUST be ignored and NOT tracked.
+  const atlDir = path.resolve(".atl");
+  assertOk(existsSync(atlDir) && statSync(atlDir).isDirectory(), `.atl/ exists locally at ${atlDir}`);
+  // `git ls-files --error-unmatch` exits non-zero when the path is not tracked,
+  // which is the GREEN state we want. Catch the non-zero exit and treat it
+  // as success.
+  let gitLsFilesAtl = "";
+  try {
+    gitLsFilesAtl = execSync("git ls-files --error-unmatch .atl", { encoding: "utf8" }).trim();
+  } catch (err: unknown) {
+    const e = err as { status?: number; stdout?: string; stderr?: string };
+    const msg = `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
+    if (e.status === 1 && /did not match any file/.test(msg)) {
+      gitLsFilesAtl = "";
+    } else {
+      throw err;
+    }
+  }
+  assertOk(
+    gitLsFilesAtl.length === 0,
+    `.atl MUST NOT appear in the Git index (got: ${JSON.stringify(gitLsFilesAtl)})`,
+  );
+  const gitCheckIgnoreAtl = execSync("git check-ignore -v .atl", { encoding: "utf8" }).trim();
+  assertOk(
+    gitCheckIgnoreAtl.length > 0,
+    `.atl MUST be matched by a .gitignore rule (got: ${JSON.stringify(gitCheckIgnoreAtl)})`,
+  );
+  // Local files MUST remain on disk after the PR4 index-only untrack.
+  assertOk(existsSync(atlDir), ".atl/ directory still present on disk after index-only untrack");
+
+  // === Package contents MUST remain dist-only / local-state-free. ===
+  const packageJsonRaw = readFileSync(path.resolve("package.json"), "utf8");
+  const packageJson = JSON.parse(packageJsonRaw) as {
+    files?: string[];
+    name?: string;
+    version?: string;
+  };
+  assertOk(
+    Array.isArray(packageJson.files) &&
+      packageJson.files.every((entry) => entry === "dist/" || entry === "dist"),
+    `package.json "files" allowlist MUST be dist-only (got: ${JSON.stringify(packageJson.files)})`,
+  );
 
   console.log("\n=== INTEGRATION RELEASE SAFETY SUMMARY ===");
   if (failures.length === 0) {
