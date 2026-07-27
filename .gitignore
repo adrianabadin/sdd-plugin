@@ -1,6 +1,8 @@
 
 # PMC (Project Memory Context)
 .worktrees/
+/.planning/
+/.pmc/
 .planning/project-memory-context/enrichment/
 .planning/project-memory-context/intake/
 .planning/project-memory-context/graph/graph.db
@@ -16,6 +18,7 @@ dist/
 node_modules/
 
 # Runtime / production SQLite database (managed by `prisma db push`)
+/opencode-models*.db*
 opencode-models.db
 opencode-models.db-*
 
@@ -28,6 +31,9 @@ opencode-models.db-*
 /.env
 .env.local
 .env.*.local
+/.mcp.json
+/.opencode/
+/.atl/
 
 # Generated Prisma client
 /src/generated/prisma
