@@ -5,6 +5,7 @@ import type { Manifest, ManifestRouteEntry } from "./disk-agent-generator.js";
 export type CanaryErrorCode =
   | "CANARY_FAILED"
   | "PARENT_MODEL_UNAVAILABLE"
+  | "PARENT_MODEL_MISMATCH"
   | "CHILD_SESSION_MISSING"
   | "CANARY_METADATA_MISMATCH"
   | "CANARY_METADATA_UNOBSERVABLE"
@@ -19,10 +20,19 @@ export class CanaryBlockedError extends Error {
 
 export interface CanarySession {
   readonly id: string;
+  readonly model?: { readonly providerID: string; readonly modelID: string };
 }
 
 export interface CanaryHostTransport {
   createSession(input: { parentModel: string }): Promise<CanarySession>;
+  /**
+   * Read back the persisted session record (GET /session/:id) so the
+   * canary can prove the parent session was actually created with the
+   * requested `parentModel`. Required to detect hosts that silently
+   * override the requested identity; the boot manager treats a
+   * mismatch as PARENT_MODEL_MISMATCH and fails closed.
+   */
+  getSession(sessionId: string): Promise<CanarySession>;
   invokeCommand(input: {
     sessionId: string;
     command: string;
@@ -170,12 +180,42 @@ export class OpenCodeHttpCanaryTransport implements CanaryHostTransport {
     return Array.isArray(result) ? result : [];
   }
 
+  /**
+   * Read back the parent session record (GET /session/:id). The
+   * response carries the session's `model` so the canary can prove
+   * the host created the parent with the requested `parentModel`
+   * and did not silently override it. Returns `{ id }` when the host
+   * does not surface a `model` object; the canary treats that as
+   * a host that does not support the read-back contract.
+   */
+  async getSession(sessionId: string): Promise<CanarySession> {
+    const result = responseData(await this.request(`/session/${encodeURIComponent(sessionId)}`));
+    if (!result || typeof result !== "object") {
+      throw new CanaryBlockedError("CANARY_METADATA_UNOBSERVABLE", `OpenCode session ${sessionId} response is not an object`);
+    }
+    return this.session(result);
+  }
+
   private session(value: unknown): CanarySession {
-    const id = value && typeof value === "object" ? (value as Record<string, unknown>).id : undefined;
+    if (!value || typeof value !== "object") {
+      throw new CanaryBlockedError("CANARY_METADATA_UNOBSERVABLE", "OpenCode session response is not an object");
+    }
+    const record = value as Record<string, unknown>;
+    const id = record["id"];
     if (typeof id !== "string") {
       throw new CanaryBlockedError("CANARY_METADATA_UNOBSERVABLE", "OpenCode session response omitted id");
     }
-    return { id };
+    const modelRaw = record["model"];
+    let model: { providerID: string; modelID: string } | undefined;
+    if (modelRaw && typeof modelRaw === "object") {
+      const modelRecord = modelRaw as Record<string, unknown>;
+      const providerID = modelRecord["providerID"];
+      const modelID = modelRecord["modelID"];
+      if (typeof providerID === "string" && typeof modelID === "string") {
+        model = { providerID, modelID };
+      }
+    }
+    return model === undefined ? { id } : { id, model };
   }
 
   private async request(endpoint: string, init?: RequestInit): Promise<unknown> {
@@ -211,6 +251,24 @@ export class ModelRouteCanary {
       throw new CanaryBlockedError("PARENT_MODEL_UNAVAILABLE", `no distinct parent model for ${targetCanonicalId}`);
     }
     const parent = await bounded(this.options.transport.createSession({ parentModel: parentCanonicalId }), this.timeoutMs);
+    // Authoritative read-back: GET /session/:id must report the
+    // parent model we requested. A host that creates the session
+    // under a different canonical is silently overriding us, which
+    // the dispatch path must never trust.
+    const readback = await bounded(this.options.transport.getSession(parent.id), this.timeoutMs);
+    if (!readback.model) {
+      throw new CanaryBlockedError(
+        "PARENT_MODEL_MISMATCH",
+        `parent session ${parent.id} read-back omitted model; refusing to trust host override`,
+      );
+    }
+    const observedParentCanonicalId = `${readback.model.providerID}/${readback.model.modelID}`;
+    if (observedParentCanonicalId !== parentCanonicalId) {
+      throw new CanaryBlockedError(
+        "PARENT_MODEL_MISMATCH",
+        `parent session ${parent.id} was created with model ${observedParentCanonicalId}, expected ${parentCanonicalId}`,
+      );
+    }
     const before = new Set((await bounded(this.options.transport.listChildren(parent.id), this.timeoutMs)).map((child) => child.id));
     const command = commandName(route);
     await bounded(this.options.transport.invokeCommand({
