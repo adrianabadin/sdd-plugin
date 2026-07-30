@@ -27,6 +27,9 @@ approval_mode = "approve"
 [mcp_servers.agent_memory.tools.get_session_context]
 approval_mode = "approve"
 
+[mcp_servers.agent_memory.tools.store]
+approval_mode = "approve"
+
 [mcp_servers.pmc_query]
 command = "npx"
 args = ["--yes", "--package", "@aabadin/project-memory-context", "pmc-query-server"]

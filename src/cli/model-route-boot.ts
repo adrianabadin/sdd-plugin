@@ -110,7 +110,7 @@ class OpenCodeProcessSupervisor implements BootProcessSupervisor {
 
   spawnServe(env: NodeJS.ProcessEnv): BootChildProcess {
     const command = process.platform === "win32" ? "opencode.cmd" : "opencode";
-    return this.wrap(spawn(command, ["serve", "--hostname", "127.0.0.1"], { env, stdio: "ignore", windowsHide: true }));
+    return this.wrap(spawn(command, ["serve", "--hostname", "127.0.0.1"], { env, stdio: "ignore", windowsHide: true, shell: process.platform === "win32" }));
   }
 
   async waitForHealthy(child: BootChildProcess): Promise<void> {
@@ -137,7 +137,7 @@ class OpenCodeProcessSupervisor implements BootProcessSupervisor {
 
   spawnAttach(env: NodeJS.ProcessEnv): BootChildProcess {
     const command = process.platform === "win32" ? "opencode.cmd" : "opencode";
-    return this.wrap(spawn(command, ["attach", this.baseUrl], { env, stdio: "ignore", windowsHide: true }));
+    return this.wrap(spawn(command, ["attach", this.baseUrl], { env, stdio: "ignore", windowsHide: true, shell: process.platform === "win32" }));
   }
 
   private wrap(child: ChildProcess): BootChildProcess {

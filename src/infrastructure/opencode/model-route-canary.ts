@@ -210,7 +210,7 @@ export class OpenCodeHttpCanaryTransport implements CanaryHostTransport {
     if (modelRaw && typeof modelRaw === "object") {
       const modelRecord = modelRaw as Record<string, unknown>;
       const providerID = modelRecord["providerID"];
-      const modelID = modelRecord["modelID"];
+      const modelID = modelRecord["modelID"] ?? modelRecord["id"];
       if (typeof providerID === "string" && typeof modelID === "string") {
         model = { providerID, modelID };
       }

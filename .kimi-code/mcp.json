@@ -1,14 +1,29 @@
 {
-  "mcpServers": {},
-  "agent-memory": {
-    "command": "npx",
-    "args": [
-      "-y",
-      "@aabadin/agent-memory-mcp"
-    ],
-    "env": {
-      "MEMORY_DB_PATH": "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/memory-db"
+  "mcpServers": {
+    "agent-memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@aabadin/agent-memory-mcp"
+      ],
+      "env": {
+        "MEMORY_DB_PATH": "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/memory-db",
+        "EMBEDDING_CACHE_PATH": "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/embedding-cache",
+        "NPM_CONFIG_CACHE": "C:/tmp/sdd-plugin2-npm-cache"
+      }
     },
-    "cwd": "."
+    "pmc-query": {
+      "command": "npx",
+      "args": [
+        "--yes",
+        "--package",
+        "@aabadin/project-memory-context",
+        "pmc-query-server"
+      ],
+      "env": {
+        "PMC_PROJECT_ROOT": "C:/Users/aabad/documents/code/ia/sdd-plugin2",
+        "NPM_CONFIG_CACHE": "C:/tmp/sdd-plugin2-npm-cache"
+      }
+    }
   }
 }

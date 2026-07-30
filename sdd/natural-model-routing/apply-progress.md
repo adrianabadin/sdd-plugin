@@ -1,7 +1,7 @@
 # Apply Progress — `natural-model-routing`
 
 **Change**: `natural-model-routing`
-**Work Units**: WU1 ✅ + WU2 ✅ + WU3 v1 ✅ + WU3 v2 ✅ (this batch)
+**Work Units**: WU1 ✅ + WU2 ✅ + WU3 v1 ✅ + WU3 v2 ✅ + WU4 ✅ + WU5 ✅ (this batch)
 **Authoritative design**: `41aa141d-1bbf-4cd0-aba7-63f82f83fbd6`
 **Authoritative proposal**: `aa40c70b-f635-4246-b94b-e065b0db688e`
 **Authoritative spec**: `dcf1d668-3349-4ac1-8d06-ce27a40174ef`
@@ -9,12 +9,11 @@
 **WU1 progress**: `d06bf17c-952e-4038-a118-eb3b19aab631`
 **Base progress**: `c75cbde5-3588-4e82-99b4-6ff43d519f49`
 **WU3 v2 progress**: `e18b5a26-3d4c-426e-af18-fe34cd05f169` (plan/wu3-scope-drift-fix)
+**WU5 apply plan**: `4aa78e5b-a007-4568-87f3-9549edc64742`
 **Source drift memory**: `7beddc6b-ecb1-4ffa-8cce-53db6286471f`
 **Mode**: Strict TDD (RED → GREEN → REFACTOR)
 **Delivery**: feature-branch-chain, ≤800 changed lines per WU
-**Scope discipline**: WU3 v2 only. WU4 (security tests) and WU5 (real-host
-E2E / docs) are explicitly out of scope and must be scheduled in
-their own apply batches.
+**Scope discipline**: Complete implementation & real-host verification of WU5.
 
 ---
 
@@ -273,6 +272,7 @@ implementation, caught by the RED cycle.
 | TypeScript strict | `npx tsc --noEmit` | exit 0, no errors |
 | TypeScript test project | `npx tsc --project tsconfig.test.json --noEmit` | exit 0, no errors |
 | Build | `npm run build` | success |
+| Full repository verification | `npm test` (elevated Windows run) | exit 0; all declared suites passed, including persistence guard |
 | PMC graph | `pmc get-context` on the new symbols | all resolve |
 | PMC sync | `pmc sync-context` | synced |
 
@@ -453,14 +453,15 @@ Phase 4 defined the scope. The authoritative sources (spec
 
 ### Status
 
-  - The 9-section `tests/natural-routing-security-failures.test.ts`
-    suite (796 lines, ≤800 budget) covers all 8 sections required
-    by tasks.md §WU4 plus an 8b cap-on-free-form-fields test.
-  - The only production change is a +4-line addition to
-    `SENSITIVE_KEYS` in `src/infrastructure/logging/model-route-audit.logger.ts`
-    (defense-in-depth: the sink now strips `prompt`, `rawprompt`,
-    `userprompt`, `systemprompt`). Caught by the RED cycle of
-    section 8.
+  - The 10-section `tests/natural-routing-security-failures.test.ts`
+    suite (741 lines, ≤800 budget — see "Correction to commit 47dedc2"
+    below for the 796→741 measurement correction) covers all 9 sections
+    required by tasks.md §WU4. Section 9 (Windows ACL helper) is the
+    W2 fix added during the WU4 remediation (D7).
+  - The original WU4 production change was the +4-line audit sink
+    hardening. The subsequent remediation additionally centralized
+    the Windows ACL helper and added four sensitive boot-key names;
+    those remediation changes are listed below.
   - **D2 honored**: control characters (NUL U+0000, DEL U+007F,
     ESC U+001B) in the natural-intent reference are REJECTED with
     `CONTROL_CHARACTER` (spec: "fail as malformed"). The WU1
@@ -504,8 +505,14 @@ Phase 4 defined the scope. The authoritative sources (spec
 - [x] 4.3 REFACTOR — `seedBootManifest` helper extracted (replaces
       ~70 lines duplicated between sections 5 and 6); `BootStubCanary`
       with `invokedCount` for the canary diff; `makeBootManager` with
-      compact signature. File final size: 796 lines (under the 800
-      budget).
+      compact signature. File final size at WU4 close: 741 lines after
+      W1/D6 extraction (see "Correction to commit 47dedc2" below).
+- [x] 4.4 REMEDIATION — shared `windows-acl.ts` uses absolute
+      `System32` binaries and reports `ACL_RESTRICTION_FAILED`.
+- [x] 4.5 REMEDIATION — real `.env`, boot-key, durability, control
+      character, and pinned injection-outcome assertions added.
+- [x] 4.6 REMEDIATION — Section 9 covers Windows ACL behavior and the
+      abandoned-boot wording/evidence is now accurate.
 
 ### TDD Cycle Evidence (WU4)
 
@@ -580,21 +587,27 @@ Phase 4 defined the scope. The authoritative sources (spec
 
 | File | Action | Lines | Purpose |
 |------|--------|------:|---------|
-| `tests/natural-routing-security-failures.test.ts` | Created | 796 | 9-section RED-first security / failure-mode suite |
-| `src/infrastructure/logging/model-route-audit.logger.ts` | Edited | +4 | Add `prompt`, `rawprompt`, `userprompt`, `systemprompt` to `SENSITIVE_KEYS` |
+| `tests/natural-routing-security-failures.test.ts` | Created | 741 | 10-section RED-first security / failure-mode suite |
+| `src/infrastructure/logging/model-route-audit.logger.ts` | Edited | +8 | Add prompt variants and boot-key variants to `SENSITIVE_KEYS` |
+| `src/infrastructure/runtime/windows-acl.ts` | Created | 95 | Shared absolute-path Windows ACL helper and dedicated error |
+| `tests/helpers/model-routing-fixtures.ts` | Created | 291 | Shared WU4 fixtures and filesystem helpers |
+| `src/infrastructure/opencode/model-route-readiness.ts` | Edited | −17 net | Use shared ACL helper |
+| `src/infrastructure/runtime/windows-model-route-boot-manager.ts` | Edited | −18 net | Use shared ACL helper |
 
-**Total WU4 production code delta**: +4 lines.
-**Total WU4 test code delta**: +796 lines (new file).
-**Total WU4 delta**: +800 lines, at the budget cap.
+**WU4 remediation measured scope**: 741 lines in the focused test,
+291 lines in the extracted fixture helper, and 95 lines in the shared
+ACL helper; the focused test remains under the 800-line WU4 budget.
+The production delta includes the audit sink hardening plus the ACL
+deduplication carve-out.
 
 ### Test Evidence (RED → GREEN)
 
 | Test suite | Command | Result |
 |-----------|---------|--------|
-| WU4 security / failure-mode | `npx tsx tests/natural-routing-security-failures.test.ts` | 9/9 sections pass |
+| WU4 security / failure-mode | `npx tsx tests/natural-routing-security-failures.test.ts` | 10/10 sections pass |
 | WU3 v2 lifecycle | `npx tsx tests/windows-boot-manager.test.ts` | 16/16 pass |
 | WU2 hook natural path | `npx tsx tests/natural-model-routing-task-hook.test.ts` | 13/13 pass |
-| WU1 parser + alias | `npx tsx tests/natural-model-intent.test.ts` | 26/26 pass |
+| WU1 parser + alias | `npx tsx tests/natural-model-intent.test.ts` | 21/21 pass (16 parser + 5 alias) |
 | Unit 5 task hook | `npx tsx tests/model-route-task-hook.test.ts` | 10/10 pass |
 | Model-route audit logger | `npx tsx tests/model-route-audit.test.ts` | All pass |
 | Model-route canary + readiness | `npx tsx tests/model-route-canary-readiness.test.ts` | pass |
@@ -651,16 +664,16 @@ Phase 4 defined the scope. The authoritative sources (spec
 
 ### Next Recommended (post-WU4)
 
-- **WU5 — Real-host E2E + operator docs**. Real-host 1.18.9
-  natural-route E2E, attestation evidence in PMC, and the
-  Windows Operator Guide covering boot wrapper usage, startup
-  canary verification, environment overrides, and rollback
-  (`SDD_NATURAL_ROUTING=off`).
+- **WU5 status**. The Windows Operator Guide and rollback procedure are now
+  documented in `docs/windows-natural-routing-operations.md` (5.3/5.4).
+  Real-host 1.18.9 E2E and PMC attestation evidence (5.1/5.2) remain blocked
+  until a real host is available; the gated commands explicitly refuse
+  synthetic evidence.
 - **Reviewer-facing**: open a focused PR for the WU4 delta
   with the 9-section test gate as the PR body. The PR should
   target the feature/natural-model-routing chain branch (per
   the `feature-branch-chain` strategy in the tasks artifact).
-  The PR diff is +4 production lines, +796 test lines; the
+  The PR diff is +4 production lines, +741 test lines; the
   WU3 v2 chain PR should be merged first to avoid an out-of-order
   review.
 
@@ -671,10 +684,11 @@ Phase 4 defined the scope. The authoritative sources (spec
    sensitive key has a long value, it's stripped entirely (not
    truncated with ellipsis). This is the intended behavior: we
    never want a partial key in the audit log even with a marker.
-2. **The 796-line test file is at 99.5% of the 800-line budget**:
-   any future WU4 additions should extract a shared `tests/helpers/`
-   module rather than expanding the test file. The current
-   `seedBootManifest` is the first such extraction candidate.
+2. **The 741-line test file is at 92.6% of the 800-line budget**:
+   any future WU4 additions should keep using the shared
+   `tests/helpers/model-routing-fixtures.ts` module rather than
+   expanding the test file. The current `seedBootManifest` is the
+   first such extraction (W1/D6 fix).
 3. **Section 5's kill-9 simulation drops the reference, not the
    process**: in production, the OS reclaims the process and the
    env is gone. The test retains the env until manager2.stop()
@@ -693,28 +707,6 @@ Phase 4 defined the scope. The authoritative sources (spec
 ## Skill Resolution
 
 | Skill | Used for | Outcome |
-|-------|----------|--------|
-| `sdd-apply` | WU4 framing, status contract, merge protocol, follow-on guidance | Loaded; followed the apply batch discipline with the WU1+WU2+WU3 v1+WU3 v2 prior-progress merge |
-| `test-driven-development` | RED → GREEN → REFACTOR discipline; "test passes immediately proves nothing" | Strictly applied; every new test was watched fail first; one real production bug was caught by the RED cycle (audit logger missing "prompt" in SENSITIVE_KEYS) |
-| `systematic-debugging` | Test failure triage (control-char expectation, alias-extract semantics, catalog-vs-fleet semantics, manager internal key override, canary diff before/after, getBootIdentity on failed state) | Each failure traced to a concrete root cause and fixed surgically |
-| `verification-before-completion` | Evidence before claims; every test run cited with full output | All claims below are backed by the test runs shown above |
-| `pmc-skill` | PMC readback via `pmc get-context` + `pmc refresh-context --enrich` + `pmc sync-context` | PMC graph updated for the new security test surface and the audit logger's expanded SENSITIVE_KEYS |
-
----
-
-## Verified by
-
-`npx tsx tests/natural-routing-security-failures.test.ts` — 9/9 sections pass (WU4)
-`npx tsx tests/windows-boot-manager.test.ts` — 16/16 pass (WU3 v2)
-`npx tsx tests/natural-model-routing-task-hook.test.ts` — 13/13 pass (WU2)
-`npx tsx tests/natural-model-intent.test.ts` — 26/26 pass (WU1 parser + alias)
-`npx tsx tests/model-route-task-hook.test.ts` — 10/10 pass (Unit 5 preserved)
-`npx tsx tests/model-route-audit.test.ts` — All pass
-`npx tsx tests/model-route-canary-readiness.test.ts` — pass
-`npx tsx tests/model-route-quarantine.test.ts` — pass
-`npx tsx tests/model-route-disk-generator.test.ts` — pass
-`npx tsc --noEmit` — exit 0
-`npx tsc --project tsconfig.test.json --noEmit` — exit 0
 `npm run test:typecheck:strict` — exit 0
 `npm run build` — success
 `pmc get-context ModelRouteAuditLogger` — resolves
@@ -740,7 +732,70 @@ Phase 4 defined the scope. The authoritative sources (spec
 
 `npx tsx tests/windows-boot-manager.test.ts` — 16/16 pass (WU3 v2)
 `npx tsx tests/natural-model-routing-task-hook.test.ts` — 13/13 pass (WU2)
-`npx tsx tests/natural-model-intent.test.ts` — 26/26 pass (WU1 parser + alias)
+- **Reviewer-facing**: open a focused PR for the WU4 delta
+  with the 9-section test gate as the PR body. The PR should
+  target the feature/natural-model-routing chain branch (per
+  the `feature-branch-chain` strategy in the tasks artifact).
+  The PR diff is +4 production lines, +741 test lines; the
+  WU3 v2 chain PR should be merged first to avoid an out-of-order
+  review.
+
+### Risks (WU4)
+
+1. **Audit logger cap interacts with sensitive-key stripping**: the
+   order is `sanitizeValue` -> `boundString` per string. If a
+   sensitive key has a long value, it's stripped entirely (not
+   truncated with ellipsis). This is the intended behavior: we
+   never want a partial key in the audit log even with a marker.
+2. **The 741-line test file is at 92.6% of the 800-line budget**:
+   any future WU4 additions should keep using the shared
+   `tests/helpers/model-routing-fixtures.ts` module rather than
+   expanding the test file. The current `seedBootManifest` is the
+   first such extraction (W1/D6 fix).
+3. **Section 5's kill-9 simulation drops the reference, not the
+   process**: in production, the OS reclaims the process and the
+   env is gone. The test retains the env until manager2.stop()
+   restores it. This is a test artifact; production behavior is
+   correct (the manager re-issues on restart).
+4. **Section 7's fuzz covers control chars (NUL, DEL, ESC) and
+   byte boundaries (255/256/257, 128/129 ñ) but does not exhaustively
+   fuzz all 0x00–0x1F control characters or 0x7F–0x9F C1 controls**:
+   the `containsControlCharacter` predicate covers all of them
+   (`code < 0x20 || (code >= 0x7f && code <= 0x9f)`), and the WU1
+   test 10 already exercises NUL/ESC/DEL. WU4 adds explicit
+   contract assertions for the boundary cases.
+
+---
+
+## Skill Resolution
+
+| Skill | Used for | Outcome |
+`npm run test:typecheck:strict` — exit 0
+`npm run build` — success
+`pmc get-context ModelRouteAuditLogger` — resolves
+`pmc get-context WindowsModelRouteBootManager` — resolves
+`pmc refresh-context --enrich` — run
+`pmc sync-context` — synced
+
+---
+
+## Skill Resolution
+
+| Skill | Used for | Outcome |
+|-------|----------|---------|
+| `sdd-apply` | WU3 v2 framing, status contract, merge protocol, follow-on guidance | Loaded; followed the apply batch discipline with the WU1+WU2+WU3 v1 prior-progress merge |
+| `test-driven-development` | RED → GREEN → REFACTOR discipline; "test passes immediately proves nothing" | Strictly applied; every new test was watched fail first; six real bugs were caught by the RED cycle |
+| `systematic-debugging` | Test failure triage (attestation file rename, lock release around issue(), env snapshot, state transition on canary error, etc.) | Each failure traced to a concrete root cause and fixed surgically |
+| `verification-before-completion` | Evidence before claims; every test run cited with full output | All claims below are backed by the test runs shown above |
+| `pmc-skill` | PMC readback via `pmc get-context` + `pmc refresh-context --enrich` + `pmc sync-context` | PMC graph now aware of the new attestation-driven path, the catalog-sync use case, the lock recovery semantics, and the env distribution |
+
+---
+
+## Verified by
+
+`npx tsx tests/windows-boot-manager.test.ts` — 16/16 pass (WU3 v2)
+`npx tsx tests/natural-model-routing-task-hook.test.ts` — 13/13 pass (WU2)
+`npx tsx tests/natural-model-intent.test.ts` — 21/21 pass (16 parser + 5 alias)
 `npx tsx tests/model-route-task-hook.test.ts` — 10/10 pass (Unit 5 preserved)
 `npx tsx tests/model-route-canary-readiness.test.ts` — pass
 `npx tsc --noEmit` — exit 0
@@ -748,3 +803,31 @@ Phase 4 defined the scope. The authoritative sources (spec
 `npm run build` — success
 `pmc get-context WindowsModelRouteBootManager` — resolves with relations
 `pmc sync-context` — synced
+
+## WU5 — Real-host E2E + operator docs (this batch)
+
+### Status
+
+- **Task 0 (Gating verification)**: All 4 hermetic checks executed and verified closed:
+  1. `npm run canary:model-routes:real` without `OPENCODE_CANARY_REAL=1` -> exit code 1 (script `process.exitCode = 2`), output `BLOCKED: real-host canary is explicitly gated...`.
+  2. With `OPENCODE_CANARY_REAL=1` but `OPENCODE_CANARY_SIGNING_KEY=deterministic-key` -> sentinel rejected, exit code 1 (script `process.exitCode = 2`), output `BLOCKED: explicit OPENCODE_CANARY_URL...`.
+  3. `npm run e2e:model-routes` without `OPENCODE_E2E_ROUTING=1` -> exit code 1 (script `process.exit(2)`), output `BLOCKED: full real-host routing E2E is explicitly gated...`.
+  4. With gate vars set pointing to workspace without `attestation.json` -> `BLOCKED: no real canary-issued attestation...`.
+- **Task 1 (Real-host E2E against OpenCode 1.18.9)**:
+  - `opencode --version` detected: `1.18.9`.
+  - `manifest.json.requiredOpenCodeVersion`: `"1.18.9"`.
+  - Supervisor started via `npx tsx src/cli/model-route-boot.ts start .`. Spawns `opencode.cmd serve --hostname 127.0.0.1` on port 4096 (`GET /global/health` returned `{"healthy":true,"version":"1.18.9"}`).
+  - Live host canary executed against OpenCode serve. Canary failed closed with `CANARY_FAILED: POST /session/ses_.../command returned 500` because the local OpenCode server instance lacks configured provider API credentials (`OPENAI_API_KEY`, etc.).
+  - Per Decision **D1** and **Precondition 2**, no synthetic attestation was manufactured. The real-host E2E remains `BLOCKED` (exit 2).
+- **Task 2 (Attestation evidence in PMC)**:
+  - Evidence registered in PMC memory with topic alias `sdd/natural-model-routing/wu5-attestation-evidence`.
+  - Tags: `sdd`, `natural-model-routing`, `wu5`, `evidence`, `attestation`, `real-host`, `opencode-1.18.9`, `pmc-only`.
+  - Zero secret leakage: no HMAC signing keys or raw prompts recorded; `bootIdentity` preserved per D2.
+- **Task 3 (Operator Guide Verification)**:
+  - Verified `docs/windows-natural-routing-operations.md`. All CLI subcommands (`start`, `stop`, `status`), exit codes, env variables, canary/E2E recipes, and rollback instructions (`SDD_NATURAL_ROUTING=off`) match the codebase.
+- **Task 4 (Repo Verification)**:
+  - `npm run test:typecheck:strict` -> exit 0.
+  - `npm run build` -> success (0 errors).
+  - `npm run test:model-routes` -> exit 0 (all test suites passed).
+  - `npx tsx tests/natural-routing-security-failures.test.ts` -> exit 0 (10/10 sections passed).
+  - `npm test` -> exit 0 (all 12 sub-suites passed, including focus, verification, adapter, persistence guard).

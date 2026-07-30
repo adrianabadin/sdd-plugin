@@ -132,7 +132,14 @@ function run() {
   ];
   for (const file of forbiddenPaths) {
     try {
-      const out = execSync(`git check-ignore --no-index -v "${file}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const normalized = file.replace(/\\/g, "/");
+      let out = "";
+      try {
+        out = execSync(`git check-ignore --no-index -v "${normalized}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      } catch {
+        // Directory paths in gitignore (like /.opencode/) require a trailing slash if the directory doesn't exist on disk
+        out = execSync(`git check-ignore --no-index -v "${normalized}/"`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      }
       assertOk(out.length > 0, `git check-ignore reports ${path.basename(file) || file} is ignored`);
     } catch (err: unknown) {
       const e = err as { status?: number; stdout?: string };

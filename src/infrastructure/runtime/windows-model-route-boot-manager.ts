@@ -60,7 +60,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 
 import type { Manifest } from "../opencode/disk-agent-generator.js";
 import {
@@ -75,6 +74,7 @@ import {
   type ReadinessAttestation,
   AttestationMismatchError,
 } from "../opencode/model-route-readiness.js";
+import { applyCurrentUserAcl } from "./windows-acl.js";
 import type { ModelRouteCatalogPort } from "../../ports/model-route-catalog.port.js";
 
 /**
@@ -636,24 +636,6 @@ export {
   READINESS_VERIFIER_VERSION,
 };
 export type { ReadinessAttestation };
-
-function applyCurrentUserAcl(filePath: string): void {
-  if (process.platform !== "win32") return;
-  try {
-    const output = execFileSync("whoami", ["/user"], { encoding: "utf8", windowsHide: true });
-    const sid = output.match(/S-\d-\d+(?:-\d+)+/i)?.[0];
-    if (!sid) throw new Error("current user SID unavailable");
-    try {
-      execFileSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${sid}:F`], { windowsHide: true, stdio: "ignore" });
-    } catch {
-      const account = execFileSync("whoami", [], { encoding: "utf8", windowsHide: true }).trim();
-      if (!account) throw new Error("current user account unavailable");
-      execFileSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${account}:F`], { windowsHide: true, stdio: "ignore" });
-    }
-  } catch (error) {
-    throw new Error(`WINDOWS_ACL_FAILED: unable to restrict ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
 
 // Suppress unused-import warning for createHash; reserved for future
 // attestation hash chain work tracked in WU4.

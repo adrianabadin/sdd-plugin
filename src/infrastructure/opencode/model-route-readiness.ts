@@ -13,10 +13,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 import type { Manifest } from "./disk-agent-generator.js";
 import type { CanaryEvidence } from "./model-route-canary.js";
+import { applyCurrentUserAcl } from "../runtime/windows-acl.js";
 
 export const REQUIRED_OPENCODE_VERSION = "1.18.9";
 export const READINESS_VERIFIER_VERSION = "1.0.0";
@@ -244,23 +244,6 @@ export class ModelRouteReadiness {
   }
 }
 
-function applyCurrentUserAcl(filePath: string): void {
-  if (process.platform !== "win32") return;
-  try {
-    const output = execFileSync("whoami", ["/user"], { encoding: "utf8", windowsHide: true });
-    const sid = output.match(/S-\d-\d+(?:-\d+)+/i)?.[0];
-    if (!sid) throw new Error("current user SID unavailable");
-    try {
-      execFileSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${sid}:F`], { windowsHide: true, stdio: "ignore" });
-    } catch {
-      // Offline Windows sandboxes can expose a SID which is not resolvable
-      // by the local ACL provider. Fall back to the canonical account name;
-      // this still grants only the current user and never re-enables inherit.
-      const account = execFileSync("whoami", [], { encoding: "utf8", windowsHide: true }).trim();
-      if (!account) throw new Error("current user account unavailable");
-      execFileSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${account}:F`], { windowsHide: true, stdio: "ignore" });
-    }
-  } catch (error) {
-    throw new AttestationMismatchError(`Windows ACL could not be restricted: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
+// applyCurrentUserAcl lives in src/infrastructure/runtime/windows-acl.ts
+// (WU4 remediation D2: single source of truth, AclRestrictionError
+// instead of the previous misleading AttestationMismatchError label).

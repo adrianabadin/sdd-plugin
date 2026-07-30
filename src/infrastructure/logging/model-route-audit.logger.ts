@@ -85,6 +85,14 @@ const SENSITIVE_KEYS = new Set<string>([
   // (the parser extracts only the trigger + raw reference), but the
   // sink is the last line of defense for downstream consumers.
   "prompt", "rawprompt", "userprompt", "systemprompt",
+  // WU4 remediation (C2 fix, RED-first): the boot manager's
+  // SDD_MODEL_ROUTING_BOOT_ID / SDD_MODEL_ROUTING_SIGNING_KEY env
+  // vars carry the live boot identity and HMAC key. A caller that
+  // mistakenly forwards these into an audit entry must NOT leak the
+  // value. `isSensitive()` already lowercases and strips non-alnum,
+  // so `bootIdentity` -> `bootidentity`, `bootId` -> `bootid`,
+  // `signingKey` -> `signingkey`, `hmacKey` -> `hmackey`.
+  "bootidentity", "bootid", "signingkey", "hmackey",
 ]);
 
 export class ModelRouteAuditLoggerError extends Error {
