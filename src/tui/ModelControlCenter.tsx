@@ -103,6 +103,53 @@ export interface ModelControlCenterProps {
   onClose?: () => void;
 }
 
+const PRINTABLE_CAPTURE_CHARS: readonly string[] = [
+  ..."abcdefghijklmnopqrstuvwxyz".split(""),
+  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""),
+  ..."0123456789".split(""),
+  "space",
+  "-",
+  "_",
+  ".",
+  ",",
+  "/",
+  "@",
+];
+
+export function extractCharacter(ctx: unknown): string {
+  if (typeof ctx === "string") {
+    if (ctx.length === 1) return ctx;
+    if (ctx === "space") return " ";
+    return "";
+  }
+  if (!ctx || typeof ctx !== "object") return "";
+
+  const obj = ctx as Record<string, unknown>;
+
+  const properties = ["ch", "char", "character", "sequence", "raw", "input", "data", "name"];
+  for (const prop of properties) {
+    const val = obj[prop];
+    if (typeof val === "string") {
+      if (val.length === 1) return val;
+      if (val === "space") return " ";
+    }
+  }
+
+  const subKeys = ["key", "event", "detail", "data", "input"];
+  for (const subKey of subKeys) {
+    const sub = obj[subKey];
+    if (typeof sub === "string") {
+      if (sub.length === 1) return sub;
+      if (sub === "space") return " ";
+    } else if (sub && typeof sub === "object") {
+      const extracted = extractCharacter(sub);
+      if (extracted) return extracted;
+    }
+  }
+
+  return "";
+}
+
 export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element {
   const [stack, setStack] = createSignal<ScreenState[]>(createInitialStack());
   const [catalogState, setCatalogState] = createSignal<CatalogView>({ status: "loading" });
@@ -141,11 +188,46 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
     const layerDisposer = props.api.keymap.registerLayer({
       priority: ACTIVE_FIELD_EDIT_PRIORITY,
       commands: [
+        ...PRINTABLE_CAPTURE_CHARS.map((charKey) => ({
+          name: `mcc.capture.explicit-${charKey}`,
+          title: `Capture Printable ${charKey}`,
+          run: () => {
+            const ch = charKey === "space" ? " " : charKey;
+            if (genericFieldEdit()) {
+              setGenericFieldEdit((prev) => {
+                if (!prev) return null;
+                if (prev.descriptor.kind === "boolean" && charKey === "space") {
+                  const lower = prev.buffer.toLowerCase();
+                  const nextVal = lower === "true" || lower === "yes" ? "false" : "true";
+                  return { ...prev, buffer: nextVal, error: undefined };
+                }
+                return appendFieldEdit(prev, ch);
+              });
+            } else if (quarantineOverlay()) {
+              const ov = quarantineOverlay()!;
+              if (ov.mode === "release") return;
+              if (ov.focus === "scope") {
+                const nextLevel = ov.level === "provider" ? "model" : "provider";
+                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+              } else if (ov.focus === "duration") {
+                const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
+                setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
+              } else if (ov.focus === "id") {
+                const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, ch));
+              } else if (ov.focus === "reason") {
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "reason", ch));
+              } else if (ov.focus === "ttl") {
+                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "ttlHours", ch));
+              }
+            }
+          },
+        })),
         {
           name: "mcc.capture.char",
           title: "Capture Printable Input",
           run: (ctx?: unknown) => {
-            const ch = (ctx && typeof ctx === "object" && "ch" in ctx && typeof (ctx as { ch?: unknown }).ch === "string") ? (ctx as { ch: string }).ch : "";
+            const ch = extractCharacter(ctx);
             if (!ch) return;
             if (genericFieldEdit()) {
               setGenericFieldEdit((prev) => (prev ? appendFieldEdit(prev, ch) : null));
@@ -246,19 +328,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
           title: "Commit Active Input",
           run: () => {
             if (genericFieldEdit()) {
-              const session = genericFieldEdit()!;
-              const committed = commitFieldEdit(session);
-              if (!committed.ok) {
-                setGenericFieldEdit({ ...session, error: committed.error });
-                return;
-              }
-              const draft = detailDraft();
-              if (draft) {
-                setDetailDraft(session.descriptor.update(draft, committed.value));
-              }
-              setGenericFieldEdit(null);
-              setDetailValidation(undefined);
-              setDetailNotice(undefined);
+              commitGenericFieldEditSession();
             } else if (quarantineOverlay()) {
               const ov = quarantineOverlay()!;
               if (ov.mode === "release") {
@@ -352,6 +422,10 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         },
       ],
       bindings: [
+        ...PRINTABLE_CAPTURE_CHARS.map((charKey) => ({
+          key: charKey,
+          cmd: `mcc.capture.explicit-${charKey}`,
+        })),
         { key: "<character>", cmd: "mcc.capture.char" },
         { key: "backspace", cmd: "mcc.capture.backspace" },
         { key: "tab", cmd: "mcc.capture.tab" },
@@ -393,11 +467,19 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
     }
   });
 
+  let activeModelKey = "";
+
   // Effect to load model detail state when entering model-detail screen
   createEffect(() => {
     const current = currentScreen();
     if (current.name === "model-detail") {
       const { providerId, modelId } = current;
+      const modelKey = `${providerId}:${modelId}`;
+      if (modelKey === activeModelKey) {
+        return;
+      }
+      activeModelKey = modelKey;
+
       const catalogModels = rawModels();
       const catalogMatch = catalogModels.find(
         (m) => m.providerId === providerId && m.modelId === modelId
@@ -413,6 +495,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
             setDetailNotice(persisted ? undefined : "No saved metadata record; showing catalog defaults.");
             setDetailValidation(undefined);
             setNumericEdit(null);
+            setGenericFieldEdit(null);
           })
           .catch((err: unknown) => {
             const merged = mergeModelDetail(catalogMatch, null, providerId, modelId);
@@ -420,6 +503,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
             setDetailDraft(createDraft(merged));
             setDetailNotice(`Error querying persisted detail: ${String(err)}`);
             setNumericEdit(null);
+            setGenericFieldEdit(null);
           });
       } else {
         const merged = mergeModelDetail(catalogMatch, null, providerId, modelId);
@@ -428,7 +512,10 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         setDetailNotice(undefined);
         setDetailValidation(undefined);
         setNumericEdit(null);
+        setGenericFieldEdit(null);
       }
+    } else {
+      activeModelKey = "";
     }
   });
 
@@ -643,8 +730,44 @@ async function handleSaveIntent(): Promise<void> {
     setDetailNotice(undefined);
   }
 
+  function commitGenericFieldEditSession(): boolean {
+    const session = genericFieldEdit();
+    if (!session) return true;
+
+    const committed = commitFieldEdit(session);
+    if (!committed.ok) {
+      setGenericFieldEdit({ ...session, error: committed.error });
+      return false;
+    }
+
+    const draft = detailDraft();
+    if (draft) {
+      setDetailDraft(session.descriptor.update(draft, committed.value));
+    }
+    setGenericFieldEdit(null);
+    setDetailValidation(undefined);
+    setDetailNotice(undefined);
+    return true;
+  }
+
   function dispatch(event: NavigationEvent): void {
     const current = currentScreen();
+
+    if (genericFieldEdit()) {
+      if (event.type === "activate") {
+        commitGenericFieldEditSession();
+        return;
+      }
+      if (event.type === "back") {
+        setGenericFieldEdit(null);
+        return;
+      }
+      if (event.type === "up" || event.type === "down" || event.type === "tab-next" || event.type === "tab-prev") {
+        if (!commitGenericFieldEditSession()) {
+          return;
+        }
+      }
+    }
 
     if (numericEdit()) {
       if (event.type === "activate") {
@@ -667,10 +790,10 @@ async function handleSaveIntent(): Promise<void> {
     ) {
       const draft = detailDraft();
       if (draft) {
-        if (current.tab === "subscription" && current.focus.index >= 2) {
-          const descriptor = getSubscriptionFieldDescriptors()[current.focus.index - 2];
+        if (current.tab === "subscription") {
+          const descriptor = getSubscriptionFieldDescriptors()[current.focus.index];
           if (descriptor) {
-            setGenericFieldEdit(startFieldEdit(descriptor, descriptor.read(draft)));
+            setGenericFieldEdit(startFieldEdit(descriptor as FieldDescriptor<unknown>, descriptor.read(draft)));
             return;
           }
         } else {

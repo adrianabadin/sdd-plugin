@@ -116,12 +116,15 @@ export function createBooleanFieldDescriptor(
     (buffer, input) => {
       if (input.length === 0) return null;
       const candidate = (buffer + input).toLowerCase();
-      return ["true", "false"].some((value) => value.startsWith(candidate)) ? candidate : null;
+      return ["true", "false", "yes", "no", "y", "n"].some((value) => value.startsWith(candidate))
+        ? candidate
+        : null;
     },
     (buffer) => {
-      if (buffer.toLowerCase() === "true") return { ok: true, value: true };
-      if (buffer.toLowerCase() === "false") return { ok: true, value: false };
-      return { ok: false, error: "Enter true or false" };
+      const lower = buffer.toLowerCase();
+      if (lower === "true" || lower === "yes" || lower === "y") return { ok: true, value: true };
+      if (lower === "false" || lower === "no" || lower === "n") return { ok: true, value: false };
+      return { ok: false, error: "Enter true, false, yes, or no" };
     },
   );
 }
@@ -194,6 +197,7 @@ export function parseNumericBuffer(buffer: string): FieldParseResult<number> {
 export type NumericDetailTab = "benchmarks" | "pricing" | "subscription";
 export type NumericFieldDescriptor = FieldDescriptor<number> & { readonly tab: NumericDetailTab };
 export type TextFieldDescriptor = FieldDescriptor<string> & { readonly tab: DetailTab };
+export type BooleanFieldDescriptor = FieldDescriptor<boolean> & { readonly tab: DetailTab };
 
 /**
  * Subscription tab descriptors.
@@ -205,9 +209,43 @@ export type TextFieldDescriptor = FieldDescriptor<string> & { readonly tab: Deta
  * / overageRate) through the same envelope the existing SaveModelDetail
  * use case already round-trips.
  */
-const PLAN_NAME_DESCRIPTOR: TextFieldDescriptor = createTextFieldDescriptor({
+const SUBSCRIPTION_ENABLED_DESCRIPTOR: BooleanFieldDescriptor = createBooleanFieldDescriptor({
   tab: "subscription",
   index: 0,
+  path: "subscriptionEnabled",
+  label: "Subscription Enabled",
+  validationKey: "subscriptionEnabled",
+  read: (draft) => draft.subscriptionEnabled,
+  update: (draft, value) => {
+    const updated = updateField(draft, "subscriptionEnabled", value);
+    if (!value) {
+      return { ...updated, subscriptionTier: null, subscription: null };
+    }
+    const nextTier = updated.subscriptionTier ?? "custom";
+    return { ...updated, subscriptionTier: nextTier, subscription: nextTier };
+  },
+}) as BooleanFieldDescriptor;
+
+const SUBSCRIPTION_TIER_DESCRIPTOR: TextFieldDescriptor = createTextFieldDescriptor({
+  tab: "subscription",
+  index: 1,
+  path: "subscriptionTier",
+  label: "Tier",
+  validationKey: "subscriptionTier",
+  read: (draft) => draft.subscriptionTier,
+  update: (draft, value) => {
+    const updated = updateField(draft, "subscriptionTier", value);
+    return {
+      ...updated,
+      subscription: value,
+      subscriptionEnabled: Boolean(value),
+    };
+  },
+}) as TextFieldDescriptor;
+
+const PLAN_NAME_DESCRIPTOR: TextFieldDescriptor = createTextFieldDescriptor({
+  tab: "subscription",
+  index: 2,
   path: "planName",
   label: "Plan Name",
   validationKey: "planName",
@@ -217,7 +255,7 @@ const PLAN_NAME_DESCRIPTOR: TextFieldDescriptor = createTextFieldDescriptor({
 
 const PERIODIC_COST_DESCRIPTOR: NumericFieldDescriptor = createNumericFieldDescriptor({
   tab: "subscription",
-  index: 1,
+  index: 3,
   path: "periodicCost",
   label: "Periodic Cost",
   validationKey: "periodicCost",
@@ -227,7 +265,7 @@ const PERIODIC_COST_DESCRIPTOR: NumericFieldDescriptor = createNumericFieldDescr
 
 const INCLUDED_USAGE_DESCRIPTOR: NumericFieldDescriptor = createNumericFieldDescriptor({
   tab: "subscription",
-  index: 2,
+  index: 4,
   path: "includedUsage",
   label: "Included Usage",
   validationKey: "includedUsage",
@@ -237,7 +275,7 @@ const INCLUDED_USAGE_DESCRIPTOR: NumericFieldDescriptor = createNumericFieldDesc
 
 const OVERAGE_RATE_DESCRIPTOR: NumericFieldDescriptor = createNumericFieldDescriptor({
   tab: "subscription",
-  index: 3,
+  index: 5,
   path: "overageRate",
   label: "Overage Rate",
   validationKey: "overageRate",
@@ -246,9 +284,12 @@ const OVERAGE_RATE_DESCRIPTOR: NumericFieldDescriptor = createNumericFieldDescri
 }) as NumericFieldDescriptor;
 
 const SUBSCRIPTION_DESCRIPTORS: readonly (
+  | BooleanFieldDescriptor
   | TextFieldDescriptor
   | NumericFieldDescriptor
 )[] = [
+  SUBSCRIPTION_ENABLED_DESCRIPTOR,
+  SUBSCRIPTION_TIER_DESCRIPTOR,
   PLAN_NAME_DESCRIPTOR,
   PERIODIC_COST_DESCRIPTOR,
   INCLUDED_USAGE_DESCRIPTOR,
@@ -261,6 +302,7 @@ const SUBSCRIPTION_DESCRIPTORS: readonly (
  * `ModelControlCenter` both rely on this order.
  */
 export function getSubscriptionFieldDescriptors(): readonly (
+  | BooleanFieldDescriptor
   | TextFieldDescriptor
   | NumericFieldDescriptor
 )[] {
@@ -269,7 +311,7 @@ export function getSubscriptionFieldDescriptors(): readonly (
 
 export function getSubscriptionFieldDescriptor(
   index: number,
-): TextFieldDescriptor | NumericFieldDescriptor | undefined {
+): BooleanFieldDescriptor | TextFieldDescriptor | NumericFieldDescriptor | undefined {
   return SUBSCRIPTION_DESCRIPTORS[index];
 }
 

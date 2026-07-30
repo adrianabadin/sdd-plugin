@@ -38,35 +38,68 @@ async function runTest(): Promise<void> {
       update: { quarantineType: 'permanent' },
       create: { id: 'openai', name: 'OpenAI', isBlocked: false, quarantineType: 'permanent' },
     });
+    await prisma.provider.upsert({
+      where: { id: 'anthropic' },
+      update: {},
+      create: { id: 'anthropic', name: 'Anthropic', isBlocked: false },
+    });
     await prisma.model.upsert({
       where: { id: 'gpt-4o' },
       update: {},
       create: { id: 'gpt-4o', name: 'GPT-4o' },
+    });
+    await prisma.model.upsert({
+      where: { id: 'claude-3-5-sonnet' },
+      update: {},
+      create: { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet' },
     });
     await prisma.modelProvider.upsert({
       where: { modelId_providerId: { modelId: 'gpt-4o', providerId: 'openai' } },
       update: {},
       create: { modelId: 'gpt-4o', providerId: 'openai' },
     });
+    await prisma.modelProvider.upsert({
+      where: { modelId_providerId: { modelId: 'claude-3-5-sonnet', providerId: 'anthropic' } },
+      update: {},
+      create: { modelId: 'claude-3-5-sonnet', providerId: 'anthropic' },
+    });
 
     const registry = getOrCreateModelConfigRegistry();
-    assert.equal(registry.get('openai', 'gpt-4o'), undefined);
+    assert.equal(registry.get('anthropic', 'claude-3-5-sonnet'), undefined);
 
     const plugin = await SddPlugin({ project: 'test', client: {} });
     const hook = plugin['tool.execute.before'];
 
-    const output = { args: { subagent_type: 'task-1', model: 'openai/gpt-4o' } };
+    // Use a non-quarantined provider for the registry hydration assertion:
+    // a provider-level quarantine on `openai` would otherwise block the
+    // legacy task call. (Authoritative quarantine semantics: a quarantined
+    // provider MUST prevent the task from running, which is what the block
+    // assertion below checks.)
+    const output = { args: { subagent_type: 'task-1', model: 'anthropic/claude-3-5-sonnet' } };
     await hook({ tool: 'task' }, output);
 
-    const cached = registry.get('openai', 'gpt-4o');
+    const cached = registry.get('anthropic', 'claude-3-5-sonnet');
     assert.ok(cached !== undefined);
-    assert.equal(cached.providerId, 'openai');
-    assert.equal(cached.modelId, 'gpt-4o');
+    assert.equal(cached.providerId, 'anthropic');
+    assert.equal(cached.modelId, 'claude-3-5-sonnet');
     console.log('  pass: registry-first DB read-through hydration on task interception (temp DB)');
 
     const qStore = getGlobalQuarantineStore();
     assert.equal(qStore.isActive('openai', 'gpt-4o'), true);
     console.log('  pass: quarantine store DB read-through hydration on task interception');
+
+    // Authoritative quarantine block: a quarantined provider MUST prevent the
+    // legacy task call from running. The pre-existing stale test was
+    // rewritten to assert the block instead of swallowing it.
+    const blockedOutput = { args: { subagent_type: 'task-1', model: 'openai/gpt-4o' } };
+    let blocked = false;
+    try {
+      await hook({ tool: 'task' }, blockedOutput);
+    } catch (err) {
+      if (err instanceof Error && /quarantined/i.test(err.message)) blocked = true;
+    }
+    assert.equal(blocked, true, 'quarantined provider blocks the legacy task call');
+    console.log('  pass: quarantined provider blocks the legacy task call');
   } finally {
     await prisma.$disconnect();
   }

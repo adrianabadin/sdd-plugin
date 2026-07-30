@@ -24,7 +24,9 @@
  * the existing `SaveModelDetailUseCase` uses today.
  */
 import assert from "node:assert/strict";
+import { extractCharacter } from "../src/tui/ModelControlCenter.js";
 import {
+  createBooleanFieldDescriptor,
   createNumericFieldDescriptor,
   createTextFieldDescriptor,
   getSubscriptionFieldDescriptors,
@@ -71,12 +73,12 @@ function makeDraft(): DetailDraft {
 function testSubscriptionDescriptorsExist(): void {
   console.log("\n--- subscription descriptors exist for every field ---");
   const descriptors = getSubscriptionFieldDescriptors();
-  assert.equal(descriptors.length, 4, "four subscription descriptors are exposed");
+  assert.equal(descriptors.length, 6, "six subscription descriptors are exposed");
   const keys = descriptors.map((d) => d.validationKey);
   assert.deepEqual(
     keys,
-    ["planName", "periodicCost", "includedUsage", "overageRate"],
-    "descriptors expose the four documented subscription keys in a stable order",
+    ["subscriptionEnabled", "subscriptionTier", "planName", "periodicCost", "includedUsage", "overageRate"],
+    "descriptors expose the six documented subscription keys in a stable order",
   );
   for (const descriptor of descriptors) {
     assert.equal(descriptor.tab, "subscription", "all subscription descriptors live on the subscription tab");
@@ -226,8 +228,88 @@ function testReusedTextAndNumericDescriptorFactories(): void {
   );
 }
 
+function testSubscriptionEnabledBooleanFieldDescriptor(): void {
+  console.log("\n--- subscriptionEnabled is a typed boolean descriptor ---");
+  const descriptors = getSubscriptionFieldDescriptors();
+  const desc = descriptors.find((d) => d.validationKey === "subscriptionEnabled");
+  assert.ok(desc, "subscriptionEnabled descriptor exists");
+  const boolDesc = desc as ReturnType<typeof createBooleanFieldDescriptor>;
+  assert.equal(boolDesc.kind, "boolean", "subscriptionEnabled is a boolean descriptor");
+  const draft = makeDraft();
+  assert.equal(boolDesc.read(draft), true, "reads current subscriptionEnabled");
+
+  // Accept contract for boolean: "true"/"false" prefix matching
+  let buffer = "";
+  buffer = boolDesc.accept(buffer, "t") ?? buffer;
+  buffer = boolDesc.accept(buffer, "r") ?? buffer;
+  assert.equal(buffer, "tr", "accepts 'tr' prefix");
+
+  // Parse contract
+  const parsedTrue = boolDesc.parse("true");
+  assert.equal(parsedTrue.ok, true);
+  if (parsedTrue.ok) assert.equal(parsedTrue.value, true);
+
+  const parsedFalse = boolDesc.parse("false");
+  assert.equal(parsedFalse.ok, true);
+  if (parsedFalse.ok) assert.equal(parsedFalse.value, false);
+
+  const parsedInvalid = boolDesc.parse("maybe");
+  assert.equal(parsedInvalid.ok, false);
+
+  // Update contract
+  const updated = boolDesc.update(draft, false);
+  assert.equal(updated.subscriptionEnabled, false);
+  assert.equal(draft.subscriptionEnabled, true, "source draft unchanged");
+}
+
+function testSubscriptionTierTextDescriptor(): void {
+  console.log("\n--- subscriptionTier is a typed text descriptor ---");
+  const descriptors = getSubscriptionFieldDescriptors();
+  const desc = descriptors.find((d) => d.validationKey === "subscriptionTier");
+  assert.ok(desc, "subscriptionTier descriptor exists");
+  const textDesc = desc as ReturnType<typeof createTextFieldDescriptor>;
+  assert.equal(textDesc.kind, "text", "subscriptionTier is a text descriptor");
+  const draft = makeDraft();
+  assert.equal(textDesc.read(draft), "small", "reads current subscriptionTier");
+
+  let buffer = "";
+  buffer = textDesc.accept(buffer, "p") ?? buffer;
+  buffer = textDesc.accept(buffer, "r") ?? buffer;
+  buffer = textDesc.accept(buffer, "o") ?? buffer;
+  assert.equal(buffer, "pro");
+
+  const parsed = textDesc.parse("pro");
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) assert.equal(parsed.value, "pro");
+
+  const updated = textDesc.update(draft, "pro");
+  assert.equal(updated.subscriptionTier, "pro");
+  assert.equal(draft.subscriptionTier, "small", "source draft unchanged");
+}
+
+function testExtractCharacterContextVariants(): void {
+  console.log("\n--- extractCharacter handles all OpenTUI and OpenCode event variants ---");
+  assert.equal(extractCharacter("t"), "t", "raw character string");
+  assert.equal(extractCharacter("space"), " ", "space name string");
+  assert.equal(extractCharacter({ ch: "y" }), "y", "{ ch } object");
+  assert.equal(extractCharacter({ char: "n" }), "n", "{ char } object");
+  assert.equal(extractCharacter({ sequence: "a" }), "a", "{ sequence } object");
+  assert.equal(extractCharacter({ raw: "b" }), "b", "{ raw } object");
+  assert.equal(extractCharacter({ name: "c" }), "c", "{ name } object (OpenTUI KeyEvent)");
+  assert.equal(extractCharacter({ name: "space" }), " ", "{ name: 'space' } object");
+  assert.equal(extractCharacter({ key: { name: "d" } }), "d", "nested key.name object");
+  assert.equal(extractCharacter({ event: { name: "e" } }), "e", "nested event.name object");
+  assert.equal(extractCharacter({ event: { sequence: "f" } }), "f", "nested event.sequence object");
+  assert.equal(extractCharacter(null), "", "null is safe");
+  assert.equal(extractCharacter(undefined), "", "undefined is safe");
+  assert.equal(extractCharacter({ name: "enter" }), "", "enter is excluded as non-printable");
+}
+
 async function run(): Promise<void> {
+  testExtractCharacterContextVariants();
   testSubscriptionDescriptorsExist();
+  testSubscriptionEnabledBooleanFieldDescriptor();
+  testSubscriptionTierTextDescriptor();
   testPlanNameTextDescriptor();
   testNumericSubscriptionDescriptors();
   testSubscriptionDescriptorOrdering();

@@ -115,7 +115,7 @@ async function mountDetailScreen(options: MountOptions): Promise<Harness> {
   };
 
   const models: ConnectedModelInfo[] = [
-    { providerId: "openai", modelId: "gpt-4o", modelName: "GPT-4o" },
+    { providerId: "openai", modelId: "gpt-4o", modelName: "GPT-4o", provider: { isBlocked: false, subscription: null } },
   ];
 
   const saveDetailUseCase = {
@@ -219,28 +219,40 @@ async function testSubscriptionTabRendersDescriptors(): Promise<void> {
   h.destroy();
 }
 
-async function testPlanNameTextEditSession(): Promise<void> {
-  console.log("\n[case] planName opens a text session with the shared typed editor");
+async function testSubscriptionEnabledBooleanEditSession(): Promise<void> {
+  console.log("\n[case] subscriptionEnabled (index 0) opens a boolean session");
   const h = await mountDetailScreen({ withPersistence: true });
   await navigateToSubscriptionTab(h);
-  // Enter focus area on the subscription tab.
   await h.runKey("enter");
   await h.waitForFrame((frame) => frame.includes("FOCUS: Form Fields"));
-  // Field 0: Subscription Enabled, Field 1: Tier, Field 2: Plan Name.
-  // Tab 2 times to reach Plan Name.
-  await h.runKey("tab");
-  await h.runKey("tab");
-  await h.waitForFrame((frame) => frame.includes("> Plan Name:"));
+  await h.waitForFrame((frame) => frame.includes("> Subscription Enabled:"));
   await h.runKey("enter");
   await h.waitForFrame((frame) => frame.includes("EDIT:"));
-  // The text accept contract accepts any printable character.
-  for (const ch of "Team") await h.runKey(ch);
-  await h.waitForFrame((frame) => frame.includes("EDIT: Team"));
-  // Commit with Enter.
+  // Clear default buffer "false" using backspace 5 times
+  for (let i = 0; i < 5; i++) await h.runKey("backspace");
+  for (const ch of "true") await h.runKey(ch);
+  await h.waitForFrame((frame) => frame.includes("EDIT: true"));
   await h.runKey("enter");
-  await h.waitForFrame((frame) => frame.includes("Plan Name: Team"));
-  // The draft is now dirty on the subscription tab.
-  assert(h.frame().includes("UNSAVED DRAFT"), "typed value marks the draft dirty");
+  await h.waitForFrame((frame) => frame.includes("Subscription Enabled: Yes"));
+  assert(h.frame().includes("UNSAVED DRAFT"), "editing subscriptionEnabled marks draft dirty");
+  h.destroy();
+}
+
+async function testSubscriptionTierTextEditSession(): Promise<void> {
+  console.log("\n[case] subscriptionTier (index 1) opens a text session");
+  const h = await mountDetailScreen({ withPersistence: true });
+  await navigateToSubscriptionTab(h);
+  await h.runKey("enter");
+  await h.waitForFrame((frame) => frame.includes("FOCUS: Form Fields"));
+  await h.runKey("tab");
+  await h.waitForFrame((frame) => frame.includes("> Tier:"));
+  await h.runKey("enter");
+  await h.waitForFrame((frame) => frame.includes("EDIT:"));
+  for (const ch of "enterprise") await h.runKey(ch);
+  await h.waitForFrame((frame) => frame.includes("EDIT: enterprise"));
+  await h.runKey("enter");
+  await h.waitForFrame((frame) => frame.includes("Tier: enterprise"));
+  assert(h.frame().includes("UNSAVED DRAFT"), "editing subscriptionTier marks draft dirty");
   h.destroy();
 }
 
@@ -333,7 +345,8 @@ async function testCancelSessionDoesNotMutateDraft(): Promise<void> {
 
 async function main(): Promise<void> {
   await testSubscriptionTabRendersDescriptors();
-  await testPlanNameTextEditSession();
+  await testSubscriptionEnabledBooleanEditSession();
+  await testSubscriptionTierTextEditSession();
   await testPeriodicCostNumericEditSession();
   await testInvalidBufferBlocksSaveAndDirtyStays();
   await testCancelSessionDoesNotMutateDraft();

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {},
+  "agent-memory": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@aabadin/agent-memory-mcp"
+    ],
+    "env": {
+      "MEMORY_DB_PATH": "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/memory-db"
+    },
+    "cwd": "."
+  }
+}

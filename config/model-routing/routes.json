@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "generatorVersion": "1.0.0",
+  "cap": 8,
+  "sizeException": null,
+  "routes": [
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-3.6-flash-tiered"
+    }
+  ]
+}

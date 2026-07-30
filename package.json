@@ -30,6 +30,10 @@
     "test:integration": "npx tsx tests/integration-model-edit-flow.test.ts && npx tsx tests/integration-quarantine-interception.test.ts && npx tsx tests/integration-route-cleanup.test.ts && npx tsx tests/integration-package-exports.test.ts && npx tsx tests/integration-release-safety.test.ts",
     "test:release-safety": "npm run test:integration && npm run test:exports && npm run test:typecheck:strict",
     "verify:release-safety": "node scripts/verify-release-safety.mjs",
+    "generate:model-routes": "npx tsx src/cli/model-route-agents.ts",
+    "test:model-routes": "npx tsx tests/model-route-disk-generator.test.ts && npx tsx tests/model-route-cli.test.ts && npx tsx tests/model-route-canary-readiness.test.ts && npx tsx tests/model-route-quarantine.test.ts && npx tsx tests/model-route-audit.test.ts && npx tsx tests/model-route-task-hook.test.ts",
+    "canary:model-routes:real": "npx tsx tests/model-route-real-host-canary.integration.ts",
+    "e2e:model-routes": "npx tsx tests/model-route-routing-e2e.test.ts",
     "test:all": "npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace && npm run build && npm run test:tui && npm run test:exports && npm run test:typecheck:strict && npm run test:typecheck:persistence && npm run test:integration && npm run test:persistence:guard",
     "trace:tail": "node -e \"const fs=require('fs'),os=require('os'),path=require('path');const p=process.env.SDD_PLUGIN_TRACE_PATH||path.join(os.homedir(),'.cache','sdd-plugin','model-refresh.log');try{const lines=fs.readFileSync(p,'utf8').trimEnd().split('\\n');for(const l of lines.slice(-50))process.stdout.write(l+'\\n');}catch(e){console.error('no trace yet:',e.message);)}\""
   },

@@ -18,7 +18,15 @@ import { BackgroundModelRefreshCoordinator } from "../application/background-mod
 import { OpenCodeAppLogNotifierAdapter } from "../infrastructure/logging/opencode-app-log.notifier.adapter.js";
 import { ModelRefreshTraceLogger } from "../infrastructure/logging/model-refresh-trace.logger.js";
 import { OpenCodeModelCatalogAdapter } from "../infrastructure/opencode/opencode-model-catalog.adapter.js";
+import { PrismaModelRouteCatalogAdapter } from "../infrastructure/prisma/model-route-catalog.adapter.js";
+import { PrismaModelRouteQuarantineAdapter } from "../infrastructure/prisma/model-route-quarantine.adapter.js";
 import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
+import { ModelRouteResolver } from "../domain/model-routing/model-route-resolver.js";
+import { parseModelRouteGrammar } from "../domain/model-routing/model-route-grammar.js";
+import { NATURAL_MODEL_ALIASES } from "../domain/model-routing/natural-model-aliases.js";
+import { parseNaturalModelIntent } from "../domain/model-routing/natural-model-intent.js";
+import { naturalIntentBlockedFromParse } from "../domain/model-routing/natural-model-routing-errors.js";
+import { ModelRouteTaskHook } from "../infrastructure/opencode/model-route-task-hook.js";
 import { resolveDatabasePath, initializeDatabase } from "../infrastructure/runtime/database-path.js";
 import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
@@ -77,6 +85,42 @@ export function getPrismaClient(): PrismaClient {
 
 /** Per-connection busy_timeout applied to the bootstrap Prisma client. */
 export const BOOTSTRAP_BUSY_TIMEOUT_MS = 5000;
+
+/**
+ * Env-driven operator configuration for the deterministic routing hook.
+ *
+ * Both variables are REQUIRED. Unit 6 contract: the plugin never invents
+ * defaults (no `boot-default`, no callID-derived identity, no random key),
+ * and it never reads `OPENCODE_BOOT_ID` as a fallback. A missing or
+ * insecure value must block routing on the first hook invocation; the
+ * plugin does not silently substitute.
+ */
+export const ROUTING_BOOT_ID_ENV = "SDD_MODEL_ROUTING_BOOT_ID";
+export const ROUTING_SIGNING_KEY_ENV = "SDD_MODEL_ROUTING_SIGNING_KEY";
+
+/**
+ * Resolve the operator-supplied boot nonce. Returns `null` when the
+ * configuration is missing or uses the legacy `boot-default` sentinel;
+ * the hook caller is responsible for failing closed in that case.
+ */
+export function resolveRoutingBootIdentity(): string | null {
+  const value = process.env[ROUTING_BOOT_ID_ENV];
+  if (typeof value !== "string" || value.length === 0) return null;
+  if (value === "boot-default") return null;
+  return value;
+}
+
+/**
+ * Resolve the operator-supplied HMAC signing key. Returns `null` when
+ * the configuration is missing or uses the legacy `deterministic-key`
+ * sentinel; the hook caller is responsible for failing closed.
+ */
+export function resolveRoutingSigningKey(): string | null {
+  const value = process.env[ROUTING_SIGNING_KEY_ENV];
+  if (typeof value !== "string" || value.length === 0) return null;
+  if (value === "deterministic-key") return null;
+  return value;
+}
 
 /**
  * Release every Prisma client owned by the bootstrap composition root.
@@ -188,8 +232,8 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
      * Interception is registry-first with DB read-through / hydration fallback.
      */
     "tool.execute.before": async (
-      _input: { tool?: string },
-      output: { args?: { subagent_type?: string; model?: string } },
+      _input: { tool?: string; callID?: string },
+      output: { args?: { subagent_type?: string; model?: string; [key: string]: unknown } },
     ) => {
       if (_input.tool !== "task") return;
 
@@ -198,6 +242,130 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
         `Intercepting task: ${subagentType}`,
       );
 
+      const routingGrammar = typeof subagentType === "string"
+        ? parseModelRouteGrammar(subagentType)
+        : null;
+
+      if (routingGrammar !== null) {
+        // Reserved routing grammar: defer entirely to the deterministic
+        // routing pipeline. The legacy code (which reads args.model) is
+        // intentionally NOT invoked for routing calls so that the new
+        // pipeline can own the parse → resolve → quarantine → readiness
+        // → audit → rewrite sequence without any fallback.
+        //
+        // Unit 6: boot identity and HMAC signing key MUST come from the
+        // operator-supplied stable host nonce and shared secret env vars.
+        // callID, the legacy `OPENCODE_BOOT_ID` env var, and the
+        // `boot-default` / `deterministic-key` sentinels are rejected.
+        const bootIdentity = resolveRoutingBootIdentity();
+        const signingKey = resolveRoutingSigningKey();
+        if (!bootIdentity || !signingKey) {
+          const reason = !bootIdentity && !signingKey
+            ? `${ROUTING_BOOT_ID_ENV} and ${ROUTING_SIGNING_KEY_ENV} are both required`
+            : !bootIdentity
+              ? `${ROUTING_BOOT_ID_ENV} is required (callID/OPENCODE_BOOT_ID/'boot-default' are not accepted)`
+              : `${ROUTING_SIGNING_KEY_ENV} is required ('deterministic-key'/random keys are not accepted)`;
+          logger.error(`BLOCKED routing call (subagent_type=${subagentType}): ${reason}.`, null);
+          throw new Error(`ROUTING_NOT_CONFIGURED: ${reason}; deterministic routing refuses to run.`);
+        }
+        const routingQuarantineAdapter = new PrismaModelRouteQuarantineAdapter(prisma);
+        const routingResolver = new ModelRouteResolver(
+          new PrismaModelRouteCatalogAdapter(prisma),
+          new Map(),
+        );
+        const auditPath = path.join(directory || process.cwd(), ".opencode", "sdd-model-routing", "routing.audit.jsonl");
+        const routingHook = new ModelRouteTaskHook({
+          workspaceRoot: directory || process.cwd(),
+          resolver: routingResolver,
+          quarantineStore: getGlobalQuarantineStore(),
+          audit: { path: auditPath },
+          bootIdentity,
+          signingKey,
+          loadQuarantineEntries: async () => routingQuarantineAdapter.listActive(),
+        });
+        await routingHook.execute(_input, output);
+        return;
+      }
+
+      // WU2: natural-intent path. The subagent_type is NOT the reserved
+      // routing grammar, but the WU1 bounded trigger set may still be
+      // present in `output.args.prompt`. If so, route through the
+      // natural-intent pipeline; the hook itself enforces:
+      //   - prompt is data; the canonical identity controls every gate
+      //   - prompt is never mutated, never recorded in audit
+      //   - args.model is never read, written, or relied on
+      //   - the exact gate order: parse(prompt) -> resolve -> quarantine
+      //     -> readiness -> audit -> rewrite
+      // If the prompt carries no WU1 trigger, `hook.execute` returns
+      // unchanged and the legacy pass-through below runs. If the
+      // prompt carries a malformed / ambiguous / unknown trigger, the
+      // hook throws a fail-closed `NaturalIntentBlockedError` BEFORE
+      // child creation. Operator boot identity and signing key are
+      // required for the natural path the same as for explicit routing.
+      const promptArg = output.args && typeof output.args === "object"
+        ? (output.args as { prompt?: unknown }).prompt
+        : undefined;
+      if (typeof promptArg === "string" && promptArg.length > 0) {
+        let naturalIntent: ReturnType<typeof parseNaturalModelIntent> = null;
+        try {
+          naturalIntent = parseNaturalModelIntent(promptArg);
+        } catch (error) {
+          // Fail-closed at the bootstrap boundary so the operator sees
+          // the localized error before any child creation. The hook
+          // would also throw — surfacing it here is a defense-in-depth
+          // guard and ensures the audit entry is never written for a
+          // prompt the parser cannot even classify.
+          const blocked = naturalIntentBlockedFromParse(
+            error as Parameters<typeof naturalIntentBlockedFromParse>[0],
+            promptArg,
+          );
+          logger.error(
+            `BLOCKED natural routing call (subagent_type=${subagentType}): ${blocked.format("en")}`,
+            null,
+          );
+          throw blocked;
+        }
+        if (naturalIntent !== null) {
+          const bootIdentity = resolveRoutingBootIdentity();
+          const signingKey = resolveRoutingSigningKey();
+          if (!bootIdentity || !signingKey) {
+            const reason = !bootIdentity && !signingKey
+              ? `${ROUTING_BOOT_ID_ENV} and ${ROUTING_SIGNING_KEY_ENV} are both required`
+              : !bootIdentity
+                ? `${ROUTING_BOOT_ID_ENV} is required (callID/OPENCODE_BOOT_ID/'boot-default' are not accepted)`
+                : `${ROUTING_SIGNING_KEY_ENV} is required ('deterministic-key'/random keys are not accepted)`;
+            logger.error(`BLOCKED natural routing call (subagent_type=${subagentType}): ${reason}.`, null);
+            throw new Error(`ROUTING_NOT_CONFIGURED: ${reason}; deterministic natural routing refuses to run.`);
+          }
+          const routingQuarantineAdapter = new PrismaModelRouteQuarantineAdapter(prisma);
+          // WU2: the resolver MUST be wired with the verified
+          // `NATURAL_MODEL_ALIASES` so the natural reference hits the
+          // alias table before any Tier 3 fuzzy fallback. The explicit
+          // routing path keeps an empty alias map so it can never pick
+          // up natural aliases by accident.
+          const routingResolver = new ModelRouteResolver(
+            new PrismaModelRouteCatalogAdapter(prisma),
+            NATURAL_MODEL_ALIASES,
+          );
+          const auditPath = path.join(directory || process.cwd(), ".opencode", "sdd-model-routing", "routing.audit.jsonl");
+          const routingHook = new ModelRouteTaskHook({
+            workspaceRoot: directory || process.cwd(),
+            resolver: routingResolver,
+            quarantineStore: getGlobalQuarantineStore(),
+            audit: { path: auditPath },
+            bootIdentity,
+            signingKey,
+            loadQuarantineEntries: async () => routingQuarantineAdapter.listActive(),
+          });
+          await routingHook.execute(_input, output);
+          return;
+        }
+      }
+
+      // Legacy pass-through: byte-for-byte unchanged from the prior
+      // composition. This block intentionally keeps its full surface
+      // (registry hydration, quarantine blocking via args.model) so
+      // non-prefixed calls continue to behave exactly as before.
       // Check registry / DB hydration for runtime model allocation
       const registry = getOrCreateModelConfigRegistry();
       const requestedModel = output.args?.model;

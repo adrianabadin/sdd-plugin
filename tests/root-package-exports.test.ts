@@ -38,6 +38,10 @@ async function main(): Promise<void> {
     dummyHookMap !== null && typeof dummyHookMap["tool.execute.before"] === "function",
     "SddPlugin execution returns hook object containing 'tool.execute.before'"
   );
+  assert(
+    dummyHookMap !== null && !Object.hasOwn(dummyHookMap, "config"),
+    "Built root export does not register disabled model-route config staging"
+  );
 
   // 2. Subpath Export `./tui` Module Contract Check
   assert(TuiModule && typeof TuiModule === "object", "TUI module export is an object");

@@ -1,0 +1,38 @@
+
+
+# PMC — Codex CLI MCP server entry
+#
+# Schema confirmed 2026-07-29 against @openai/codex. Codex loads this file
+# only when the project is trusted (the user accepts Codex's trust prompt
+# once on first run). For an MCP entry that loads regardless of trust, the
+# same [mcp_servers.agent-memory] block can be added to ~/.codex/config.toml
+# manually.
+#
+# `env` is rendered at install time with MEMORY_DB_PATH and (when present)
+# EMBEDDING_CACHE_PATH from the install state. PMC does not write to the
+# global ~/.codex/config.toml automatically — that is the user's call.
+[mcp_servers.agent_memory]
+command = "npx"
+args = ["-y", "@aabadin/agent-memory-mcp"]
+env = { MEMORY_DB_PATH = "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/memory-db", EMBEDDING_CACHE_PATH = "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/embedding-cache", NPM_CONFIG_CACHE = "C:/tmp/sdd-plugin2-npm-cache" }
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+
+[mcp_servers.agent_memory.tools.search]
+approval_mode = "approve"
+
+[mcp_servers.agent_memory.tools.stats]
+approval_mode = "approve"
+
+[mcp_servers.agent_memory.tools.get_session_context]
+approval_mode = "approve"
+
+[mcp_servers.pmc_query]
+command = "npx"
+args = ["--yes", "--package", "@aabadin/project-memory-context", "pmc-query-server"]
+env = { PMC_PROJECT_ROOT = "C:/Users/aabad/documents/code/ia/sdd-plugin2", NPM_CONFIG_CACHE = "C:/tmp/sdd-plugin2-npm-cache" }
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+
+[mcp_servers.pmc_query.tools.pmc_query_project]
+approval_mode = "approve"

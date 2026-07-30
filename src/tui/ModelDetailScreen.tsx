@@ -153,18 +153,20 @@ export function ModelDetailScreen(props: ModelDetailScreenProps): JSX.Element {
     }
 
     case "subscription": {
-      fieldEntries.push(
-        { idx: 0, label: "Subscription Enabled", val: props.draft.subscriptionEnabled ? "Yes" : "No" },
-        { idx: 1, label: "Tier", val: props.draft.subscriptionTier ?? "null" },
-      );
       getSubscriptionFieldDescriptors().forEach((descriptor) => {
         const val = descriptor.read(props.draft);
         let valStr = "null";
         if (val !== null && val !== undefined) {
-          valStr = descriptor.kind === "numeric" ? `$${val}` : String(val);
+          if (descriptor.kind === "boolean") {
+            valStr = val ? "Yes" : "No";
+          } else if (descriptor.kind === "numeric") {
+            valStr = `$${val}`;
+          } else {
+            valStr = String(val);
+          }
         }
         fieldEntries.push({
-          idx: descriptor.index + 2,
+          idx: descriptor.index,
           label: descriptor.label,
           val: valStr,
           validation: props.validation?.fields[descriptor.validationKey],
