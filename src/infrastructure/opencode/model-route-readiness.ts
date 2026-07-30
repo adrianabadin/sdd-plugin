@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import type { Manifest } from "./disk-agent-generator.js";
 import type { CanaryEvidence } from "./model-route-canary.js";
@@ -121,7 +122,7 @@ export class ModelRouteReadiness {
     if (input.ttlMs <= 0 || !Number.isSafeInteger(input.ttlMs)) {
       throw new AttestationMismatchError("ttlMs must be a positive safe integer");
     }
-    this.assertCurrentState(input.manifest);
+    this.assertCurrentState(input.manifest, input.bootIdentity);
     if ((input.manifest.requiredOpenCodeVersion ?? "") !== REQUIRED_OPENCODE_VERSION) {
       throw new AttestationMismatchError(
         `manifest requiredOpenCodeVersion=${input.manifest.requiredOpenCodeVersion ?? "<missing>"} does not match runtime contract ${REQUIRED_OPENCODE_VERSION}`,
@@ -156,7 +157,7 @@ export class ModelRouteReadiness {
   }
 
   verify(input: { manifest: Manifest; openCodeVersion: string; bootIdentity: string }): ReadinessAttestation {
-    this.assertCurrentState(input.manifest);
+    this.assertCurrentState(input.manifest, input.bootIdentity);
     if ((input.manifest.requiredOpenCodeVersion ?? "") !== REQUIRED_OPENCODE_VERSION) {
       throw new AttestationMismatchError(
         `manifest requiredOpenCodeVersion=${input.manifest.requiredOpenCodeVersion ?? "<missing>"} does not match runtime contract ${REQUIRED_OPENCODE_VERSION}`,
@@ -177,12 +178,20 @@ export class ModelRouteReadiness {
     return attestation;
   }
 
-  private assertCurrentState(manifest: Manifest): void {
+  private assertCurrentState(manifest: Manifest, expectedBootIdentity?: string): void {
     if (manifest.workspaceIdentity !== this.root) throw new AttestationMismatchError("manifest workspace identity differs from canonical workspace");
     if (manifest.manifestHash !== sha256(JSON.stringify(manifestBody(manifest)))) throw new AttestationMismatchError("manifest digest is invalid");
     const diskManifest = JSON.parse(readFileSync(path.join(this.routingDir, MANIFEST_FILE), "utf8")) as Manifest;
     if (diskManifest.manifestHash !== manifest.manifestHash) throw new AttestationMismatchError("on-disk manifest changed");
-    if (existsSync(path.join(this.routingDir, LOCK_FILE))) throw new AttestationMismatchError("generator lock is present");
+    const lockPath = path.join(this.routingDir, LOCK_FILE);
+    if (existsSync(lockPath)) {
+      let lockBoot = "";
+      try {
+        const lock = JSON.parse(readFileSync(lockPath, "utf8")) as { bootIdentity?: unknown };
+        lockBoot = typeof lock.bootIdentity === "string" ? lock.bootIdentity : "";
+      } catch { /* malformed locks remain a mismatch */ }
+      if (lockBoot !== expectedBootIdentity) throw new AttestationMismatchError("generator lock belongs to another boot");
+    }
     const journal = path.join(this.routingDir, JOURNAL_DIR);
     if (existsSync(journal) && readdirSync(journal).length > 0) throw new AttestationMismatchError("generator journal is not empty");
     const actualHashes = manifest.routes.flatMap((route) => [route.agentFile, route.commandFile]).map((entry) => {
@@ -222,6 +231,7 @@ export class ModelRouteReadiness {
         }
       } finally { closeSync(file); }
       renameSync(temporary, finalPath);
+      applyCurrentUserAcl(finalPath);
       const directory = openSync(this.routingDir, "r");
       try {
         try { fsyncSync(directory); } catch (error) {
@@ -231,5 +241,26 @@ export class ModelRouteReadiness {
     } finally {
       if (existsSync(temporary)) unlinkSync(temporary);
     }
+  }
+}
+
+function applyCurrentUserAcl(filePath: string): void {
+  if (process.platform !== "win32") return;
+  try {
+    const output = execFileSync("whoami", ["/user"], { encoding: "utf8", windowsHide: true });
+    const sid = output.match(/S-\d-\d+(?:-\d+)+/i)?.[0];
+    if (!sid) throw new Error("current user SID unavailable");
+    try {
+      execFileSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${sid}:F`], { windowsHide: true, stdio: "ignore" });
+    } catch {
+      // Offline Windows sandboxes can expose a SID which is not resolvable
+      // by the local ACL provider. Fall back to the canonical account name;
+      // this still grants only the current user and never re-enables inherit.
+      const account = execFileSync("whoami", [], { encoding: "utf8", windowsHide: true }).trim();
+      if (!account) throw new Error("current user account unavailable");
+      execFileSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${account}:F`], { windowsHide: true, stdio: "ignore" });
+    }
+  } catch (error) {
+    throw new AttestationMismatchError(`Windows ACL could not be restricted: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

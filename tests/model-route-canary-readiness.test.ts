@@ -65,9 +65,20 @@ function fixture(routeCount = 2): { root: string; manifest: Manifest } {
 function transportFor(manifest: Manifest, mutate?: (hostIndex: number, messages: unknown[]) => unknown[]): CanaryHostTransport & { commands: string[] } {
   const commands: string[] = [];
   let childListCalls = 0;
+  const parentModelBySession = new Map<string, { providerID: string; modelID: string }>();
   return {
     commands,
-    async createSession() { return { id: "parent-session" }; },
+    async createSession(input) {
+      const [providerID, modelID] = input.parentModel.split("/");
+      const id = "parent-session";
+      const model = { providerID, modelID };
+      parentModelBySession.set(id, model);
+      return { id, model };
+    },
+    async getSession(id) {
+      const model = parentModelBySession.get(id) ?? { providerID: "provider-x", modelID: "model-x" };
+      return { id, model };
+    },
     async invokeCommand(input) { commands.push(input.command); },
     async listChildren() {
       childListCalls += 1;
@@ -158,7 +169,11 @@ async function run(): Promise<void> {
     // every observable child yields CANARY_METADATA_UNOBSERVABLE.
     let singleChildCalls = 0;
     const singleChildTransport: CanaryHostTransport = {
-      async createSession() { return { id: "p" }; },
+      async createSession(input) {
+        const [providerID, modelID] = input.parentModel.split("/");
+        return { id: "p", model: { providerID, modelID } };
+      },
+      async getSession(input_id) { return { id: input_id, model: { providerID: "other", modelID: "model" } }; },
       async invokeCommand() { /* noop */ },
       async listChildren() {
         singleChildCalls += 1;
