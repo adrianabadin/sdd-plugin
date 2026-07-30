@@ -62,13 +62,29 @@ and WU5 are explicitly deferred and require their own apply batches.
 - [x] 3.15 Cross-process control/status/stop, child teardown, renewal, and stale-state cleanup
 - [x] 3.16 Windows current-user ACL via `icacls` with offline-account fallback
 
-## WU4 — Security / failure-mode tests ⏸ DEFERRED
+## WU4 — Security / failure-mode suite ✅ (this batch)
 
-- [ ] 4.1 Prompt injection penetration tests across the natural path
-- [ ] 4.2 Fuzz tests for the parser at the 256-byte boundary
-- [ ] 4.3 Audit-log integrity test (signed entries, no truncation, no secret leakage)
-- [ ] 4.4 Secret non-persistence end-to-end test (kill -9 during boot, no key on disk)
-- [ ] 4.5 Recovery-from-failed-boot tests (catalog readback fails → operator restart path)
+Reconciliado con el tasks memory autoritativo `1bf62713-dff6-4b0a-a680-f356fa20d13f` (Phase 4). Manda el autoritativo; los ítems locales no cubiertos se absorben como sub-items de 4.1.
+
+- [x] 4.1 **RED**: crear `tests/natural-routing-security-failures.test.ts` (796 líneas, ≤800 budget) con cobertura fail-closed de:
+  - [x] Prompt injection penetration tests across the natural path (5 patrones de override; outcome siempre decidido por el canonical del resolver, ningún substring adversarial del prompt aparece en el audit)
+  - [x] Legacy non-intent passthrough byte-for-byte (7 inputs legacy, snapshot deepEqual, sin audit, sin llamada al resolver)
+  - [x] Catalog/fleet missing → fail closed (off-fleet canonical → `RoutedAgentUnavailableError`; unknown alias → `NATURAL_ROUTE_UNKNOWN`)
+  - [x] Process restart race conditions (bootIdentity mismatch → `AttestationMismatchError`; TTL expired → `AttestationExpiredError`, vía `now()` inyectado)
+  - [x] Secret non-persistence e2e (kill -9 simulado dropping la reference sin `stop()`; walk recursivo del workspace verifica 0 archivos contienen la key; `.env` y `audit` no contienen ni el boot identity ni el signing key; boot 2 genera identidad + key + nonce frescos)
+  - [x] Recovery-from-failed-boot (boot 1 con empty catalog → `CATALOG_ROUTE_MISSING` + estado `failed` + sin attestation + sin lock; boot 2 con catalog fixed → `ready` + nueva attestation + nuevo UUIDv4 bootIdentity)
+  - [x] Fuzz del parser en el boundary de 256 bytes (255/256/257 ASCII, 128/129 ñ multibyte, empty, whitespace-only, control NUL/ESC/DEL → todos `CONTROL_CHARACTER` per D2, exact max bytes, multi-trigger → `NATURAL_INTENT_AMBIGUOUS`)
+  - [x] Audit-log integrity (sin prompt crudo, sin key material, contract fields intactos, fsync durable, sensitive keys stripped a cualquier profundidad, grep del sink por 9 patrones de secreto limpio)
+- [x] 4.2 **GREEN**: reforzar producción SOLO donde un test RED lo justifique:
+  - **Cambio mínimo en `src/infrastructure/logging/model-route-audit.logger.ts` (+4 líneas en `SENSITIVE_KEYS`)**: el audit logger ahora strippea `prompt`, `rawprompt`, `userprompt`, `systemprompt` como defense-in-depth. El test RED de la sección 8 demostró que un caller que pase `prompt` accidentalmente NO es sanitizado por el sink actual (los SENSITIVE_KEYS hardcodeados no incluían "prompt"). El fix es mínimo y respeta el contrato de "prompt nunca se registra" sin tocar el hook.
+  - **Ningún otro cambio de producción**: los gates del path natural, el parser, el resolver, el boot manager, y la readiness/canary ya cumplen el contrato fail-closed; los tests RED pasan de entrada (resultado válido, no excusa para tocar).
+- [x] 4.3 **REFACTOR**: consolidar fixtures/mocks edge-case (helper local `seedBootManifest` reemplaza ~70 líneas duplicadas entre secciones 5/6; `BootStubCanary` con `invokedCount` para el diff before/after del canary; `makeBootManager` con firma compacta). El archivo queda en 796 líneas (≤800 budget).
+
+**Ownership fijado (D3)**: icacls Windows ACL y env scrubbing de attach pertenecen a WU3 v2 (3.14, 3.16 ✅); WU4 solo TESTEA su comportamiento, no los implementa.
+
+**D2 honrado**: los tests de la sección 7h asertan que NUL (U+0000), DEL (U+007F) y ESC (U+001B) son RECHAZADOS con `CONTROL_CHARACTER`, NO strippeados. El parser ya cumple el contrato (WU1).
+
+**Evidencia**: 9/9 secciones pass; `tsc --noEmit` + `tsc --project tsconfig.test.json --noEmit` + `npm run build` + `npm run test:typecheck:strict` todos limpios; tests previos (WU1, WU2, WU3 v2, Unit 5, audit, canary-readiness, quarantine, disk-generator) sin regresiones.
 
 ## WU5 — Real-host E2E + operator docs ⏸ DEFERRED
 

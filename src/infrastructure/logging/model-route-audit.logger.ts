@@ -79,6 +79,12 @@ const SENSITIVE_KEYS = new Set<string>([
   "token", "apikey", "apikey", "authorization", "password", "secret", "cookie",
   "session", "credential", "credentials", "privatekey", "privatekey",
   "refreshtoken", "accesstoken",
+  // WU4: defense-in-depth — the audit logger must NEVER carry the
+  // raw user prompt, even if a caller mistakenly passes one. The
+  // hook contract is that the prompt is data and is never recorded
+  // (the parser extracts only the trigger + raw reference), but the
+  // sink is the last line of defense for downstream consumers.
+  "prompt", "rawprompt", "userprompt", "systemprompt",
 ]);
 
 export class ModelRouteAuditLoggerError extends Error {
