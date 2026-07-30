@@ -25,7 +25,7 @@
  *             recovery, send SIGTERM to the live pid recorded in
  *             the lock payload. If no live process is found, the
  *             lock + attestation are removed from disk so the next
- *             boot can start cleanly.
+ *             boot can start cleanly. Cleanup also removes the control record.
  *   status  - Report the on-disk attestation + lock state. Reads the
  *             attestation if present and prints its boot identity,
  *             expiresAt, and a summary of the canary evidence.
@@ -47,7 +47,7 @@
 
 import process from "node:process";
 
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
@@ -70,6 +70,8 @@ import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-mo
 import { SyncConnectedModelsUseCase } from "../application/sync-connected-models/sync-connected-models.use-case.js";
 import type { BootChildProcess, BootProcessSupervisor } from "../infrastructure/runtime/windows-model-route-boot-manager.js";
 import { REQUIRED_OPENCODE_VERSION } from "../infrastructure/opencode/model-route-readiness.js";
+import { stopModelRouteSupervisor } from "../infrastructure/runtime/model-route-boot-control.js";
+import { mapModelRouteStopResult } from "./model-route-boot-stop-output.js";
 
 type Subcommand = "start" | "stop" | "status";
 
@@ -177,23 +179,6 @@ async function defaultSelectParentModel(targetCanonicalId: string): Promise<stri
   return "google/antigravity-gemini-3.6-flash-tiered";
 }
 
-interface LockPayloadShape {
-  readonly pid: number;
-  readonly acquiredAt: number;
-  readonly bootIdentity: string;
-}
-
-function readLockPayload(lockPath: string): LockPayloadShape | null {
-  try {
-    const raw = readFileSync(lockPath, "utf8");
-    const parsed = JSON.parse(raw) as Partial<LockPayloadShape>;
-    if (typeof parsed.pid !== "number" || typeof parsed.acquiredAt !== "number") return null;
-    return { pid: parsed.pid, acquiredAt: parsed.acquiredAt, bootIdentity: String(parsed.bootIdentity ?? "") };
-  } catch {
-    return null;
-  }
-}
-
 async function main(): Promise<number> {
   let args: CliArgs;
   try {
@@ -209,6 +194,7 @@ async function main(): Promise<number> {
   const routingDir = path.join(workspaceRoot, ".opencode", "sdd-model-routing");
   const lockPath = path.join(routingDir, "generator.lock");
   const attestationPath = path.join(routingDir, "attestation.json");
+  const controlPath = path.join(routingDir, "boot-control.json");
   const openCodeBaseUrl = process.env["SDD_OPENCODE_BASE_URL"] ?? "http://127.0.0.1:4096";
 
   if (args.subcommand === "status") {
@@ -217,9 +203,9 @@ async function main(): Promise<number> {
   }
 
   if (args.subcommand === "stop") {
-    // Stop is best-effort cross-process: signal the live pid when
-    // present, otherwise just clean the disk state.
-    return runStop(lockPath, attestationPath);
+    // Signal a live cross-process supervisor. Clean disk state only when
+    // process absence is confirmed; indeterminate failures retain ownership.
+    return runStop(lockPath, attestationPath, controlPath);
   }
 
   // start: long-lived supervisor.
@@ -310,34 +296,15 @@ function reportStatus(attestationPath: string, lockPath: string): number {
  *   1. If the lock file is present AND its pid is alive, send
  *      SIGTERM and let the supervisor call manager.stop().
  *   2. Otherwise (no lock, dead pid, malformed payload) clean the
- *      attestation + lock from disk so the next boot can start.
+ *      attestation + lock + control record so the next boot can start.
+ *   3. Retain all artifacts when probe/signaling fails without ESRCH.
  */
-function runStop(lockPath: string, attestationPath: string): number {
-  const lock = readLockPayload(lockPath);
-  if (lock !== null && lock.pid > 0 && lock.pid !== process.pid) {
-    let alive = true;
-    if (process.platform !== "win32") {
-      try { process.kill(lock.pid, 0); } catch { alive = false; }
-    } else {
-      // No portable signal-0 probe on Windows; treat recent locks as live.
-      alive = Date.now() - lock.acquiredAt < 30_000;
-    }
-    if (alive) {
-      try {
-        process.kill(lock.pid, "SIGTERM");
-        process.stdout.write(`boot: sent SIGTERM to pid=${lock.pid} bootIdentity=${lock.bootIdentity}\n`);
-        return 0;
-      } catch (err) {
-        process.stderr.write(`boot: failed to signal pid=${lock.pid}: ${(err as Error).message}\n`);
-        // Fall through to disk cleanup.
-      }
-    }
-  }
-  // Disk cleanup: best-effort.
-  try { rmSync(attestationPath, { force: true }); } catch { /* best-effort */ }
-  try { rmSync(lockPath, { force: true }); } catch { /* best-effort */ }
-  process.stdout.write("boot: state=idle (cleaned stale attestation + lock)\n");
-  return 0;
+function runStop(lockPath: string, attestationPath: string, controlPath: string): number {
+  const result = stopModelRouteSupervisor({ lockPath, attestationPath, controlPath });
+  const output = mapModelRouteStopResult(result);
+  if (output.stdout.length > 0) process.stdout.write(output.stdout);
+  if (output.stderr.length > 0) process.stderr.write(output.stderr);
+  return output.code;
 }
 
 main().then(
