@@ -89,11 +89,13 @@ Reconciliado con el tasks memory autoritativo `1bf62713-dff6-4b0a-a680-f356fa20d
 
 **Evidencia**: 10/10 secciones WU4 pass; `npm run test:model-routes`, typecheck estricto y `npm run build` pasan; las suites WU1/WU2/WU3 v2 y Unit 5 pasan sin regresiones. La corrida agregada `npm test` debe verificarse por separado porque su build encadenado puede fallar al resolver la ruta del config bajo el sandbox Windows.
 
-## WU5 — Real-host E2E + operator docs ✅
+## WU5 — Real-host E2E + operator docs 🚧 BLOCKED (not PASS — see below)
 
-- [x] 5.1 Real-host 1.18.9 natural-route E2E (Gating verified Task 0, host real 1.18.9 detected, provider credentials absent on host -> BLOCKED exit 2 recorded per D1/Precondition 2)
-- [x] 5.2 Attestation evidence recording in PMC (Recorded in PMC memory under topic alias sdd/natural-model-routing/wu5-attestation-evidence)
+- [ ] 5.1 Real-host 1.18.9 natural-route E2E — **BLOCKED, not done**. Task 0 gating verified closed (exit 1/2). Real host detected at `1.18.9` and supervisor reached `ready`, but the live canary failed closed with `CANARY_FAILED` (`POST /session/.../command` returned 500) because the OpenCode host has no provider API credentials configured (`OPENAI_API_KEY`, etc.). No attestation was issued. Per D1/Precondition 2 this is a fail-closed BLOCKED result, not a PASS, and the checkbox stays unchecked until a real `ATTESTED` run succeeds.
+- [ ] 5.2 Attestation evidence recording in PMC — **Partially done**: BLOCKED-state evidence (gating results, host detection, `CANARY_FAILED` reason, zero secret leakage) was honestly recorded in PMC under topic alias `sdd/natural-model-routing/wu5-attestation-evidence`. The checkbox stays unchecked because the task requires recording `ATTESTED` evidence, which cannot exist until 5.1 passes for real.
 - [x] 5.3 Windows Operator Guide (`docs/windows-natural-routing-operations.md`)
 - [x] 5.4 Rollback plan documented (`SDD_NATURAL_ROUTING=off`)
 
-**WU5 status**: Execution completed. Hermetic gating checks (Task 0) verified closed (exit 1/2). OpenCode 1.18.9 detected on host. Live host canary run executed; failed closed with `CANARY_FAILED` (POST /session/.../command returned 500) due to missing provider API credentials on host. Per D1 and Precondition 2, no synthetic attestation was manufactured. Evidence registered in PMC. Docs verified. Repo verification (`test:typecheck:strict`, `build`, `test:model-routes`, `npm test`) 100% green.
+**WU5 status**: OPEN, not archivable. Hermetic gating checks (Task 0) verified closed (exit 1/2). OpenCode 1.18.9 detected on host and the boot supervisor reached `ready`, but the live canary failed closed with `CANARY_FAILED` (POST /session/.../command returned 500) due to missing provider API credentials on the host. Per D1 and Precondition 2, no synthetic attestation was manufactured, so 5.1/5.2 cannot be marked complete. BLOCKED-state evidence was honestly registered in PMC. Docs (5.3/5.4) are verified and complete. Repo verification (`test:typecheck:strict`, `build`, `test:model-routes`, `npm test`) is 100% green — that is a separate, already-true fact and does not change the BLOCKED status of 5.1/5.2.
+
+**Required to close WU5**: configure real provider API credentials on the OpenCode 1.18.9 host (operator/infra action, outside this repo), then re-run `npm run canary:model-routes:real` and `npm run e2e:model-routes` until both report `status: "ATTESTED"`. Only then check 5.1/5.2 and record `ATTESTED` evidence in PMC.

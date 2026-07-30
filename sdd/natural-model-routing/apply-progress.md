@@ -831,3 +831,15 @@ deduplication carve-out.
   - `npm run test:model-routes` -> exit 0 (all test suites passed).
   - `npx tsx tests/natural-routing-security-failures.test.ts` -> exit 0 (10/10 sections passed).
   - `npm test` -> exit 0 (all 12 sub-suites passed, including focus, verification, adapter, persistence guard).
+
+### WU5 verdict
+
+**WU5 is OPEN, not archivable.** Tasks 5.1 and 5.2 are BLOCKED (fail-closed,
+per D1/Precondition 2), not PASS: the live canary returned `CANARY_FAILED`
+because the OpenCode 1.18.9 host has no provider API credentials configured.
+Repo-wide green tests, a clean build, and the 5.3/5.4 docs do not substitute
+for a real `ATTESTED` canary/E2E run. Closing WU5 requires an operator to
+configure real provider credentials on the live host and re-run
+`canary:model-routes:real` / `e2e:model-routes` until both report
+`status: "ATTESTED"`; only then should `tasks.md` 5.1/5.2 be checked and
+`ATTESTED` evidence recorded in PMC.
