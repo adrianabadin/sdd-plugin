@@ -34,12 +34,19 @@ export type ModelRouteAuditStage =
   | "routing.launch"
   | "routing.blocked"
   | "routing.natural.launch"
-  | "routing.natural.blocked";
-export type ModelRouteAuditStatus = "success" | "error";
+  | "routing.natural.blocked"
+  | "generation.route.excluded"
+  | "generation.fleet.empty";
 
-export interface ModelRouteAuditEntry {
-  readonly stage: ModelRouteAuditStage;
-  readonly status: ModelRouteAuditStatus;
+export type ModelRouteAuditStatus = "success" | "error" | "warning";
+
+export interface RoutingAuditEntry {
+  readonly stage:
+    | "routing.launch"
+    | "routing.blocked"
+    | "routing.natural.launch"
+    | "routing.natural.blocked";
+  readonly status: "success" | "error";
   readonly correlationId: string;
   readonly requestedAlias: string;
   readonly resolutionTier: "exact" | "alias" | "normalized";
@@ -49,21 +56,39 @@ export interface ModelRouteAuditEntry {
   readonly quarantineChecked: boolean;
   readonly durationMs: number;
   readonly errorClass?: string;
-  /**
-   * WU2-only. The natural-intent trigger label (e.g. `usando`,
-   * `con el modelo`) for natural routing audit entries. Undefined for the
-   * explicit-grammar path.
-   */
   readonly trigger?: string;
-  /**
-   * WU2-only. The raw reference string extracted from the user prompt for
-   * natural routing audit entries. The user prompt itself is never
-   * recorded in audit. Undefined for the explicit-grammar path.
-   */
   readonly requestedNaturalReference?: string;
   readonly ts?: number;
   readonly [key: string]: unknown;
 }
+
+export interface RouteExcludedGenerationAuditEntry {
+  readonly stage: "generation.route.excluded";
+  readonly status: "warning";
+  readonly correlationId: string;
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly baseTemplate: string;
+  readonly reason: string;
+  readonly detail?: string;
+  readonly durationMs: number;
+  readonly ts?: number;
+  readonly [key: string]: unknown;
+}
+
+export interface FleetEmptyGenerationAuditEntry {
+  readonly stage: "generation.fleet.empty";
+  readonly status: "warning";
+  readonly correlationId: string;
+  readonly excludedCount: number;
+  readonly durationMs: number;
+  readonly ts?: number;
+}
+
+export type ModelRouteAuditEntry =
+  | RoutingAuditEntry
+  | RouteExcludedGenerationAuditEntry
+  | FleetEmptyGenerationAuditEntry;
 
 export interface ModelRouteAuditLoggerOptions {
   readonly path: string;

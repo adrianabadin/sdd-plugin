@@ -340,6 +340,8 @@ async function run(): Promise<void> {
     const victimRoute = manifest.routes[1]!;
     const victimCommand = path.join(workspaceRoot, victimRoute.commandFile.relativePath);
     const victimAgent = path.join(workspaceRoot, victimRoute.agentFile.relativePath);
+    const origAgentContent = readFileSync(victimAgent, "utf8");
+    const origCommandContent = readFileSync(victimCommand, "utf8");
     writeFileSync(victimCommand, "USER EDIT -- outside generator\n", "utf8");
     writeFileSync(victimAgent, "USER EDIT -- outside generator\n", "utf8");
     const reducedRoutesPath = writeRoutesConfig(workspaceRoot, makeRoutesConfig([makeRoute(1)]));
@@ -359,23 +361,9 @@ async function run(): Promise<void> {
     assert.ok(existsSync(victimAgent), "modified agent left in place after abort");
     assert.ok(existsSync(victimCommand), "modified command left in place after abort");
 
-    // Restore from the journal backup the generator left before the abort
-    const backupAgent = path.join(
-      workspaceRoot,
-      ".opencode",
-      "sdd-model-routing",
-      "journal",
-      `${path.basename(victimAgent)}.bak`,
-    );
-    const backupCommand = path.join(
-      workspaceRoot,
-      ".opencode",
-      "sdd-model-routing",
-      "journal",
-      `${path.basename(victimCommand)}.bak`,
-    );
-    if (existsSync(backupAgent)) writeFileSync(victimAgent, readFileSync(backupAgent), "utf8");
-    if (existsSync(backupCommand)) writeFileSync(victimCommand, readFileSync(backupCommand), "utf8");
+    // Restore exact original content
+    writeFileSync(victimAgent, origAgentContent, "utf8");
+    writeFileSync(victimCommand, origCommandContent, "utf8");
 
     // 18. Stale cleanup: with the modified files restored, removal now works
     const reduced = await generate(workspaceRoot, reducedRoutesPath);
@@ -429,6 +417,67 @@ async function run(): Promise<void> {
         entry.startsWith("sdd-mr-canary-v1-") && entry.endsWith(".md"),
         `only owned command files present (got ${entry})`,
       );
+    }
+
+    // 23. All-owned tamper verification occurs before any sweep/deletion, even for files being regenerated or deleted
+    const tamperWS = mkdtempSync(path.join(tmpdir(), "sdd-mr-tamper-"));
+    try {
+      const routesConfigPath = writeRoutesConfig(tamperWS, makeRoutesConfig([makeRoute(1), makeRoute(2)]));
+      const gen1 = new DiskAgentGenerator({ workspaceRoot: tamperWS, routesConfigPath });
+      const res1 = await gen1.generate();
+      assert.equal(res1.generated.length, 2);
+
+      // Modify one of the owned files (e.g. agent 1)
+      const agent1Path = path.join(tamperWS, res1.generated[0]!.agentRelative);
+      writeFileSync(agent1Path, "# TAMPERED CONTENT", "utf8");
+
+      // Re-run generation with the SAME routes (so the file path WOULD be regenerated)
+      const gen2 = new DiskAgentGenerator({ workspaceRoot: tamperWS, routesConfigPath });
+      await assert.rejects(
+        async () => gen2.generate(),
+        (err: Error) => err.name === "ModifiedOwnedFileError",
+        "tampered owned file causes ModifiedOwnedFileError even when path will be regenerated",
+      );
+
+      // Delete one of the owned files (e.g. agent 2) and verify missing owned file failure
+      const agent2Path = path.join(tamperWS, res1.generated[1]!.agentRelative);
+      rmSync(agent2Path);
+      const gen3 = new DiskAgentGenerator({ workspaceRoot: tamperWS, routesConfigPath });
+      await assert.rejects(
+        async () => gen3.generate(),
+        (err: Error) => err.name === "ModifiedOwnedFileError",
+        "deleted owned file causes ModifiedOwnedFileError pre-sweep",
+      );
+    } finally {
+      await cleanupDirAsync(tamperWS);
+    }
+
+    // 24. In-memory config with empty routes creates empty manifest, while file path branch rejects empty routes array
+    const emptyWS = mkdtempSync(path.join(tmpdir(), "sdd-mr-empty-"));
+    try {
+      const emptyConfig = {
+        schemaVersion: 1 as const,
+        generatorVersion: "1.1.0",
+        cap: 8,
+        sizeException: null,
+        routes: [],
+      };
+      const inMemoryGen = new DiskAgentGenerator({ workspaceRoot: emptyWS, routesConfig: emptyConfig });
+      const emptyRes = await inMemoryGen.generate();
+      assert.equal(emptyRes.generated.length, 0);
+      assert.equal(emptyRes.manifest.routes.length, 0);
+      assert.equal(emptyRes.manifest.schemaVersion, 1);
+
+      // File path branch still rejects empty routes array in routes.json
+      const emptyFileConfigPath = writeRoutesConfig(emptyWS, makeRoutesConfig([]));
+      const fileGen = new DiskAgentGenerator({ workspaceRoot: emptyWS, routesConfigPath: emptyFileConfigPath });
+      await assert.rejects(
+        async () => fileGen.generate(),
+        (err: Error) => err.name === "RoutesConfigInvalidError",
+        "routesConfigPath branch rejects empty routes array",
+      );
+    } finally {
+      await cleanupDirAsync(emptyWS);
     }
 
     console.log("All disk agent generator assertions passed.");

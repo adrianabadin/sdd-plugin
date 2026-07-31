@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getPrismaClient } from "../src/bootstrap/index.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoCliEntry = path.join(repoRoot, "src", "cli", "model-route-agents.ts");
@@ -70,6 +71,23 @@ async function run(): Promise<void> {
 
     // 2. Happy path: CLI generates owned files for a valid config in an
     //    isolated workspace and NEVER touches the project root `.opencode`.
+    // Seed connected routes into persistent catalog for happy path test
+    const prisma = getPrismaClient();
+    await prisma.provider.upsert({ where: { id: "prov-cli-1" }, update: {}, create: { id: "prov-cli-1", name: "Provider 1" } });
+    await prisma.provider.upsert({ where: { id: "prov-cli-2" }, update: {}, create: { id: "prov-cli-2", name: "Provider 2" } });
+    await prisma.model.upsert({ where: { id: "model-cli-1" }, update: {}, create: { id: "model-cli-1", name: "Model 1" } });
+    await prisma.model.upsert({ where: { id: "model-cli-2" }, update: {}, create: { id: "model-cli-2", name: "Model 2" } });
+    await prisma.modelProvider.upsert({
+      where: { modelId_providerId: { modelId: "model-cli-1", providerId: "prov-cli-1" } },
+      update: {},
+      create: { providerId: "prov-cli-1", modelId: "model-cli-1" },
+    });
+    await prisma.modelProvider.upsert({
+      where: { modelId_providerId: { modelId: "model-cli-2", providerId: "prov-cli-2" } },
+      update: {},
+      create: { providerId: "prov-cli-2", modelId: "model-cli-2" },
+    });
+
     const routesPath = writeConfig(
       workspaceRoot,
       JSON.stringify(
@@ -88,7 +106,7 @@ async function run(): Promise<void> {
     );
     const ok = runCli(workspaceRoot, routesPath);
     assert.equal(ok.code, 0, `CLI exits 0 on valid config (stderr=${ok.stderr})`);
-    assert.match(ok.stdout, /generated=2|manifest=/, "CLI prints a short summary");
+    assert.match(ok.stdout, /generated=\d+ excluded=\d+ manifest=/, "CLI prints summary with generated and excluded counts");
 
     // Manifest, agents, and commands are all present in the isolated workspace
     const manifestPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "manifest.json");

@@ -39,11 +39,33 @@ while a supervisor may still be alive.
 
 Exit codes identify the first failure boundary:
 
-- `3`: catalog readback missing a manifest route.
-- `4`: startup canary failed.
-- `5`: manifest missing or invalid.
-- `7`: stale lock cannot be safely recovered.
-- `1`: unexpected failure.
+- `3`: routes.json validation error or catalog readback missing a manifest route.
+- `4`: path safety / disk safety / modified-owned-file error or startup canary failed.
+- `5`: generator lock contention / stale lock unrecoverable or manifest missing/invalid.
+- `6`: manifest invalid.
+- `7`: descriptor budget exceeded or stale lock cannot be safely recovered.
+- `8`: sweep incomplete error (owned file deletion failed during pre-generation sweep).
+- `1`: database/audit initialization failure or unexpected failure.
+
+## Fleet Agent Regeneration & Cold-Start Semantics
+
+Fleet agent regeneration runs pre-spawn during manual CLI execution (`generate:model-routes`) and supervised boot (`model-route-boot start`):
+
+1. **Persisted-Catalog Semantics**:
+   - Pre-spawn route filtering queries the **persistent database catalog** (`existsCanonical`), NOT a live un-started host catalog.
+   - Routes not yet present in the database catalog (or never synchronized) are excluded as `NOT_CONNECTED`.
+
+2. **Cold-Start & Fleet Convergence**:
+   - On a fresh install with an empty database catalog, pre-spawn filtering excludes disconnected routes and converges to a valid **empty fleet manifest** (`routes: []`).
+   - `generation.fleet.empty` warning audit event is recorded with `excludedCount` and `durationMs` (no detail field).
+   - Post-spawn catalog sync populates the database during boot, but does **not** mutate the fleet during the same boot.
+   - The operator must **restart the supervised boot** after initial sync to generate newly connected routed agents from the populated catalog.
+
+3. **Quarantine & Audit Contract**:
+   - Permanent quarantines (`provider`, `model`, `modelProvider`) exclude affected routes at generation time as `PERMANENTLY_QUARANTINED` with warning audit events (`generation.route.excluded`).
+   - TTL-only quarantines remain included at generation time and are enforced dynamically at dispatch time.
+   - Pre-generation sweep validates previous manifest hashes and unconditionally sweeps owned prefix files (`.opencode/agents/sdd-mr-v1-*.md` and `.opencode/commands/sdd-mr-canary-v1-*.md`).
+
 
 ## Real-host canary evidence
 

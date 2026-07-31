@@ -33,11 +33,20 @@ opencode-models.db-*
 .env.local
 .env.*.local
 /.mcp.json
+
+# Local environment configuration (never committed)
+/.env
+.env.local
+.env.*.local
+/.mcp.json
 /.opencode/
 /.atl/
 
 # Generated Prisma client
 /src/generated/prisma
+
+# Scratch / temp test artifacts
+scratch/
 
 # Editor / OS noise
 .DS_Store

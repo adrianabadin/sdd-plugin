@@ -16,37 +16,12 @@
  *   start   - Boot the manager, distribute the boot secrets to the
  *             process env so the in-process bootstrap can read them,
  *             and supervise the lifecycle. Installs SIGINT/SIGTERM
- *             handlers that call manager.stop() and exit 0. The
- *             supervisor is long-lived: the CLI does NOT auto-stop
- *             after a successful boot. In a production wrapper the
- *             CLI runs as a sibling of the OpenCode serve.
- *   stop    - Release the manager in-process (when the same CLI
- *             process supervised the boot) or, for cross-process
- *             recovery, send SIGTERM to the live pid recorded in
- *             the lock payload. If no live process is found, the
- *             lock + attestation are removed from disk so the next
- *             boot can start cleanly. Cleanup also removes the control record.
- *   status  - Report the on-disk attestation + lock state. Reads the
- *             attestation if present and prints its boot identity,
- *             expiresAt, and a summary of the canary evidence.
- *
- * Exit codes:
- *   0   success.
- *   2   argument error (missing args, traversal, malformed paths).
- *   3   CATALOG_ROUTE_MISSING or other catalog readback failure.
- *   4   CANARY_FAILED / PARENT_MODEL_UNAVAILABLE / PARENT_MODEL_MISMATCH.
- *   5   Manifest missing or unparseable.
- *   6   ROUTING_NOT_CONFIGURED (operator override only — env-only,
- *       not used in the default in-memory secret path).
- *   7   STALE_LOCK_UNRECOVERABLE.
- *   1   any other unexpected error.
- *
- * The CLI is intentionally tiny: every behavior it asserts lives in
- * `src/infrastructure/runtime/windows-model-route-boot-manager.ts`.
+ *             handlers that call manager.stop() and exit 0.
+ *   stop    - Release the manager in-process or via SIGTERM to lock pid.
+ *   status  - Report on-disk attestation + lock state.
  */
 
 import process from "node:process";
-
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -56,22 +31,22 @@ import {
   CatalogRouteMissingError,
   StaleLockUnrecoverableError,
   type BootLifecycleState,
+  type BootChildProcess,
+  type BootProcessSupervisor,
 } from "../infrastructure/runtime/windows-model-route-boot-manager.js";
 import { PrismaModelRouteCatalogAdapter } from "../infrastructure/prisma/model-route-catalog.adapter.js";
 import { PrismaClient } from "@prisma/client";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 import { initializeDatabase } from "../infrastructure/runtime/database-path.js";
-import {
-  OpenCodeHttpCanaryTransport,
-} from "../infrastructure/opencode/model-route-canary.js";
-import { CanaryBlockedError } from "../infrastructure/opencode/model-route-canary.js";
+import { OpenCodeHttpCanaryTransport, CanaryBlockedError } from "../infrastructure/opencode/model-route-canary.js";
 import { OpenCodeModelCatalogAdapter } from "../infrastructure/opencode/opencode-model-catalog.adapter.js";
 import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
 import { SyncConnectedModelsUseCase } from "../application/sync-connected-models/sync-connected-models.use-case.js";
-import type { BootChildProcess, BootProcessSupervisor } from "../infrastructure/runtime/windows-model-route-boot-manager.js";
 import { REQUIRED_OPENCODE_VERSION } from "../infrastructure/opencode/model-route-readiness.js";
 import { stopModelRouteSupervisor } from "../infrastructure/runtime/model-route-boot-control.js";
 import { mapModelRouteStopResult } from "./model-route-boot-stop-output.js";
+import { ModelRouteAuditLogger } from "../infrastructure/logging/model-route-audit.logger.js";
+import { RegenerateFleetAgentsUseCase } from "../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
 
 type Subcommand = "start" | "stop" | "status";
 
@@ -105,7 +80,7 @@ class CliArgumentError extends Error {
   }
 }
 
-class OpenCodeProcessSupervisor implements BootProcessSupervisor {
+export class OpenCodeProcessSupervisor implements BootProcessSupervisor {
   constructor(private readonly baseUrl: string) {}
 
   spawnServe(env: NodeJS.ProcessEnv): BootChildProcess {
@@ -165,18 +140,75 @@ function classify(err: unknown): { code: number; message: string } {
   return { code: 1, message: `unexpected error: ${message}` };
 }
 
-/**
- * Select a parent model distinct from the target. The selection is
- * deterministic: when the target is `google/...`, use `openai/...`,
- * otherwise use `google/...`. Real boot wrappers override this with
- * a fleet-aware chooser; the CLI ships a minimal default so the
- * lifecycle is observable end-to-end on a fresh install.
- */
-async function defaultSelectParentModel(targetCanonicalId: string): Promise<string | null> {
+export async function defaultSelectParentModel(targetCanonicalId: string): Promise<string | null> {
   const [provider] = targetCanonicalId.split("/");
   if (!provider) return null;
   if (provider === "google") return "openai/gpt-4o";
   return "google/antigravity-gemini-3.6-flash-tiered";
+}
+
+export interface ProductionBootComponents {
+  readonly manager: WindowsModelRouteBootManager;
+  readonly prisma: PrismaClient;
+  readonly auditLogger: ModelRouteAuditLogger;
+  readonly fleetRegeneration: RegenerateFleetAgentsUseCase;
+  readonly routesConfigPath: string;
+}
+
+export function createProductionBootComponents(
+  workspaceRoot: string,
+  options?: {
+    openCodeBaseUrl?: string;
+    prisma?: PrismaClient;
+    auditLogger?: ModelRouteAuditLogger;
+    processSupervisor?: BootProcessSupervisor;
+  },
+): ProductionBootComponents {
+  const openCodeBaseUrl = options?.openCodeBaseUrl ?? process.env["SDD_OPENCODE_BASE_URL"] ?? "http://127.0.0.1:4096";
+  const manifestPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "manifest.json");
+
+  let prisma = options?.prisma;
+  if (!prisma) {
+    const dbPath = initializeDatabase();
+    const prismaAdapter = new PrismaLibSql({ url: `file:${dbPath}` });
+    prisma = new PrismaClient({ adapter: prismaAdapter });
+  }
+
+  const catalog = new PrismaModelRouteCatalogAdapter(prisma);
+  const quarantinePort = new PrismaModelRepositoryAdapter(prisma);
+  const canary = new OpenCodeHttpCanaryTransport({ baseUrl: openCodeBaseUrl });
+  const connectedCatalog = new OpenCodeModelCatalogAdapter({
+    config: {
+      providers: async () => (await fetch(`${openCodeBaseUrl}/config/providers`)).json(),
+    },
+  } as never);
+  const catalogSync = new SyncConnectedModelsUseCase(connectedCatalog, quarantinePort);
+
+  const auditPath = path.resolve(workspaceRoot, ".opencode", "sdd-model-routing", "routing.audit.jsonl");
+  const auditLogger = options?.auditLogger ?? new ModelRouteAuditLogger({ path: auditPath });
+
+  const fleetRegeneration = new RegenerateFleetAgentsUseCase(catalog, quarantinePort, auditLogger);
+  const routesConfigPath = path.resolve(workspaceRoot, "config/model-routing/routes.json");
+
+  const manager = new WindowsModelRouteBootManager({
+    workspaceRoot,
+    manifestPath,
+    catalog,
+    canary,
+    selectParentModel: defaultSelectParentModel,
+    catalogSync,
+    fleetRegeneration,
+    routesConfigPath,
+    processSupervisor: options?.processSupervisor ?? new OpenCodeProcessSupervisor(openCodeBaseUrl),
+  });
+
+  return {
+    manager,
+    prisma,
+    auditLogger,
+    fleetRegeneration,
+    routesConfigPath,
+  };
 }
 
 async function main(): Promise<number> {
@@ -190,57 +222,27 @@ async function main(): Promise<number> {
   }
 
   const workspaceRoot = args.workspaceRoot;
-  const manifestPath = `${workspaceRoot}/.opencode/sdd-model-routing/manifest.json`;
   const routingDir = path.join(workspaceRoot, ".opencode", "sdd-model-routing");
   const lockPath = path.join(routingDir, "generator.lock");
   const attestationPath = path.join(routingDir, "attestation.json");
   const controlPath = path.join(routingDir, "boot-control.json");
-  const openCodeBaseUrl = process.env["SDD_OPENCODE_BASE_URL"] ?? "http://127.0.0.1:4096";
 
   if (args.subcommand === "status") {
-    // Status is read-only: do not instantiate the Prisma client.
     return reportStatus(attestationPath, lockPath);
   }
 
   if (args.subcommand === "stop") {
-    // Signal a live cross-process supervisor. Clean disk state only when
-    // process absence is confirmed; indeterminate failures retain ownership.
     return runStop(lockPath, attestationPath, controlPath);
   }
 
-  // start: long-lived supervisor.
-  // For the CLI the catalog and canary transport are real adapters.
-  const dbPath = initializeDatabase();
-  const prismaAdapter = new PrismaLibSql({ url: `file:${dbPath}` });
-  const prisma = new PrismaClient({ adapter: prismaAdapter });
-  const catalog = new PrismaModelRouteCatalogAdapter(prisma);
-  const canary = new OpenCodeHttpCanaryTransport({ baseUrl: openCodeBaseUrl });
-  const connectedCatalog = new OpenCodeModelCatalogAdapter({
-    config: {
-      providers: async () => (await fetch(`${openCodeBaseUrl}/config/providers`)).json(),
-    },
-  } as never);
-  const repository = new PrismaModelRepositoryAdapter(prisma);
-  const catalogSync = new SyncConnectedModelsUseCase(connectedCatalog, repository);
-
-  const manager = new WindowsModelRouteBootManager({
-    workspaceRoot,
-    manifestPath,
-    catalog,
-    canary,
-    selectParentModel: defaultSelectParentModel,
-    catalogSync,
-    processSupervisor: new OpenCodeProcessSupervisor(openCodeBaseUrl),
-  });
+  // subcommand === "start"
+  const components = createProductionBootComponents(workspaceRoot);
+  const { manager, prisma, auditLogger } = components;
 
   try {
     await manager.start();
     process.stdout.write(`boot: state=${manager.getState()} bootIdentity=${manager.getBootIdentity()}\n`);
 
-    // Long-lived supervisor: wait for SIGINT/SIGTERM. The manager
-    // distributes the boot identity + signing key to process.env so
-    // the in-process bootstrap can read them; the keys are cleared
-    // on stop().
     await new Promise<void>((resolve) => {
       const shutdown = async (signal: string): Promise<void> => {
         process.stdout.write(`boot: received ${signal}, stopping supervisor\n`);
@@ -257,14 +259,11 @@ async function main(): Promise<number> {
     process.stderr.write(`${message}\n`);
     return code;
   } finally {
+    try { await auditLogger.close(); } catch { /* best-effort */ }
     try { await prisma.$disconnect(); } catch { /* best-effort */ }
   }
 }
 
-/**
- * Read-only status: report the on-disk attestation + lock state.
- * Does not construct any adapter.
- */
 function reportStatus(attestationPath: string, lockPath: string): number {
   if (!existsSync(attestationPath)) {
     process.stdout.write("boot: state=idle (no attestation on disk)\n");
@@ -286,19 +285,6 @@ function reportStatus(attestationPath: string, lockPath: string): number {
   }
 }
 
-/**
- * Best-effort cross-process stop. The in-process path (start + stop
- * in the same CLI invocation) is exercised by the supervisor's
- * SIGTERM handler; this entry point is the operator-driven
- * recovery from a different shell.
- *
- * Strategy:
- *   1. If the lock file is present AND its pid is alive, send
- *      SIGTERM and let the supervisor call manager.stop().
- *   2. Otherwise (no lock, dead pid, malformed payload) clean the
- *      attestation + lock + control record so the next boot can start.
- *   3. Retain all artifacts when probe/signaling fails without ESRCH.
- */
 function runStop(lockPath: string, attestationPath: string, controlPath: string): number {
   const result = stopModelRouteSupervisor({ lockPath, attestationPath, controlPath });
   const output = mapModelRouteStopResult(result);
@@ -307,11 +293,19 @@ function runStop(lockPath: string, attestationPath: string, controlPath: string)
   return output.code;
 }
 
-main().then(
-  (code) => { process.exit(code); },
-  (err: unknown) => {
-    const { code, message } = classify(err);
-    process.stderr.write(`${message}\n`);
-    process.exit(code);
-  },
-);
+if (
+  process.argv[1] &&
+  (process.argv[1].endsWith("model-route-boot.ts") ||
+    process.argv[1].endsWith("model-route-boot.js"))
+) {
+  main().then(
+    (code) => {
+      process.exit(code);
+    },
+    (err: unknown) => {
+      const { code, message } = classify(err);
+      process.stderr.write(`${message}\n`);
+      process.exit(code);
+    },
+  );
+}

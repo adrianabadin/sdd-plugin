@@ -30,6 +30,18 @@ approval_mode = "approve"
 [mcp_servers.agent_memory.tools.store]
 approval_mode = "approve"
 
+[mcp_servers.agent_memory.tools.recall]
+approval_mode = "approve"
+
+[mcp_servers.agent_memory.tools.resolve_topic]
+approval_mode = "approve"
+
+[mcp_servers.agent_memory.tools.get_memory_protocol]
+approval_mode = "approve"
+
+[mcp_servers.agent_memory.tools.update]
+approval_mode = "approve"
+
 [mcp_servers.pmc_query]
 command = "npx"
 args = ["--yes", "--package", "@aabadin/project-memory-context", "pmc-query-server"]

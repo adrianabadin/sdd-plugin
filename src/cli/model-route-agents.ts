@@ -22,18 +22,20 @@
  *   5   generator lock contention / stale lock unrecoverable.
  *   6   manifest invalid (corruption / shape mismatch).
  *   7   descriptor budget exceeded.
- *   1   any other unexpected error.
- *
- * The CLI is intentionally tiny: every behavior it asserts lives in
- * `src/infrastructure/opencode/disk-agent-generator.ts`. This module is
- * only the executable harness.
+ *   8   sweep incomplete error.
+ *   1   any other unexpected error / database or audit initialization failure.
  */
 
 import process from "node:process";
+import path from "node:path";
 
+import { getPrismaClient, disposeBootstrapPersistence } from "../bootstrap/index.js";
+import { PrismaModelRouteCatalogAdapter } from "../infrastructure/prisma/model-route-catalog.adapter.js";
+import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
+import { ModelRouteAuditLogger } from "../infrastructure/logging/model-route-audit.logger.js";
+import { RegenerateFleetAgentsUseCase } from "../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
 import {
   DescriptorBudgetExceededError,
-  DiskAgentGenerator,
   DiskAgentGeneratorError,
   DiskSafetyError,
   GeneratorLockActiveError,
@@ -43,6 +45,7 @@ import {
   RouteCapExceededError,
   RoutesConfigInvalidError,
   StaleLockUnrecoverableError,
+  SweepIncompleteError,
 } from "../infrastructure/opencode/disk-agent-generator.js";
 
 interface CliArgs {
@@ -51,9 +54,6 @@ interface CliArgs {
 }
 
 function parseArgs(argv: ReadonlyArray<string>): CliArgs {
-  // argv[0] = node executable, argv[1] = this script path, argv[2..] = user
-  // arguments. tsx wraps the script as the direct entry point so we can
-  // ignore argv[0]/argv[1] and read the rest verbatim.
   const userArgs = argv.slice(2);
   if (userArgs.length < 2) {
     throw new CliArgumentError(
@@ -102,6 +102,9 @@ function classify(err: unknown): { code: number; message: string } {
   if (err instanceof DescriptorBudgetExceededError) {
     return { code: 7, message: `descriptor-budget error: ${err.message}` };
   }
+  if (err instanceof SweepIncompleteError) {
+    return { code: 8, message: `sweep error: ${err.message}` };
+  }
   if (err instanceof DiskAgentGeneratorError) {
     return { code: 1, message: `${err.name}: ${err.message}` };
   }
@@ -119,22 +122,40 @@ async function main(): Promise<number> {
     return code;
   }
 
+  let auditLogger: ModelRouteAuditLogger | null = null;
   try {
-    const generator = new DiskAgentGenerator({
+    const prisma = getPrismaClient();
+    const catalogPort = new PrismaModelRouteCatalogAdapter(prisma);
+    const quarantinePort = new PrismaModelRepositoryAdapter(prisma);
+    const auditPath = path.resolve(
+      args.workspaceRoot,
+      ".opencode",
+      "sdd-model-routing",
+      "routing.audit.jsonl",
+    );
+    auditLogger = new ModelRouteAuditLogger({ path: auditPath });
+
+    const useCase = new RegenerateFleetAgentsUseCase(catalogPort, quarantinePort, auditLogger);
+    const result = await useCase.execute({
       workspaceRoot: args.workspaceRoot,
       routesConfigPath: args.routesConfigPath,
     });
-    const result = await generator.generate();
+
     process.stdout.write(
       `deterministic-model-routing: generated=${result.generated.length} ` +
-        `manifest=${result.manifest.manifestHash.slice(0, 12)}... ` +
-        `epoch=${result.manifest.generationEpoch.slice(0, 8)}...\n`,
+        `excluded=${result.excluded.length} ` +
+        `manifest=${result.manifestHash.slice(0, 12)}...\n`,
     );
     return 0;
   } catch (err) {
     const { code, message } = classify(err);
     process.stderr.write(`${message}\n`);
     return code;
+  } finally {
+    if (auditLogger) {
+      await auditLogger.close().catch(() => {});
+    }
+    await disposeBootstrapPersistence().catch(() => {});
   }
 }
 

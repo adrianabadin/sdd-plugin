@@ -16,7 +16,7 @@ import { readFileSync, statSync, existsSync, mkdtempSync, rmSync } from "node:fs
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { ModelRouteAuditLogger, ModelRouteAuditLoggerError } from "../src/infrastructure/logging/model-route-audit.logger.js";
+import { ModelRouteAuditLogger, ModelRouteAuditLoggerError, type RoutingAuditEntry } from "../src/infrastructure/logging/model-route-audit.logger.js";
 
 async function sleep(ms: number): Promise<void> { await new Promise<void>((r) => setTimeout(r, ms)); }
 async function cleanupDir(dir: string): Promise<void> {
@@ -25,7 +25,7 @@ async function cleanupDir(dir: string): Promise<void> {
   }
 }
 
-function baseEntry(overrides: Partial<Parameters<ModelRouteAuditLogger["append"]>[0]> = {}): Parameters<ModelRouteAuditLogger["append"]>[0] {
+function baseEntry(overrides: Partial<RoutingAuditEntry> = {}): RoutingAuditEntry {
   return {
     stage: "routing.launch",
     status: "success",

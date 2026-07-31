@@ -12,7 +12,7 @@ review_budget: 800
 
 testing:
   strict_tdd: true
-  detected: "2026-07-21"
+  detected: "2026-07-31"
   runner:
     command: "npm run test"
     framework: "Custom Assertions / TSX"
@@ -24,8 +24,8 @@ testing:
       available: true
       tool: "tsx"
     e2e:
-      available: false
-      tool: "—"
+      available: true
+      tool: "tsx"
   coverage:
     available: false
     command: "—"

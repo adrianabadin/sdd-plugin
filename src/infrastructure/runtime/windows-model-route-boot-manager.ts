@@ -76,6 +76,7 @@ import {
 } from "../opencode/model-route-readiness.js";
 import { applyCurrentUserAcl } from "./windows-acl.js";
 import type { ModelRouteCatalogPort } from "../../ports/model-route-catalog.port.js";
+import type { RegenerateFleetAgentsUseCase } from "../../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
 
 /**
  * Pluggable catalog sync use case. The default production wiring
@@ -209,6 +210,8 @@ export interface WindowsModelRouteBootManagerOptions {
   readonly controlPath?: string;
   /** Renewal cadence; defaults to one third of the attestation TTL. */
   readonly renewalIntervalMs?: number;
+  readonly fleetRegeneration?: RegenerateFleetAgentsUseCase;
+  readonly routesConfigPath?: string;
 }
 
 export class WindowsModelRouteBootManager {
@@ -235,6 +238,8 @@ export class WindowsModelRouteBootManager {
   private readonly processSupervisor: BootProcessSupervisor | undefined;
   private readonly controlPath: string;
   private readonly renewalIntervalMs: number;
+  private readonly fleetRegeneration: RegenerateFleetAgentsUseCase | undefined;
+  private readonly routesConfigPath: string | undefined;
   private serveProcess: BootChildProcess | null = null;
   private attachProcess: BootChildProcess | null = null;
   private renewalTimer: ReturnType<typeof setInterval> | null = null;
@@ -264,6 +269,8 @@ export class WindowsModelRouteBootManager {
     this.processSupervisor = options.processSupervisor;
     this.controlPath = options.controlPath ?? path.join(this.routingDir, "boot-control.json");
     this.renewalIntervalMs = options.renewalIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3));
+    this.fleetRegeneration = options.fleetRegeneration;
+    this.routesConfigPath = options.routesConfigPath;
   }
 
   getState(): BootLifecycleState {
@@ -346,13 +353,26 @@ export class WindowsModelRouteBootManager {
   private async runStart(): Promise<void> {
     this.transitionTo("starting");
 
-    // (1) Fresh secrets in process memory. UUIDv4 for the boot
-    // identity; 32 random bytes for the HMAC key. Both must be
-    // regenerated on every start so restarts rotate the material.
-    this.bootIdentity = generateUuidV4();
-    randomBytes(HMAC_KEY_BYTES).copy(this.signingKey);
-
     try {
+      if (this.fleetRegeneration) {
+        const resolvedConfigPath = this.routesConfigPath
+          ? (path.isAbsolute(this.routesConfigPath)
+              ? path.resolve(this.routesConfigPath)
+              : path.resolve(this.workspaceRoot, this.routesConfigPath))
+          : path.resolve(this.workspaceRoot, "config/model-routing/routes.json");
+
+        await this.fleetRegeneration.execute({
+          workspaceRoot: this.workspaceRoot,
+          routesConfigPath: resolvedConfigPath,
+        });
+      }
+
+      // (1) Fresh secrets in process memory. UUIDv4 for the boot
+      // identity; 32 random bytes for the HMAC key. Both must be
+      // regenerated on every start so restarts rotate the material.
+      this.bootIdentity = generateUuidV4();
+      randomBytes(HMAC_KEY_BYTES).copy(this.signingKey);
+
       // The child supervisor receives secrets in a private env object. The
       // legacy in-process plugin path is retained only when no child exists.
       if (!this.processSupervisor) {

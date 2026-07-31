@@ -40,6 +40,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   readSync,
@@ -74,8 +75,8 @@ export const MANIFEST_RELATIVE = path.join(ROUTING_RELATIVE_DIR, "manifest.json"
 export const LOCK_RELATIVE = path.join(ROUTING_RELATIVE_DIR, "generator.lock");
 export const JOURNAL_RELATIVE_DIR = path.join(ROUTING_RELATIVE_DIR, "journal");
 
-const ROUTE_AGENT_PREFIX = "sdd-mr-v1-";
-const ROUTE_COMMAND_PREFIX = "sdd-mr-canary-v1-";
+export const ROUTE_AGENT_PREFIX = "sdd-mr-v1-";
+export const ROUTE_COMMAND_PREFIX = "sdd-mr-canary-v1-";
 const HASH_HEX_LENGTH = 16;
 
 // ============================================================================
@@ -91,7 +92,8 @@ export type GeneratorErrorCode =
   | "STALE_LOCK_UNRECOVERABLE"
   | "MANIFEST_INVALID"
   | "MODIFIED_OWNED_FILE"
-  | "DESCRIPTOR_BUDGET_EXCEEDED";
+  | "DESCRIPTOR_BUDGET_EXCEEDED"
+  | "SWEEP_INCOMPLETE";
 
 export class DiskAgentGeneratorError extends Error {
   readonly code: GeneratorErrorCode;
@@ -227,6 +229,15 @@ export class DescriptorBudgetExceededError extends DiskAgentGeneratorError {
     this.name = "DescriptorBudgetExceededError";
     this.bytes = bytes;
     this.budget = budget;
+  }
+}
+
+export class SweepIncompleteError extends DiskAgentGeneratorError {
+  readonly failedPath: string;
+  constructor(failedPath: string, message = "sweep deletion failed") {
+    super("SWEEP_INCOMPLETE", `sweep failed at "${failedPath}": ${message}`, failedPath);
+    this.name = "SweepIncompleteError";
+    this.failedPath = failedPath;
   }
 }
 
@@ -830,15 +841,71 @@ function safeUnlink(filePath: string): void {
   }
 }
 
+export interface SweepOptions {
+  workspaceRoot: string;
+  removeFile?: (absolutePath: string) => void;
+}
+
+export interface SweepResult {
+  sweptRelativePaths: string[];
+}
+
+export function sweepOwnedFleetFiles(opts: SweepOptions): SweepResult {
+  const workspace = prepareWorkspace(opts.workspaceRoot);
+  const sweptRelativePaths: string[] = [];
+  const remover = opts.removeFile ?? ((p: string) => unlinkSync(p));
+
+  const checkAndSweepDir = (dirPath: string, relativeDir: string, prefix: string) => {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(dirPath);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (name.startsWith(prefix) && name.endsWith(".md")) {
+        const fullPath = path.join(dirPath, name);
+        const relPath = path.join(relativeDir, name);
+        const lst = lstatSync(fullPath);
+        if (lst.isSymbolicLink()) {
+          throw new DiskSafetyError(fullPath, "symlink or junction detected in owned directory");
+        }
+        if (!lst.isFile()) {
+          throw new DiskSafetyError(fullPath, "non-regular file detected in owned directory");
+        }
+        try {
+          remover(fullPath);
+          sweptRelativePaths.push(relPath);
+        } catch (err) {
+          throw new SweepIncompleteError(relPath, (err as Error).message);
+        }
+      }
+    }
+  };
+
+  checkAndSweepDir(workspace.agentsDir, AGENTS_RELATIVE_DIR, ROUTE_AGENT_PREFIX);
+  checkAndSweepDir(workspace.commandsDir, COMMANDS_RELATIVE_DIR, ROUTE_COMMAND_PREFIX);
+
+  return { sweptRelativePaths };
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
 
-export interface DiskAgentGeneratorOptions {
-  readonly workspaceRoot: string;
-  readonly routesConfigPath: string;
-  readonly lockStaleAfterMs?: number;
-}
+export type DiskAgentGeneratorOptions =
+  | {
+      readonly workspaceRoot: string;
+      readonly routesConfigPath: string;
+      readonly routesConfig?: never;
+      readonly lockStaleAfterMs?: number;
+    }
+  | {
+      readonly workspaceRoot: string;
+      readonly routesConfigPath?: never;
+      readonly routesConfig: RoutesConfig;
+      readonly lockStaleAfterMs?: number;
+    };
 
 export interface GeneratedRoute {
   readonly baseTemplate: string;
@@ -852,28 +919,41 @@ export interface GeneratedRoute {
 export interface GenerateResult {
   readonly manifest: Manifest;
   readonly generated: ReadonlyArray<GeneratedRoute>;
+  readonly sweptRelativePaths: ReadonlyArray<string>;
 }
 
 export class DiskAgentGenerator {
   private readonly workspace: SafeWorkspace;
-  private readonly routesConfigPath: string;
+  private readonly routesConfigPath: string | null;
+  private readonly routesConfig: RoutesConfig | null;
   private readonly lockStaleAfterMs: number;
 
   constructor(options: DiskAgentGeneratorOptions) {
     this.workspace = prepareWorkspace(options.workspaceRoot);
-    this.routesConfigPath = path.resolve(options.routesConfigPath);
+    this.routesConfigPath = options.routesConfigPath ? path.resolve(options.routesConfigPath) : null;
+    this.routesConfig = options.routesConfig ?? null;
     this.lockStaleAfterMs = options.lockStaleAfterMs ?? LOCK_STALE_AFTER_MS;
   }
 
   async generate(): Promise<GenerateResult> {
-    // Containment check happens here (not in the constructor) so callers
-    // receive a rejected Promise they can `.catch()`, matching the async
-    // contract documented on the public API.
-    if (!this.routesConfigPath.startsWith(this.workspace.root + path.sep) && this.routesConfigPath !== this.workspace.root) {
-      throw new PathTraversalDetectedError(this.routesConfigPath, "routes config path must live inside workspace root");
+    let config: RoutesConfig;
+    if (this.routesConfigPath !== null) {
+      if (
+        !this.routesConfigPath.startsWith(this.workspace.root + path.sep) &&
+        this.routesConfigPath !== this.workspace.root
+      ) {
+        throw new PathTraversalDetectedError(
+          this.routesConfigPath,
+          "routes config path must live inside workspace root",
+        );
+      }
+      const configJson = readFileSync(this.routesConfigPath, "utf8");
+      config = decodeRoutesConfig(configJson);
+    } else if (this.routesConfig !== null) {
+      config = this.routesConfig;
+    } else {
+      throw new RoutesConfigInvalidError("no routes config provided");
     }
-    const configJson = readFileSync(this.routesConfigPath, "utf8");
-    const config = decodeRoutesConfig(configJson);
 
     const lock = acquireExclusiveLock(this.workspace.lockPath, this.lockStaleAfterMs);
     let released = false;
@@ -886,6 +966,23 @@ export class DiskAgentGenerator {
 
     try {
       const previous = readPreviousManifest(this.workspace.manifestPath);
+
+      // Verify EVERY previously-owned file hash (REQ-4) before sweep/deletions
+      if (previous) {
+        for (const r of previous.routes) {
+          verifyOwnedFileUnchanged({
+            absolutePath: path.join(this.workspace.root, r.agentFile.relativePath),
+            expectedSha256: r.agentFile.sha256,
+          });
+          verifyOwnedFileUnchanged({
+            absolutePath: path.join(this.workspace.root, r.commandFile.relativePath),
+            expectedSha256: r.commandFile.sha256,
+          });
+        }
+      }
+
+      // Unconditional prefix-scoped sweep (REQ-5)
+      const sweepRes = sweepOwnedFleetFiles({ workspaceRoot: this.workspace.root });
 
       // Build new manifest routes. Generate deterministic host names up
       // front so collisions (if any) surface as a typed error.
@@ -907,33 +1004,6 @@ export class DiskAgentGenerator {
           commandRelative: path.join(COMMANDS_RELATIVE_DIR, `${ROUTE_COMMAND_PREFIX}${extractHash(hostName)}.md`),
         };
       });
-
-      // Load previous owned files for stale cleanup. Every file in the
-      // previous manifest must still match its recorded sha256, or cleanup
-      // must abort with a typed error.
-      const previousOwned = new Map<string, ManifestFileEntry>();
-      if (previous) {
-        for (const r of previous.routes) {
-          previousOwned.set(r.agentFile.relativePath, r.agentFile);
-          previousOwned.set(r.commandFile.relativePath, r.commandFile);
-        }
-      }
-
-      // Verify every previously-owned file is unchanged OR is being
-      // replaced by the new manifest.
-      const newRelativePaths = new Set<string>();
-      for (const r of newRoutes) {
-        newRelativePaths.add(r.agentRelative);
-        newRelativePaths.add(r.commandRelative);
-      }
-      for (const [rel, prev] of previousOwned) {
-        if (newRelativePaths.has(rel)) continue; // will be rewritten
-        const absolute = path.join(this.workspace.root, rel);
-        verifyOwnedFileUnchanged({
-          absolutePath: absolute,
-          expectedSha256: prev.sha256,
-        });
-      }
 
       // Generate epoch and manifest body. Reuse the previous epoch if the
       // existing manifest is well-formed (idempotent runs keep the epoch
@@ -1002,17 +1072,11 @@ export class DiskAgentGenerator {
         budgetBytes: Number.POSITIVE_INFINITY,
       });
 
-      // Stale cleanup: delete previous-owned files that are NOT in the
-      // new manifest. We already verified their hashes above.
-      if (previous) {
-        for (const [rel] of previousOwned) {
-          if (newRelativePaths.has(rel)) continue;
-          const absolute = path.join(this.workspace.root, rel);
-          safeUnlink(absolute);
-        }
-      }
-
-      return { manifest, generated: newRoutes };
+      return {
+        manifest,
+        generated: newRoutes,
+        sweptRelativePaths: sweepRes.sweptRelativePaths,
+      };
     } finally {
       releaseOnce();
     }
