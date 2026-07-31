@@ -22,6 +22,38 @@
 - Tests must override home/XDG/config/managed roots with temporary directories. Never scan the developer machine's real configuration.
 - Preserve the architectural decision: `Hooks.config` may observe and validate only. It must not assign to `cfg`, `cfg.agent`, or any nested member; register/generate agents; select routes; issue readiness; or replace boot/canary/attestation checks.
 
+### Task 0: Empirically resolve the `cfg.agent` merged-shape spike (blocking)
+
+**Files:**
+- Create: `docs/plans/2026-07-31-foreign-agent-provenance-guard-spike-notes.md`
+
+**Step 1: Run a real OpenCode 1.18.9 host with at least one generated routed
+agent present under `.opencode/agents/`.**
+
+Register a temporary diagnostic plugin whose `config` hook logs (to a local
+file, never to a shared log) the shape of `cfg.agent[hostName]` for a known
+generated `hostName`. Confirm:
+
+1. Whether the entry exists at all in `cfg.agent`.
+2. Whether `hidden` is present and `true`.
+3. Whether `permission.task["*"]` is present and `"deny"`.
+4. Which other fields from the generated frontmatter (`description`, `model`,
+   `mode`) survive verbatim.
+
+**Step 2: Record the result**
+
+Write the findings to `docs/plans/2026-07-31-foreign-agent-provenance-guard-spike-notes.md`
+and state which branch of design §7.0 applies: full field-by-field validation,
+or the presence-only fallback. Do not proceed to Task 6 until this file exists
+and states a conclusion.
+
+**Step 3: Commit**
+
+```bash
+git add docs/plans/2026-07-31-foreign-agent-provenance-guard-spike-notes.md
+git commit -m "docs(routing): record cfg.agent merged-shape spike result"
+```
+
 ### Task 1: Declare parser dependencies and pin the loader contract
 
 **Files:**
@@ -126,6 +158,8 @@ export function resolveForeignAgentSources(
 ```
 
 Implement small helpers `addConfigRoot`, `addDefinitionRoot`, `walkAncestors`, and `dedupeByCanonicalPath`. `SDD_MODEL_ROUTING_EXTRA_WATCHED_CONFIG_ROOTS` is path-delimiter-separated and may name either a config root or an exact config file. Do not retain the rev 2 `...AGENT_DIRS` variable.
+
+`managedConfigFiles` defaults to an empty array in production when omitted — this repository has no verified, documented set of per-platform OpenCode-managed config paths for 1.18.9 to hardcode (design §5.3/§10, declared residual limitation). The option exists purely so tests (and an operator who knows their own managed-config path) can inject it; do not invent default paths.
 
 Remote `.well-known` configuration is not emitted as a filesystem source; rev 3 covers its effective result through the merged-config guard.
 
@@ -325,6 +359,11 @@ git commit -m "refactor(routing): share canonical routed agent definition"
 
 ### Task 6: Implement the read-only merged-config observer
 
+**Precondition:** Task 0's spike notes must state which validation branch
+applies (full field-by-field, or presence-only fallback per design §7.0).
+Implement whichever branch the spike confirmed; do not assume full
+field-by-field validation is safe without that record.
+
 **Files:**
 - Create: `src/infrastructure/opencode/resolved-agent-config-guard.ts`
 - Create: `tests/resolved-agent-config-guard.test.ts`
@@ -341,6 +380,7 @@ Cover:
 6. The observer retains the live `cfg.agent` reference; mutation after `observe()` is detected by the next assertion.
 7. A deeply frozen config and a write-trapping `Proxy` prove `observe()` and `assertMatches()` perform zero writes.
 8. `observe(undefined)` records that the hook ran but remains unavailable for a non-empty manifest.
+9. `recordObservationFailure(error)` never throws; the next `assertMatches(manifest)` call throws the recorded error (or `RoutedAgentDefinitionMismatchError` if the guard re-derives the mismatch); a subsequent successful `observe()` + passing `assertMatches()` clears the recorded failure.
 
 **Step 2: Verify RED**
 
@@ -354,15 +394,24 @@ Expected: FAIL with module-not-found.
 export class ResolvedAgentConfigGuard {
   private observed = false;
   private agents: unknown;
+  private recordedFailure: Error | undefined;
 
   observe(agents: unknown): void {
     this.observed = true;
     this.agents = agents; // retain reference; never clone or mutate
   }
 
+  recordObservationFailure(error: unknown): void {
+    // Called from inside the config hook's catch block. Never throws.
+    this.recordedFailure = error instanceof Error ? error : new Error(String(error));
+  }
+
   assertMatches(manifest: Manifest): void {
-    // require observation; validate plain record; compare reserved key set;
-    // build expected definitions from manifest routes; compare every entry.
+    // If recordObservationFailure() was called since the last successful
+    // observe()+assertMatches() pass, rethrow the recorded failure first.
+    // Otherwise: require observation; validate plain record; compare
+    // reserved key set; build expected definitions from manifest routes;
+    // compare every entry.
   }
 }
 ```
@@ -439,21 +488,35 @@ git commit -m "feat(routing): gate generation and readiness on provenance"
 **Files:**
 - Modify: `src/bootstrap/index.ts`
 - Modify: `src/infrastructure/opencode/model-route-task-hook.ts`
+- Modify: `src/infrastructure/runtime/windows-model-route-boot-manager.ts`
 - Modify: `src/application/regenerate-fleet-agents/regenerate-fleet-agents.input.ts`
 - Modify: `src/application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.ts`
 - Modify: `src/cli/model-route-agents.ts`
+- Modify: `tests/bootstrap-clean-startup.test.ts`
 - Create: `tests/foreign-agent-config-hook.test.ts`
 - Create: `tests/foreign-agent-guard-task-hook.test.ts`
 - Create: `tests/foreign-agent-guard-bootstrap.test.ts`
 
-**Step 1: Write failing bootstrap/config-hook tests**
+**Step 1: Update the obsolete-config-hook regression test, then write failing bootstrap/config-hook tests**
 
-Instantiate `SddPlugin`, obtain returned hooks, and assert:
+Update `tests/bootstrap-clean-startup.test.ts` per design §7.0: change the
+`Object.keys(hooks).sort()` assertion to expect exactly
+`["config", "tool.execute.before"]`, and change
+`Object.hasOwn(hooks, "config")` to assert `true` with an updated message
+explaining this is the read-only provenance-validation hook, not the
+rejected routing hook. Leave the `bootstrapSource` pattern assertion
+(`/model-route-config-hook|disabled-not-ready|ModelRouteConfigUnsupportedError|OpenCodeConfig/`)
+and the `obsoleteProductionFiles` list untouched — those still correctly
+guard against reintroducing the rejected *routing* hook and its files, which
+this change does not touch.
+
+Then instantiate `SddPlugin`, obtain returned hooks, and assert:
 
 - A `config` callback exists and only calls `resolvedGuard.observe(cfg.agent)` plus immediate validation when a valid manifest is available.
 - Passing a frozen/proxied config causes no writes.
-- Exact merged config passes; a remote/managed/other-plugin effective override with a mismatched reserved entry throws the resolved-definition error.
-- No manifest plus a reserved merged entry blocks; no manifest and no reserved entry may defer until dispatch.
+- Exact merged config passes silently (the hook's promise resolves).
+- A remote/managed/other-plugin effective override with a mismatched reserved entry causes the hook to record the failure via `recordObservationFailure()` (never throw/reject); the *next* `assertMatches()` call — at dispatch — is what throws `RoutedAgentDefinitionMismatchError`.
+- No manifest plus a reserved merged entry blocks at dispatch (via the same recorded-failure path); no manifest and no reserved merged entry is not a failure and defers cleanly until dispatch, where a manifest may since have appeared.
 - The returned config object is never augmented with fleet agents.
 
 **Step 2: Write failing task-hook tests**
@@ -479,15 +542,31 @@ Create one `ResolvedAgentConfigGuard` in the `SddPlugin` closure. Return a confi
 ```ts
 config: async (cfg) => {
   resolvedAgentGuard.observe(cfg.agent);
-  assertResolvedFleetIfManifestExists(workspaceRoot, resolvedAgentGuard);
+  try {
+    assertResolvedFleetIfManifestExists(workspaceRoot, resolvedAgentGuard);
+  } catch (error) {
+    resolvedAgentGuard.recordObservationFailure(error);
+    // Never rethrow here: this hook's promise must never reject. A
+    // rejection here would abort OpenCode configuration loading itself,
+    // not just routing (design §7 "Config-hook failures"). The recorded
+    // failure is what makes `assertMatches()` throw at dispatch time.
+  }
 },
 ```
 
-The helper may read the manifest but must never generate it or issue readiness. Pass the same guard into both `ModelRouteTaskHook` construction sites. In each task-hook route path, after signed readiness verification and before the audit success/rewrite, call `resolvedAgentGuard.assertMatches(manifest)`.
+The helper may read the manifest but must never generate it or issue readiness. `resolvedAgentGuard.recordObservationFailure()` stores the error so the next `assertMatches(manifest)` call throws it (or `RoutedAgentDefinitionMismatchError` if the guard re-validates and still fails); `observe()`/`recordObservationFailure()` themselves never throw. Pass the same guard into both `ModelRouteTaskHook` construction sites. In each task-hook route path, after signed readiness verification and before the audit success/rewrite, call `resolvedAgentGuard.assertMatches(manifest)` — this is where a recorded config-hook failure actually surfaces and blocks the `Task` call.
 
 Extend both catch sites to preserve and audit all four provenance error classes. Never downgrade them to `AttestationUnavailableError`.
 
 Add `resolveAdditionalWatchedConfigRoots()` for `SDD_MODEL_ROUTING_EXTRA_WATCHED_CONFIG_ROOTS` and forward roots through bootstrap, regeneration input/use case, CLI generator, task hook, and readiness. Delete/avoid any rev 2 `SDD_MODEL_ROUTING_EXTRA_WATCHED_AGENT_DIRS` plumbing.
+
+Readiness is issued and renewed in production exclusively by
+`WindowsModelRouteBootManager` (`runStart()` calling `issue()` at
+`windows-model-route-boot-manager.ts:441`, and `renewAttestation()` calling
+`issue()` at `:517`) — not only by the task hook's `verify()` calls. Forward
+`additionalConfigRoots` to both `new ModelRouteReadiness` construction sites
+inside the boot manager as well, or operator-configured extra roots are
+silently ignored on the exact path that mints the signed attestation.
 
 **Step 5: Verify GREEN and ordering**
 
@@ -507,6 +586,7 @@ git commit -m "feat(routing): enforce merged agent provenance before dispatch"
 **Files:**
 - Modify: `package.json`
 - Modify: `README.md`
+- Modify: `tests/model-route-real-host-canary.integration.ts`
 - Modify: `docs/plans/2026-07-31-foreign-agent-provenance-guard-design.md` only if implementation exposes a factual correction
 
 **Step 1: Add every new test to `test:model-routes`**
@@ -526,6 +606,13 @@ Add a concise README section covering:
 - `SDD_MODEL_ROUTING_EXTRA_WATCHED_CONFIG_ROOTS` extends observable roots.
 - Other plugins invoking a valid routed agent are outside this plugin's responsibility, but merged overrides of reserved definitions are blocked.
 - `Hooks.config` is a read-only validator and does not replace external boot manager + signed attestation.
+
+**Step 2b: Extend the real-host CLI-selection test**
+
+Extend `tests/model-route-real-host-canary.integration.ts` to assert
+`opencode run --agent <hostName>` refuses to select a routed host as a
+primary agent (design §11.4). This is the only test that empirically proves
+`mode: subagent` is the actual CLI-selection barrier §4 relies on.
 
 **Step 3: Run focused verification**
 

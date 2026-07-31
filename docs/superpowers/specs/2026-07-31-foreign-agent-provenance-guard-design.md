@@ -5,10 +5,8 @@
 > this revision as an implementation source of truth.
 
 Date: 2026-07-31 (rev 2: post-review gap resolution)
-Status: Approved by user; implementation plan written (rev-corrected):
-`docs/plans/2026-07-31-foreign-agent-provenance-guard-implementation.md`
-(6 TDD tasks: scan module + error class → readiness integration → generator
-integration → task-hook catch sites → bootstrap/CLI env plumbing → suite wiring).
+Status: Superseded. See the rev 3 implementation plan for the authoritative
+task list: `docs/plans/2026-07-31-foreign-agent-provenance-guard-implementation.md`.
 
 ## 1. Problem
 

@@ -3,7 +3,11 @@
 Date: 2026-07-31
 Status: Approved by user
 Supersedes: `docs/superpowers/specs/2026-07-31-foreign-agent-provenance-guard-design.md` rev 2
-PMC decision: `decision/foreign-agent-provenance-guard-design-approved-2026-07-31`
+PMC decision (this project persists decisions in PMC, not Engram):
+`decision/foreign-agent-provenance-guard-design-approved-2026-07-31`
+(PMC memory `8137f8f5-fc1f-4d34-9c2b-03798e261a64`), which cross-references
+both `architecture/model-routing-boot-attestation-decision` and the archived
+`plan/config-hook-fleet-agents` plan.
 
 ## 1. Problem
 
@@ -54,9 +58,17 @@ boot architecture:
 - `ModelRouteTaskHook` remains the only component that resolves a route and
   rewrites `subagent_type`.
 
-The active PMC decision that rejected `plan/config-hook-fleet-agents` remains
-in force. `Hooks.config` is permitted here only as a read-only observation and
-validation boundary:
+The active PMC decision `architecture/model-routing-boot-attestation-decision`
+(`273e2255-3202-49df-9b89-48e108bfcdb6`), which archived the
+`plan/config-hook-fleet-agents` plan (`57e4ff34-ea6d-4b62-b695-cb7cdad2c1de`)
+and requires any new plan to coexist with the boot manager + signed
+attestation rather than replace it, remains in force. That prior plan's
+config-hook approach could not reproduce the attestation guarantees because
+it used the hook to *route*. This design imposes stricter, self-contained
+constraints on top of that decision: `Hooks.config` here is a strictly
+narrower, read-only observation and validation boundary that never routes,
+never issues readiness, and never replaces attestation (see §7.0 for the
+full distinction):
 
 - It MUST NOT add, remove, or mutate `cfg.agent`.
 - It MUST NOT generate agents, select models, resolve routes, rewrite tasks,
@@ -75,8 +87,8 @@ Every generated routed agent must retain the complete canonical definition:
 - `model`: exact canonical `providerId/modelId`.
 - Exact generated description and prompt.
 - `permission.task["*"]: deny`.
-- No unexpected behavior-changing fields such as `disable`, `tools`, `steps`,
-  `temperature`, `top_p`, `variant`, or provider-specific options.
+- No unexpected behavior-changing fields such as `disable`, `tools`,
+  `maxSteps`, `temperature`, `top_p`, `color`, or any key not listed above.
 
 `hidden: true` removes the agent from user-facing autocomplete. It is not an
 access-control mechanism. `mode: subagent` is the invariant that prevents
@@ -118,7 +130,13 @@ The resolver includes:
   `opencode.json(c)`, `agent(s)`, and `mode(s)` entries;
 - JSON supplied through `OPENCODE_CONFIG_CONTENT` without logging its raw
   content;
-- OpenCode's documented managed configuration root for the current platform;
+- an injectable `managedConfigFiles` list, for platform-managed configuration
+  roots. Production wiring does not compute these automatically: this
+  repository has no verified, documented set of per-platform managed-config
+  paths for OpenCode 1.18.9 to code against (see §10). The option exists so
+  an operator or a future correction can supply them explicitly once known;
+  until then, coverage of managed roots is a declared residual limitation,
+  not a silent gap;
 - operator roots from
   `SDD_MODEL_ROUTING_EXTRA_WATCHED_CONFIG_ROOTS`, split using
   `path.delimiter`. Each entry is a config root, not merely an agent directory.
@@ -180,6 +198,42 @@ separately.
 
 ## 7. Runtime merged-definition validation
 
+### 7.0 Prerequisite spike (blocking)
+
+Before Task 6/8 implementation proceeds, empirically confirm against a real
+OpenCode 1.18.9 host whether `.opencode/agents/*.md` definitions appear in the
+`Config.agent` map passed to a plugin's `config` hook, and whether `hidden`
+and `permission.task` survive normalization into that map.
+`@opencode-ai/sdk`'s `AgentConfig` type declares neither field (only
+`disable?: boolean` and `permission` without a `task` key), so this cannot be
+assumed from the SDK types alone.
+
+- If markdown agents appear in `cfg.agent` with `hidden`/`permission.task`
+  intact: implement §7 as written below.
+- If markdown agents are absent from `cfg.agent`, or present but missing
+  `hidden`/`permission.task`: §7.1's set-equality rule is replaced by
+  "validate only reserved keys that are present in the observed map; absence
+  of all reserved keys is not a mismatch", and the field-by-field comparison
+  in §7.3 is restricted to whichever fields the spike confirms actually
+  survive. Guarantee 3 in §2 is downgraded from unconditional to
+  conditional-on-presence in that case.
+
+This repository also carries a deliberate regression test,
+`tests/bootstrap-clean-startup.test.ts`, asserting `SddPlugin` returns
+exactly `["tool.execute.before"]` from a clean boot and exposes no `config`
+key — a guard left over from a previously rejected in-memory config-hook
+routing architecture (`plan/config-hook-fleet-agents`; see §3). That
+architecture used a config hook to *route* and could not reproduce signed
+attestation guarantees. This design's hook is narrower and strictly
+read-only: it never assigns to `cfg`/`cfg.agent`, never resolves a route,
+never issues readiness, and never replaces the disk-based attestation gate —
+it only observes and validates already-decided fleet state. On that basis the
+test is intentionally superseded by this design and must be updated in the
+same change (Task 8) to assert exactly `["config", "tool.execute.before"]`,
+while its obsolete-file and source-pattern assertions (which guard against
+reintroducing the *routing* hook, not this validation-only hook) remain
+intact and unchanged.
+
 `SddPlugin` registers a read-only `config` hook and stores the latest live
 `cfg.agent` reference. The hook validates immediately during configuration
 loading and refresh. It never mutates the configuration object.
@@ -240,7 +294,18 @@ unwrapped. No mismatch may be converted to `AttestationUnavailableError`.
 ## 9. Error and audit taxonomy
 
 - `ForeignAgentDefinitionError`, code `FOREIGN_AGENT_DEFINITION`: a concrete
-  foreign reserved definition was found.
+  foreign reserved definition was found, or a workspace-owned reserved file's
+  hash no longer matches the manifest allowlist at a scan site that runs the
+  new provenance scanner independently of the generator's own hash-verify
+  step. At both integration points defined in §8 (generation, readiness),
+  the existing `ModifiedOwnedFileError` / owned-hash check already runs
+  strictly before the new scan (§8.1 step 2 precedes step 3; readiness's
+  existing `assertCurrentState` file-hash pass precedes the new scan call),
+  so an owned-file tamper is reported as `ModifiedOwnedFileError` at those
+  two call sites in practice. The scanner's own `owned-definition-mismatch`
+  finding exists for callers of `scanForForeignAgentDefinitions` outside
+  those two ordered integration points, so it fails closed even if used
+  standalone.
 - `ForeignAgentInspectionError`, code `FOREIGN_AGENT_INSPECTION`: a relevant
   source could not be safely inspected or parsed.
 - `RoutedAgentDefinitionMismatchError`, code
@@ -253,6 +318,16 @@ unwrapped. No mismatch may be converted to `AttestationUnavailableError`.
 Generation errors abort generation. Readiness errors block issue/verify. Task
 hook errors emit `routing.blocked` or `routing.natural.blocked` with the exact
 class, bounded source metadata, and no raw configuration.
+
+Config-hook failures: a validation failure raised inside the read-only
+`config` hook is recorded on the `ResolvedAgentConfigGuard` and re-raised at
+dispatch as `RoutedAgentDefinitionMismatchError` (or
+`ResolvedAgentConfigUnavailableError` when no observation exists). The hook
+itself never rejects its promise, so a provenance failure can never abort
+OpenCode configuration loading or host startup — only routing. The hook emits
+a `routing.config.blocked` audit entry when it records a failed observation,
+in addition to the dispatch-time `routing.blocked` / `routing.natural.blocked`
+entry when a route is actually attempted against a bad observation.
 
 ## 10. Concurrency and residual limitations
 
@@ -268,7 +343,13 @@ The following remain explicitly out of scope:
 - runtime registrations that bypass `cfg.agent` and leave no observable source;
 - proving the origin of a remote definition whose merged result is identical
   to the canonical generated definition;
-- auto-remediation of foreign configuration.
+- auto-remediation of foreign configuration;
+- platform-managed configuration roots are not scanned automatically in
+  production wiring, because this repository has no verified, documented set
+  of per-platform managed-config paths for OpenCode 1.18.9 (§5.3). Operators
+  with a known managed-config location must supply it via
+  `managedConfigFiles`/`SDD_MODEL_ROUTING_EXTRA_WATCHED_CONFIG_ROOTS` until a
+  future correction pins the default.
 
 ## 11. Testing strategy
 
