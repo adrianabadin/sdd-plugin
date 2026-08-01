@@ -136,7 +136,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   Detail: see implementation plan "Task 4: Add typed provenance and
   resolved-config failures".
 
-- [ ] **Task 5 — Define one canonical generated-agent contract**
+- [x] **Task 5 — Define one canonical generated-agent contract**
   Delivers: a single shared module owning the canonical routed-agent
   definition (description, `mode: subagent`, `hidden: true`, model, exact
   prompt, `permission.task["*"]: deny`) used by both the descriptor writer
@@ -155,7 +155,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   generated-agent contract" (note its explicit "Precondition: Read Task 0's
   spike notes...").
 
-- [ ] **Task 6 — Implement the read-only merged-config observer**
+- [x] **Task 6 — Implement the read-only merged-config observer**
   Delivers: `ResolvedAgentConfigGuard`, a pure observe/assert class that
   retains the live `cfg.agent` reference, validates per Task 0's confirmed
   branch, never mutates config, and exposes
@@ -173,7 +173,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   merged-config observer" (note its explicit "Precondition: Task 0's spike
   notes must state which validation branch applies...").
 
-- [ ] **Task 7 — Gate generation and signed readiness on filesystem provenance**
+- [x] **Task 7 — Gate generation and signed readiness on filesystem provenance**
   Delivers: integration of the scanner into `DiskAgentGenerator.generate()`
   (after owned-hash verify, before sweep/write/manifest-commit) and into
   `ModelRouteReadiness.assertCurrentState()` (`issue()`/`verify()`, uncached),
@@ -192,7 +192,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   Detail: see implementation plan "Task 7: Gate generation and signed
   readiness on filesystem provenance".
 
-- [ ] **Task 8 — Wire the config observer and per-dispatch validation**
+- [x] **Task 8 — Wire the config observer and per-dispatch validation**
   Delivers: `SddPlugin`'s read-only `config` hook wired to
   `ResolvedAgentConfigGuard`, the narrowed `tests/bootstrap-clean-startup.test.ts`
   assertion (REQ-9), `ModelRouteTaskHook` gate-order enforcement (REQ-5),
@@ -228,7 +228,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   per-dispatch validation" (note its explicit "Precondition: Task 0's spike
   notes must state which validation branch applies...").
 
-- [ ] **Task 9 — Wire suites, document the boundary, and verify end to end**
+- [x] **Task 9 — Wire suites, document the boundary, and verify end to end**
   Delivers: every new focused test script added to `test:model-routes`,
   README operator documentation, the extended real-host
   `opencode run --agent` CLI-selection assertion, full regression pass, and
