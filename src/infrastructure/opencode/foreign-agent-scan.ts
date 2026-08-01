@@ -1,4 +1,4 @@
-﻿import fs from "node:fs";
+import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import yaml from "yaml";
@@ -40,7 +40,11 @@ export function scanForForeignAgentDefinitions(input: {
   }
 
   function report(kind: ForeignAgentFindingKind, sourceLabel: string, reason: string, collidingName?: string) {
-    findings.push({ kind, sourceLabel, reason, collidingName });
+    const finding: ForeignAgentFinding = { kind, sourceLabel, reason };
+    if (collidingName !== undefined) {
+      (finding as any).collidingName = collidingName;
+    }
+    findings.push(finding);
   }
 
   function checkName(name: string, sourceLabel: string, filePath?: string, ownership?: string) {

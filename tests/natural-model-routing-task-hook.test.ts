@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WU2 (RED-first) — `ModelRouteTaskHook` natural-intent routing path.
  *
  * Behavior contract for the NEW path (subagent_type WITHOUT explicit
@@ -338,7 +338,7 @@ async function run(): Promise<void> {
         workspaceIdentity: path.resolve(workspaceRoot),
         generationEpoch: "epoch-natural",
         manifestHash: reloaded.manifestHash,
-        fileHashes: [],
+        fileHashes: [] as string[],
         bootIdentity: "boot-1",
         nonce: "nonce-1",
         issuedAt: Date.now() - 1000,
@@ -369,7 +369,7 @@ async function run(): Promise<void> {
     // ---------- 11. args.model is never written by the natural path ----------
     {
       // Pre-condition: args.model is undefined (legacy field absent).
-      const output = {
+      const output: { args: { subagent_type: string, prompt: string, model?: string } } = {
         args: { subagent_type: "general-purpose", prompt: "Generá un saludo usando Gemini Flash 3.6 Tiered" },
       };
       await hook.execute({ tool: "task" }, output);

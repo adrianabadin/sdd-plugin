@@ -56,7 +56,9 @@ import path from "node:path";
 import { hashHostName, ROUTED_HOST_NAME_PREFIX } from "../../domain/model-routing/model-route-host-naming.js";
 import { renderCanonicalRoutedAgentMarkdown } from "./routed-agent-definition.js";
 import { resolveForeignAgentSources } from "./foreign-agent-sources.js";
-import { assertNoForeignAgentDefinitions } from "./foreign-agent-scan.js";
+import { scanForForeignAgentDefinitions, assertNoForeignAgentDefinitions } from "./foreign-agent-scan.js";
+import { ForeignAgentDefinitionError } from "./foreign-agent-errors.js";
+import { REQUIRED_OPENCODE_VERSION } from "./model-route-readiness.js";
 
 // ============================================================================
 // Constants

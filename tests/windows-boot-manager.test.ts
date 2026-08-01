@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WU3 v2 (RED-first) — `WindowsModelRouteBootManager` lifecycle contract.
  *
  * The WU3 design (proposal aa40c70b-f635-4246-b94b-e065b0db688e,
@@ -102,11 +102,11 @@ function seedManifest(hostName: string, providerId: string, modelId: string, roo
   writeFileSync(path.join(root, agentRelative), agentContent);
   writeFileSync(path.join(root, commandRelative), commandContent);
   const body = {
-    schemaVersion: 1,
-    generatorVersion: "1.1.0",
-    generationEpoch: "epoch-wu3",
-    workspaceIdentity: path.resolve(root),
-    routingNamespace: "sdd-mr-v1",
+    schemaVersion: 1 as const,
+    generatorVersion: "1.0.0",
+    generationEpoch: new Date().toISOString(),
+    workspaceIdentity: "test-workspace-id",
+    routingNamespace: "v1",
     descriptorBudgetBytes: 4096,
     requiredOpenCodeVersion: "1.18.9",
     routes: [{
@@ -117,7 +117,7 @@ function seedManifest(hostName: string, providerId: string, modelId: string, roo
     }],
     fileHashes: [sha256(agentContent), sha256(commandContent)],
   };
-  return { ...body, manifestHash: sha256(JSON.stringify(body)) };
+  return { ...body, manifestHash: sha256(JSON.stringify(body)) } as Manifest;
 }
 
 class StubCatalog implements ModelRouteCatalogPort {
@@ -140,7 +140,7 @@ class StubCatalog implements ModelRouteCatalogPort {
  * readback were invoked so tests can assert the manager's strict
  * "sync → existsCanonical" gate order.
  */
-class OrderingSync implements import("../src/infrastructure/runtime/windows-model-route-boot-manager.js").CatalogSyncUseCase {
+class OrderingSync {
   readonly events: string[] = [];
   constructor(private readonly onSync?: () => void) {}
   async execute(): Promise<unknown> {
