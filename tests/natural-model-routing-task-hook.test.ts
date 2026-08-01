@@ -1,4 +1,4 @@
-/**
+﻿/**
  * WU2 (RED-first) — `ModelRouteTaskHook` natural-intent routing path.
  *
  * Behavior contract for the NEW path (subagent_type WITHOUT explicit

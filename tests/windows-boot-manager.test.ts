@@ -1,4 +1,4 @@
-/**
+﻿/**
  * WU3 v2 (RED-first) — `WindowsModelRouteBootManager` lifecycle contract.
  *
  * The WU3 design (proposal aa40c70b-f635-4246-b94b-e065b0db688e,
