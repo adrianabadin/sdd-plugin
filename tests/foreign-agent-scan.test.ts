@@ -1,8 +1,8 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import path from "node:path";
 import fs from "node:fs";
 import { scanForForeignAgentDefinitions } from "../src/infrastructure/opencode/foreign-agent-scan.js";
-import { resolveForeignAgentSources, AbsolutePath } from "../src/infrastructure/opencode/foreign-agent-sources.js";
+import { resolveForeignAgentSources, type AbsolutePath } from "../src/infrastructure/opencode/foreign-agent-sources.js";
 
 const workspaceRoot = path.resolve(process.cwd(), "temp-test-workspace") as AbsolutePath;
 

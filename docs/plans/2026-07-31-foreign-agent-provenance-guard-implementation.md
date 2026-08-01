@@ -17,7 +17,8 @@
 ## Execution rules
 
 - Run this plan in an isolated worktree. Do not implement on a dirty `main` checkout.
-- Use @test-driven-development for every task and @verification-before-completion before the final claim.
+- Execute pre-change safety-net test execution before any modifications.
+- Use @test-driven-development for every task (match RED commands to all new tests created, and collect apply-progress TDD evidence) and @verification-before-completion before the final claim.
 - Keep every guard synchronous after source resolution so no routing rewrite can race ahead of validation.
 - All comparisons of reserved names are case-insensitive; all paths are canonical absolute paths.
 - Never log raw `OPENCODE_CONFIG_CONTENT`, config bodies, prompts, credentials, or unrestricted paths. Errors expose source kind, a sanitized source label, and the colliding agent name only.
@@ -51,9 +52,10 @@ booleans, and SHA-256 digests where byte equality matters. Confirm:
 
 Write the findings to `docs/plans/2026-07-31-foreign-agent-provenance-guard-spike-notes.md`
 and state which branch of design §7.0 applies: full canonical projection,
-or the observed-field projection fallback. List the exact observable fields
+or the observed-field projection fallback. If the shape is completely unsupported
+and unobservable, stop apply and revise design/spec. List the exact observable fields
 and safe host-added defaults for the latter; it is not a presence-only check.
-Do not proceed to Task 6 until this file exists and states a conclusion.
+Do not proceed to Task 5 or 6 until this file exists and states a conclusion.
 
 **Step 3: Commit**
 
@@ -97,7 +99,7 @@ Expected: FAIL because the packages are not direct declared dependencies/importa
 
 Run: `npm install yaml jsonc-parser`
 
-Do not hand-roll comment stripping or YAML frontmatter parsing.
+Do not hand-roll comment stripping or YAML frontmatter parsing. Use a locally-scoped instance of the loader to ensure it cannot affect global runtime parsing.
 
 **Step 4: Verify GREEN and typecheck**
 
@@ -155,8 +157,10 @@ export type ObservableAgentSource =
   | { readonly kind: "config-file"; readonly path: string; readonly ownership: "foreign"; readonly label: string }
   | { readonly kind: "inline-config"; readonly raw: string; readonly ownership: "foreign"; readonly label: "OPENCODE_CONFIG_CONTENT" };
 
+export type AbsolutePath = string & { readonly __brand: unique symbol };
+
 export interface ResolveForeignAgentSourcesOptions {
-  readonly workspaceRoot: string;
+  readonly workspaceRoot: AbsolutePath | string;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly homeDir?: string;
@@ -206,7 +210,7 @@ Create deep temporary workspaces and cover:
 - A reserved workspace mode, unlisted workspace agent, ancestor/global/custom agent, or inline top-level `agent` key is a finding. Inline `mode` is not added without a verified OpenCode 1.18.9 contract; mode directories remain covered.
 - JSONC comments and trailing commas parse with `jsonc-parser`; strings containing `https://` remain intact.
 - YAML aliases, arrays, non-string `name`, duplicate keys, malformed frontmatter, malformed JSON/JSONC, unreadable paths, and ambiguous source types produce inspection findings rather than being ignored.
-- Directory symlinks/junctions and file symlinks are blocking findings and are never traversed.
+- Directory symlinks/junctions and file symlinks are blocking findings and are never traversed. Add explicit symlink/junction test cases.
 - Missing optional sources (`ENOENT`) are ignored.
 - Findings are deterministic and contain no raw config content.
 
@@ -239,7 +243,7 @@ export interface OwnedAgentFile {
 }
 
 export function scanForForeignAgentDefinitions(input: {
-  readonly workspaceRoot: string;
+  readonly workspaceRoot: AbsolutePath | string;
   readonly sources: readonly ObservableAgentSource[];
   readonly ownedAgentFiles: readonly OwnedAgentFile[];
   readonly reservedPrefix: string;
@@ -248,7 +252,7 @@ export function scanForForeignAgentDefinitions(input: {
 
 Implementation rules:
 
-- Use `lstatSync` before every descent/read; reject `isSymbolicLink()` and Windows junction/reparse behavior surfaced as a link.
+- Specify lexical absolute normalization followed by component-by-component lstat check for no-follow canonicalization before any realpath/read. Reject `isSymbolicLink()` and Windows junction/reparse behavior surfaced as a link.
 - Use `readdirSync(..., { withFileTypes: true })`, sort names before recursion, and inspect only regular `.md` files while treating reserved-looking non-regular entries as foreign.
 - Derive the OpenCode name from the relative Markdown path exactly as v1.18.9 does, then overlay a parsed string frontmatter `name` when present.
 - Parse frontmatter between the first pair of `---` delimiters with `yaml.parseDocument` using a conservative schema and unique keys. Report parser errors.
@@ -334,7 +338,11 @@ For a manifest route, assert the canonical runtime definition has exactly:
   hidden: true,
   model: "provider/model",
   permission: { task: { "*": "deny" } },
-  prompt: "# host\n\nRouted subagent bound to ...\n"
+  prompt: `# host
+
+Routed subagent bound to provider/model.
+Do not edit this file directly.
+Base Template Provenance: ...`
 }
 ```
 
@@ -392,9 +400,9 @@ Cover:
 1. Before observation, `assertMatches(manifest)` throws `ResolvedAgentConfigUnavailableError`.
 2. Full branch: exact reserved key set and exact canonical definitions pass; observed-field branch: absent reserved keys pass but every present entry matches the recorded projection.
 3. In both branches, duplicate-equivalent reserved keys and a sole differently-cased key throw `RoutedAgentDefinitionMismatchError`; the full branch also rejects missing/extra reserved keys.
-4. Every field that Task 0 proves observable rejects changed value/type or an unexpected behavior-changing key. Full-branch tests include model, prompt, description, mode, hidden, and permission; observed-field tests include only the confirmed projection and safe host defaults.
+4. Every field that Task 0 proves observable rejects changed value/type or an unexpected behavior-changing key. Full-branch tests include model, prompt, description, mode, hidden, and permission; observed-field tests include only the confirmed projection and safe host defaults. Add explicit property replacement, deletion, and mutation test coverage.
 5. Non-reserved agents are ignored.
-6. The observer retains the live `cfg.agent` reference; mutation after `observe()` is detected by the next assertion.
+6. The observer rereads the live `cfg.agent` reference by accepting a getter (`getAgentConfig: () => unknown`); a replacement/mutation after `observe()` is detected by the next assertion.
 7. A deeply frozen config and a write-trapping `Proxy` prove `observe()` and `assertMatches()` perform zero writes.
 8. `observe(undefined)` records that the hook ran but remains unavailable for a non-empty manifest.
 9. `recordObservationFailure(error)` never throws and returns the normalized/bounded `Error`; the next `assertMatches(manifest)` call throws `RoutedAgentDefinitionMismatchError`, except that a genuinely absent/unusable observation throws `ResolvedAgentConfigUnavailableError`. A newer `observe()` starts a new observation generation, and a passing validation clears the older failure; a failed current generation remains blocking.
@@ -411,13 +419,13 @@ Expected: FAIL with module-not-found.
 ```ts
 export class ResolvedAgentConfigGuard {
   private observed = false;
-  private agents: unknown;
+  private getAgents: (() => unknown) | undefined;
   private recordedFailure: Error | undefined;
   private recordedAuditFailure: Error | undefined;
 
-  observe(agents: unknown): void {
+  observe(getAgents: () => unknown): void {
     this.observed = true;
-    this.agents = agents; // retain reference; never clone or mutate
+    this.getAgents = getAgents; // retain zero-write getter reference; never clone or mutate
     this.recordedFailure = undefined; // a new generation supersedes stale state
     this.recordedAuditFailure = undefined;
   }
@@ -598,8 +606,8 @@ Create one `ResolvedAgentConfigGuard` in the `SddPlugin` closure. Return a confi
 
 ```ts
 config: async (cfg) => {
-  resolvedAgentGuard.observe(cfg.agent);
   try {
+    resolvedAgentGuard.observe(() => cfg.agent);
     assertResolvedFleetIfManifestExists(workspaceRoot, resolvedAgentGuard);
   } catch (error) {
     const bounded = resolvedAgentGuard.recordObservationFailure(error);
@@ -681,8 +689,9 @@ Add a concise README section covering:
 - Reserved `sdd-mr-v1-` provenance is enforced fail-closed.
 - Generated agents remain `hidden: true` and `mode: subagent`; hidden affects discovery, subagent mode blocks direct primary-agent CLI selection.
 - `SDD_MODEL_ROUTING_EXTRA_WATCHED_CONFIG_ROOTS` extends observable roots.
-- Other plugins invoking a valid routed agent are outside this plugin's responsibility, but merged overrides of reserved definitions are blocked.
-- `Hooks.config` is a read-only validator and does not replace external boot manager + signed attestation.
+- Other plugins invoking a valid routed agent are outside this plugin's responsibility, but merged overrides of reserved definitions are blocked. This includes runtime registrations that bypass `cfg.agent` config structures.
+- Explicit no-auto-remediation behavior: invalid definitions block silently and wait for manual removal, instead of auto-deleting files.
+- `Hooks.config` is a read-only validator and does not replace external boot manager + signed attestation. Add an automated documentation contract test for this statement.
 
 **Step 2b: Extend the real-host CLI-selection test**
 
@@ -691,7 +700,7 @@ Extend `tests/model-route-real-host-canary.integration.ts` to assert
 primary agent (design §11.4). This is the only test that empirically proves
 `mode: subagent` is the actual CLI-selection barrier §4 relies on. Accept
 either an explicit CLI rejection or an independently observed selected-agent
-identity that is not `hostName`; do not pass on a message substring alone.
+identity that is not `hostName`; do not pass on a message substring alone. Ensure non-empty assertion logic is used so the test cannot falsely pass if output is empty.
 
 **Step 3: Run the gated real-host proof**
 

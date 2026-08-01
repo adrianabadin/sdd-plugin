@@ -3,7 +3,7 @@ import {
   buildCanonicalRoutedAgentDefinition,
   renderCanonicalRoutedAgentMarkdown,
   compareResolvedAgentDefinition,
-  CanonicalRoutedAgentDefinition
+  type CanonicalRoutedAgentDefinition
 } from "../src/infrastructure/opencode/routed-agent-definition.js";
 
 const route = {

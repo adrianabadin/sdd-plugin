@@ -20,6 +20,13 @@ under each task into the implementation plan.
 > (10 tasks total), not Task 10. This checklist enumerates exactly those 10
 > tasks; no 11th task exists in the canonical implementation plan.
 
+## Review Workload Forecast
+
+- **Decision needed before apply:** Yes
+- **Chained PRs recommended:** Yes
+- **400-line budget risk:** High
+- **Chain strategy:** Pending; split into work units or seek document size exception.
+
 ## Definition of done
 
 Pulled from the spec's acceptance criteria (spec §"Acceptance criteria") and
@@ -49,6 +56,9 @@ the implementation plan's "Required residual-risk statement":
       implementation commits, real-host evidence, and residual risks; design
       memory (`8137f8f5-fc1f-4d34-9c2b-03798e261a64`) is updated only on a
       factual design correction.
+- [ ] Apply-progress TDD evidence requirements are met, and the `tasks.md`
+      checklist is persisted and committed continuously.
+- [ ] Commits are prefixed with task traceability labels (e.g., `[Task 3] feat(...)`).
 
 **Blocking prerequisite:** Task 0 (the empirical `cfg.agent` merged-shape
 spike against a real OpenCode 1.18.9 host) MUST complete and record a
@@ -60,20 +70,21 @@ precondition reading, but its Markdown-generation half is unconditional).
 
 ## Tasks
 
-- [ ] **Task 0 — Empirically resolve the `cfg.agent` merged-shape spike (blocking prerequisite)**
+- [x] **Task 0 — Empirically resolve the `cfg.agent` merged-shape spike (blocking prerequisite)**
   Delivers: sanitized, real-host-verified answer to whether Markdown agent
   definitions (and their `hidden`/`permission.task` fields) survive into
   `cfg.agent`, determining which REQ-7 validation branch (full canonical vs.
-  observed-field) the rest of the plan implements.
+  observed-field) the rest of the plan implements. A third outcome applies:
+  if the shape is completely unsupported, stop apply and revise design/spec.
   Satisfies: REQ-7 (branch selection), REQ-13 (declared residual limitation
   if fields are unobservable).
   Files:
   - Create: `docs/plans/2026-07-31-foreign-agent-provenance-guard-spike-notes.md`
-  Dependencies: none (first task; gates Task 6 and Task 8).
+  Dependencies: none (first task; gates Task 5, 6 and 8).
   Detail: see implementation plan "Task 0: Empirically resolve the `cfg.agent`
   merged-shape spike (blocking)".
 
-- [ ] **Task 1 — Declare parser dependencies and pin the loader contract**
+- [x] **Task 1 — Declare parser dependencies and pin the loader contract**
   Delivers: direct production dependencies on `yaml` and `jsonc-parser`,
   proven importable/parseable via a failing-then-passing dependency test.
   Satisfies: REQ-2, REQ-13 (no hand-rolled regex parsers), foundational for
@@ -85,7 +96,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   Detail: see implementation plan "Task 1: Declare parser dependencies and
   pin the loader contract".
 
-- [ ] **Task 2 — Resolve all observable OpenCode definition sources**
+- [x] **Task 2 — Resolve all observable OpenCode definition sources**
   Delivers: a pure, hermetic source resolver
   (`resolveForeignAgentSources`) covering workspace, ancestor, global/XDG,
   `OPENCODE_CONFIG*`, managed, and operator-extended config roots, with
@@ -101,7 +112,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   Detail: see implementation plan "Task 2: Resolve all observable OpenCode
   definition sources".
 
-- [ ] **Task 3 — Scan config, Markdown, modes, names, and links fail-closed**
+- [x] **Task 3 — Scan config, Markdown, modes, names, and links fail-closed**
   Delivers: the pure scanner (`scanForForeignAgentDefinitions`) that walks
   resolved sources, applies case-insensitive reserved-name matching,
   workspace-owned-file allowlisting by path+SHA-256, and fail-closed
@@ -114,7 +125,7 @@ precondition reading, but its Markdown-generation half is unconditional).
   Detail: see implementation plan "Task 3: Scan config, Markdown, modes,
   names, and links fail-closed".
 
-- [ ] **Task 4 — Add typed provenance and resolved-config failures**
+- [x] **Task 4 — Add typed provenance and resolved-config failures**
   Delivers: the four new typed error classes with stable `name`/`code` and
   no raw-content leakage, and the finding-to-error-class mapping.
   Satisfies: REQ-10 (error taxonomy).
@@ -137,9 +148,9 @@ precondition reading, but its Markdown-generation half is unconditional).
   - Modify: `src/infrastructure/opencode/disk-agent-generator.ts`
   - Create: `tests/routed-agent-definition.test.ts`
   - Modify: `tests/model-route-disk-generator.test.ts`
-  Dependencies: reads Task 0's spike notes as a precondition (for the
-  runtime-comparison branch contract), but the Markdown-generation half is
-  otherwise independent of Tasks 1-4. Sequenced after Task 4 per plan order.
+  Dependencies: **blocked by Task 0** (for the runtime-comparison branch contract)
+  and depends on Task 4 (typed errors). (The Markdown-generation half is
+  otherwise independent of Tasks 1-4). Sequenced after Task 4 per plan order.
   Detail: see implementation plan "Task 5: Define one canonical
   generated-agent contract" (note its explicit "Precondition: Read Task 0's
   spike notes...").
@@ -240,17 +251,18 @@ precondition reading, but its Markdown-generation half is unconditional).
 
 ```
 Task 0 (spike, blocking) ──┬─────────────► Task 6 ──► Task 8 ──► Task 9
-                            └─────────────► Task 8 (branch selection)
+                           ├─────────────► Task 5 (comparator contract)
+                           └─────────────► Task 8 (branch selection)
 Task 1 ─► Task 2 ─► Task 3 ─► Task 4 ─┬─► Task 5 ─► Task 6
-                                       └─► Task 7 ───────────────► Task 9
+                                      └─► Task 7 ───────────────► Task 9
 Task 7 (independent of Task 0/6) ─────────────────────────────────► Task 8
 ```
 
 Plain-language reading: Tasks 1→2→3→4 are strictly sequential (parser deps →
 sources → scanner → errors). Task 5 and Task 7 both depend on Task 4 but are
 otherwise independent of each other. Task 0 is a standalone blocking
-prerequisite that must land before Task 6 and Task 8 start their
-config-hook/branch-specific work, but does not block Tasks 1-5 or Task 7.
+prerequisite that must land before Task 5 (comparator branch), Task 6, and Task 8 start their
+config-hook/branch-specific work.
 Task 6 depends on Task 0 (branch), Task 5 (canonical contract), and Task 4
 (errors). Task 8 depends on Task 0 (branch), Task 6 (guard), and Task 7
 (ordering it must preserve). Task 9 is last, after Task 8.

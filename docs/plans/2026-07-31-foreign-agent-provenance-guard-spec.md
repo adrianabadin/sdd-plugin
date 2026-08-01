@@ -125,7 +125,7 @@ Source: design §9; gap-review B1, C1.
 
 **REQ-11 (CLI-selection barrier proof).** A real-host integration test MUST
 prove `opencode run --agent <hostName>` refuses to select a routed host as a
-primary agent, empirically grounding the `mode: subagent` claim in REQ-6.
+primary agent, empirically grounding the `mode: subagent` claim in REQ-6. The assertion logic MUST use explicit non-empty verification so that empty output or missing logs cannot result in a false pass.
 Source: design §4/§11.4; gap-review A4.
 
 **REQ-12 (Operator-extensible watched roots).** An env var
@@ -147,7 +147,7 @@ or rewriting `subagent_type` after this plugin's hook; runtime registrations
 that bypass `cfg.agent` and leave no observable source; proving the origin of
 a remote definition whose merged result is byte-identical to canonical; the
 filesystem TOCTOU window between the last scan and OpenCode's child creation;
-auto-remediation of any foreign file (never performed). Source: design §10;
+and explicit no-auto-remediation behavior (invalid definitions block silently and wait for manual removal, instead of auto-deleting files). An automated documentation contract test MUST verify these statements are present. Source: design §10;
 gap-review B6.
 
 ## Out of scope
