@@ -1,13 +1,17 @@
 # Foreign Agent Provenance Guard — Design rev 3
 
 Date: 2026-07-31
-Status: Approved by user
+Status: Approved by user; gap-review round 3 applied 2026-07-31
 Supersedes: `docs/superpowers/specs/2026-07-31-foreign-agent-provenance-guard-design.md` rev 2
 PMC decision (this project persists decisions in PMC, not Engram):
 `decision/foreign-agent-provenance-guard-design-approved-2026-07-31`
 (PMC memory `8137f8f5-fc1f-4d34-9c2b-03798e261a64`), which cross-references
 both `architecture/model-routing-boot-attestation-decision` and the archived
 `plan/config-hook-fleet-agents` plan.
+
+Canonical specification memory:
+`decision/foreign-agent-provenance-guard-spec-approved-2026-07-31`
+(PMC memory `0ea11a80-4b99-4432-9d07-572b22fd05c7`).
 
 ## 1. Problem
 
@@ -79,7 +83,10 @@ full distinction):
 
 ## 4. Generated-agent invariants
 
-Every generated routed agent must retain the complete canonical definition:
+Every generated routed agent must retain the complete canonical definition.
+The manifest `hostName` is the agent name represented by the `cfg.agent` map
+key and by the generated Markdown path; it is not an additional field inside
+the runtime entry:
 
 - `name`: manifest `hostName`.
 - `mode: subagent`.
@@ -88,7 +95,11 @@ Every generated routed agent must retain the complete canonical definition:
 - Exact generated description and prompt.
 - `permission.task["*"]: deny`.
 - No unexpected behavior-changing fields such as `disable`, `tools`,
-  `maxSteps`, `temperature`, `top_p`, `color`, or any key not listed above.
+  `maxSteps`, `temperature`, `top_p`, or `color`. The generated descriptor
+  contract is always exact. Whether the merged runtime entry may contain
+  host-added keys is determined by the Task 0 observation contract in §7.0;
+  the comparator must not reject a key that the pinned host itself injects
+  unless that key changes routed behavior.
 
 `hidden: true` removes the agent from user-facing autocomplete. It is not an
 access-control mechanism. `mode: subagent` is the invariant that prevents
@@ -208,14 +219,24 @@ and `permission.task` survive normalization into that map.
 `disable?: boolean` and `permission` without a `task` key), so this cannot be
 assumed from the SDK types alone.
 
-- If markdown agents appear in `cfg.agent` with `hidden`/`permission.task`
-  intact: implement §7 as written below.
-- If markdown agents are absent from `cfg.agent`, or present but missing
-  `hidden`/`permission.task`: §7.1's set-equality rule is replaced by
-  "validate only reserved keys that are present in the observed map; absence
-  of all reserved keys is not a mismatch", and the field-by-field comparison
-  in §7.3 is restricted to whichever fields the spike confirms actually
-  survive. Guarantee 3 in §2 is downgraded from unconditional to
+The spike records a sanitized observation contract, not a raw config dump. It
+must enumerate the reserved map keys, their own enumerable property names and
+value types, whether each canonical field equals the generated value, whether
+OpenCode injects additional keys/defaults, and whether property accessors are
+present. It must not persist prompt text, raw configuration bodies, secrets,
+or unrestricted environment payloads; equality booleans and SHA-256 digests
+are sufficient where byte equality matters.
+
+- If Markdown agents appear in `cfg.agent` with every canonical behavioral
+  field intact and without host-added behavioral keys: use the **full
+  canonical projection** branch and implement §7 as written below.
+- If Markdown agents are absent from `cfg.agent`, or present with only a
+  subset of canonical fields: use the **observed-field projection** branch.
+  Validate every reserved entry that is present against exactly the fields
+  and safe host-added defaults confirmed by the spike; absence of all
+  reserved entries is not a mismatch. This is not a "presence-only" check:
+  every field that survives normalization remains mandatory and exact.
+  Guarantee 3 in §2 is downgraded from unconditional to
   conditional-on-presence in that case.
 
 This repository also carries a deliberate regression test,
@@ -238,20 +259,37 @@ intact and unchanged.
 `cfg.agent` reference. The hook validates immediately during configuration
 loading and refresh. It never mutates the configuration object.
 
-The runtime guard compares the merged configuration with the current manifest:
+Under the full canonical projection branch, the runtime guard compares the
+merged configuration with the current manifest:
 
 1. The set of case-normalized reserved keys must equal the set of manifest
    `hostName` values.
-2. Every manifest host must exist exactly once.
+2. Every manifest host must exist exactly once after case-normalized grouping,
+   and the sole actual key must equal the canonical `hostName` byte-for-byte.
+   Normalization detects case variants and duplicate-equivalent keys; it does
+   not make a differently-cased runtime key dispatchable.
 3. Each entry's normalized behavioral projection must equal the canonical
    generated definition described in section 4.
 4. A missing config observation when routing starts is fail-closed.
+
+Under the observed-field projection branch, rules 1-3 are narrowed exactly as
+recorded by the spike notes. Tests that assume reserved-key presence or fields
+that the host omits are inapplicable in that branch and must be replaced by
+tests for the confirmed projection; tests for live-reference revalidation,
+non-mutation, duplicate-equivalent keys, and every observable behavioral
+field remain mandatory.
 
 `ModelRouteTaskHook` receives a getter for the current read-only observation.
 It revalidates the selected host immediately before success audit and rewrite.
 Capturing the live reference means mutations performed by earlier/later config
 hooks during the same configuration phase are visible at dispatch time, while
 remaining outside the routing decision itself.
+
+Each new `config` observation supersedes the previous observation state. A
+successful observe-and-validate cycle clears an earlier recorded failure; a
+failed current observation remains blocking until a later hook invocation
+successfully validates. This makes recovery possible without allowing a stale
+failure to be silently ignored.
 
 ## 8. Integration and ordering
 
@@ -297,15 +335,15 @@ unwrapped. No mismatch may be converted to `AttestationUnavailableError`.
   foreign reserved definition was found, or a workspace-owned reserved file's
   hash no longer matches the manifest allowlist at a scan site that runs the
   new provenance scanner independently of the generator's own hash-verify
-  step. At both integration points defined in §8 (generation, readiness),
-  the existing `ModifiedOwnedFileError` / owned-hash check already runs
-  strictly before the new scan (§8.1 step 2 precedes step 3; readiness's
-  existing `assertCurrentState` file-hash pass precedes the new scan call),
-  so an owned-file tamper is reported as `ModifiedOwnedFileError` at those
-  two call sites in practice. The scanner's own `owned-definition-mismatch`
-  finding exists for callers of `scanForForeignAgentDefinitions` outside
-  those two ordered integration points, so it fails closed even if used
-  standalone.
+  step. At the ordered generation integration point, the existing owned-hash
+  check runs before the scan and reports tamper as `ModifiedOwnedFileError`.
+  At readiness `issue()`/`verify()`, the existing `assertCurrentState()`
+  file-hash pass likewise runs before the scan but reports tamper as
+  `AttestationMismatchError`. The scanner's own
+  `owned-definition-mismatch` finding exists for callers of
+  `scanForForeignAgentDefinitions` outside those ordered integrations, so a
+  standalone assertion reports `ForeignAgentDefinitionError`. This ordering
+  and error precedence are regression-tested.
 - `ForeignAgentInspectionError`, code `FOREIGN_AGENT_INSPECTION`: a relevant
   source could not be safely inspected or parsed.
 - `RoutedAgentDefinitionMismatchError`, code
@@ -320,14 +358,22 @@ hook errors emit `routing.blocked` or `routing.natural.blocked` with the exact
 class, bounded source metadata, and no raw configuration.
 
 Config-hook failures: a validation failure raised inside the read-only
-`config` hook is recorded on the `ResolvedAgentConfigGuard` and re-raised at
-dispatch as `RoutedAgentDefinitionMismatchError` (or
+`config` hook is normalized to bounded guard metadata, recorded on the
+`ResolvedAgentConfigGuard`, and re-raised at dispatch as
+`RoutedAgentDefinitionMismatchError` (or
 `ResolvedAgentConfigUnavailableError` when no observation exists). The hook
 itself never rejects its promise, so a provenance failure can never abort
 OpenCode configuration loading or host startup — only routing. The hook emits
 a `routing.config.blocked` audit entry when it records a failed observation,
 in addition to the dispatch-time `routing.blocked` / `routing.natural.blocked`
 entry when a route is actually attempted against a bad observation.
+
+`routing.config.blocked` is a distinct bounded audit shape with `status`,
+`errorClass`, sanitized mismatch/source labels, and duration, but no task
+correlation or raw config fields. If its durable append fails, the hook still
+must resolve: it records the audit-write failure as part of the current
+blocking observation so dispatch remains fail-closed. The implementation may
+not claim that the config event was durably emitted when the sink failed.
 
 ## 10. Concurrency and residual limitations
 
@@ -374,15 +420,26 @@ Strict RED -> GREEN -> REFACTOR applies.
 - Existing owned files remain untouched on provenance failure.
 - `issue()` and `verify()` block on directory, inline, mode, frontmatter,
   custom-env, managed, and inspection-error cases.
+- Owned-file tamper preserves ordered error precedence:
+  `ModifiedOwnedFileError` in generation and `AttestationMismatchError` in
+  readiness; the standalone scanner assertion uses
+  `ForeignAgentDefinitionError`.
 - Existing tamper, canary, TTL, signature, and boot-identity tests remain green.
 
 ### 11.3 Runtime config and task hook
 
 - `config` hook never mutates `cfg.agent`.
-- Exact canonical set/config passes.
-- Extra, missing, case-variant, `hidden: false`, `mode: primary`, wrong model,
+- The full-projection branch proves exact canonical set/config passes and
+  extra, missing, case-variant, `hidden: false`, `mode: primary`, wrong model,
   changed prompt/permission, or unexpected behavioral option blocks.
+- The observed-field branch instead proves the exact field/key projection
+  recorded by Task 0, including all surviving behavioral fields; tests never
+  assume a host-omitted field is observable.
 - Missing config observation blocks.
+- A newer valid observation clears a prior recorded failure; a current failed
+  observation remains blocking.
+- `routing.config.blocked` is sanitized and audit-sink failure never rejects
+  the config hook or permits dispatch.
 - Both grammar and natural paths propagate each typed error unwrapped and audit
   the exact error class before rewrite.
 
@@ -390,7 +447,9 @@ Strict RED -> GREEN -> REFACTOR applies.
 
 - Generated descriptors contain both `mode: subagent` and `hidden: true`.
 - The OpenCode 1.18.9 real-host suite verifies a routed host cannot be selected
-  as a primary agent with `opencode run --agent`.
+  as a primary agent with `opencode run --agent`. The proof must observe either
+  an explicit rejection or the actual selected primary-agent identity; a
+  brittle message substring alone is insufficient.
 - New tests are wired into `test:model-routes`; strict typecheck, build, focused
   suites, and full regression remain mandatory.
 
@@ -403,4 +462,6 @@ Strict RED -> GREEN -> REFACTOR applies.
 - All typed failures occur before fleet mutation or task rewrite as applicable.
 - Focused tests, `npm run test:model-routes`, strict typecheck, build, and full
   regression pass with fresh evidence.
-- PMC decision memory and implementation plan point to this rev 3 document.
+- PMC design memory and canonical specification memory
+  `0ea11a80-4b99-4432-9d07-572b22fd05c7`, plus the implementation plan, point
+  to this rev 3 document and the REQ-1..REQ-13 specification.
