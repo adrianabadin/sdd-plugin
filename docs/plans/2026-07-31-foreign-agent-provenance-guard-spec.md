@@ -1,7 +1,7 @@
 # Foreign Agent Provenance Guard — Specification
 
 Date: 2026-07-31
-Status: Approved (design rev 3, gap-corrected)
+Status: Approved (design rev 3, gap-corrected; spec gap-review round 2 applied 2026-08-01)
 Derives from: `docs/plans/2026-07-31-foreign-agent-provenance-guard-design.md` (rev 3)
 Implemented by: `docs/plans/2026-07-31-foreign-agent-provenance-guard-implementation.md`
 
@@ -16,7 +16,13 @@ and before any readiness `issue()`/`verify()`, the system MUST scan every
 observable OpenCode configuration source (design §5) for a definition whose
 name, case-insensitively, starts with the reserved prefix `sdd-mr-v1-`, and
 MUST treat any such definition found outside the manifest's own allowlisted
-files as a blocking finding. Source: design §5, §6.
+files as a blocking finding. Allowlist membership requires both the canonical
+relative path and the recorded SHA-256; a same-path workspace file whose hash
+no longer matches is the scanner's `owned-definition-mismatch` finding and is
+likewise blocking (it surfaces as `ModifiedOwnedFileError` at the ordered
+generation/readiness integration points, and as `ForeignAgentDefinitionError`
+for standalone scanner callers — design §9). Source: design §5, §6, §9;
+gap-review B1.
 
 **REQ-2 (Fail-closed on inspection failure).** Any source-inspection error
 other than "source does not exist" (permission errors, unparseable JSON/
@@ -26,9 +32,9 @@ Source: design §6.3.
 
 **REQ-3 (Generation gate).** `DiskAgentGenerator.generate()` MUST run the
 provenance scan (REQ-1/REQ-2) after verifying previously-owned file hashes
-and before the unconditional sweep, and MUST write no descriptor and commit
-no manifest if the scan finds anything. The generator lock MUST still be
-released. Source: design §8.1.
+and before the unconditional sweep, and MUST write or delete no descriptor
+and commit no manifest if the scan finds anything. The generator lock MUST
+still be released. Source: design §8.1; gap-review B2.
 
 **REQ-4 (Readiness gate).** `ModelRouteReadiness.assertCurrentState()` MUST
 run the same provenance scan, uncached, on every `issue()` and every
@@ -39,23 +45,26 @@ on any finding. Source: design §8.2; gap-review A6 (boot-manager plumbing).
 
 **REQ-5 (Dispatch gate ordering).** `ModelRouteTaskHook` MUST preserve this
 exact gate order on both the explicit-grammar and natural-intent paths:
-parse → resolve → quarantine → manifest membership → readiness (which
-includes REQ-1..REQ-4) → merged-definition validation (REQ-7) → audit →
-`subagent_type` rewrite. No provenance or merged-definition error may be
-downgraded to `AttestationUnavailableError`; each MUST be audited and
-rethrown with its own error class. Source: design §8.3.
+parse → resolve → quarantine → manifest membership → readiness (REQ-4,
+which itself enforces REQ-1/REQ-2) → merged-definition validation (REQ-7) →
+audit → `subagent_type` rewrite. No provenance or merged-definition error may
+be downgraded to `AttestationUnavailableError`; each MUST be audited and
+rethrown with its own error class. Source: design §8.3; gap-review B3.
 
 **REQ-6 (Canonical generated-agent contract).** Exactly one shared module
 MUST define the canonical routed-agent definition (description, `mode:
 subagent`, `hidden: true`, `model`, `permission.task["*"]: deny`, exact
-prompt) and MUST be the single source both the generator's descriptor writer
+prompt), MUST reject any observed entry carrying keys beyond that contract
+(design §4: no unexpected behavior-changing fields or "any key not listed
+above"), and MUST be the single source both the generator's descriptor writer
 and the merged-config comparator (REQ-7) use — no duplicated literal
-templates. Source: design §4.
+templates. Source: design §4; gap-review B4.
 
 **REQ-7 (Merged runtime-config validation — conditional on Task 0).**
 `SddPlugin` MUST register a `config` hook that observes `cfg.agent` and
-compares its reserved-prefixed entries against the manifest's canonical
-definitions (REQ-6). The hook MUST NOT mutate `cfg`/`cfg.agent`, MUST NOT
+compares its case-normalized reserved-prefixed entries against the manifest's
+canonical definitions (REQ-6). The hook MUST NOT mutate `cfg`/`cfg.agent`,
+MUST NOT
 generate agents, select routes, or issue readiness, and MUST NOT reject its
 own promise on a mismatch (see REQ-8). The exact comparison scope (full
 field-by-field vs. presence-only) is determined by Task 0's spike result
@@ -64,10 +73,12 @@ Source: design §7.
 
 **REQ-8 (Config-hook failure semantics).** A mismatch or inspection failure
 detected by the `config` hook MUST be recorded (not thrown) so the hook's
-promise always resolves; the *next* `ModelRouteTaskHook.assertMatches()`
-call at dispatch time MUST throw `RoutedAgentDefinitionMismatchError` (or
+promise always resolves; when recording a failed observation the hook MUST
+emit a `routing.config.blocked` audit entry with bounded metadata and no raw
+configuration; and the *next* `ModelRouteTaskHook.assertMatches()` call at
+dispatch time MUST throw `RoutedAgentDefinitionMismatchError` (or
 `ResolvedAgentConfigUnavailableError` if no observation exists yet) before
-the `subagent_type` rewrite. Source: design §7/§9; gap-review A3.
+the `subagent_type` rewrite. Source: design §7/§9; gap-review A3, B5.
 
 **REQ-9 (Regression-test coexistence).** `tests/bootstrap-clean-startup.test.ts`
 MUST be updated, not deleted or weakened beyond this scope: it MUST continue
@@ -85,7 +96,10 @@ containing raw config bodies, prompts, or environment payloads:
 `ForeignAgentInspectionError` (`FOREIGN_AGENT_INSPECTION`),
 `RoutedAgentDefinitionMismatchError` (`ROUTED_AGENT_DEFINITION_MISMATCH`),
 `ResolvedAgentConfigUnavailableError` (`RESOLVED_AGENT_CONFIG_UNAVAILABLE`).
-Source: design §9.
+Scanner findings map deterministically onto this taxonomy:
+`inspection-failure` findings raise `ForeignAgentInspectionError`;
+`foreign-reserved-definition` and `owned-definition-mismatch` findings raise
+`ForeignAgentDefinitionError` (design §9). Source: design §9; gap-review B1.
 
 **REQ-11 (CLI-selection barrier proof).** A real-host integration test MUST
 prove `opencode run --agent <hostName>` refuses to select a routed host as a
@@ -94,18 +108,23 @@ Source: design §4/§11.4; gap-review A4.
 
 **REQ-12 (Operator-extensible watched roots).** An env var
 `SDD_MODEL_ROUTING_EXTRA_WATCHED_CONFIG_ROOTS` (path-delimiter-separated)
-MUST extend the watched sources at every production call site listed in
-REQ-4, not only at dispatch time. Source: design §5.3; gap-review A6.
+MUST extend the watched sources at every production provenance-scan call
+site — generation (REQ-3, including the CLI regeneration path) and every
+call site listed in REQ-4, including both `ModelRouteReadiness` construction
+sites inside `WindowsModelRouteBootManager` — not only at dispatch time.
+Source: design §5.3; gap-review A6, B6.
 
 **REQ-13 (Declared residual limitations, not silent gaps).** The following
 MUST be explicitly documented as out of scope rather than silently unhandled:
 platform-managed OpenCode config roots (no verified per-platform path set
 exists in this repo — operators inject via `managedConfigFiles`/REQ-12
 instead of a computed default); another plugin invoking a valid routed agent
-or rewriting `subagent_type` after this plugin's hook; proving the origin of
+or rewriting `subagent_type` after this plugin's hook; runtime registrations
+that bypass `cfg.agent` and leave no observable source; proving the origin of
 a remote definition whose merged result is byte-identical to canonical; the
 filesystem TOCTOU window between the last scan and OpenCode's child creation;
-auto-remediation of any foreign file (never performed). Source: design §10.
+auto-remediation of any foreign file (never performed). Source: design §10;
+gap-review B6.
 
 ## Out of scope
 
@@ -116,7 +135,7 @@ without a verified source for them (see REQ-13).
 ## Acceptance criteria
 
 - All REQ-1 through REQ-13 have at least one automated test per the
-  implementation plan's task list (Tasks 0–10).
+  implementation plan's task list (Tasks 0–9).
 - `npm run test:model-routes`, `npm run test:typecheck:strict`, and
   `npm run build` pass with zero errors.
 - `tests/bootstrap-clean-startup.test.ts` passes with the narrowed assertion
