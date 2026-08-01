@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes } from "node:crypto";
+﻿import { createHash, createHmac, randomBytes } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -15,6 +15,9 @@ import {
 import path from "node:path";
 
 import type { Manifest } from "./disk-agent-generator.js";
+import { resolveForeignAgentSources } from "./foreign-agent-sources.js";
+import { assertNoForeignAgentDefinitions } from "./foreign-agent-scan.js";
+import { ROUTED_HOST_NAME_PREFIX } from "../../domain/model-routing/model-route-host-naming.js";
 import type { CanaryEvidence } from "./model-route-canary.js";
 import { applyCurrentUserAcl } from "../runtime/windows-acl.js";
 
@@ -63,6 +66,7 @@ export interface ModelRouteReadinessOptions {
   readonly now?: () => number;
   readonly nonce?: () => string;
   readonly signingKey: Buffer;
+  readonly additionalConfigRoots?: readonly string[];
 }
 
 export class ReadinessSigningKeyMissingError extends Error {
@@ -97,6 +101,7 @@ export class ModelRouteReadiness {
   private readonly now: () => number;
   private readonly nonce: () => string;
   private readonly signingKey: Buffer;
+  private readonly additionalConfigRoots: readonly string[];
 
   constructor(options: ModelRouteReadinessOptions) {
     this.root = path.resolve(options.workspaceRoot);
@@ -107,6 +112,7 @@ export class ModelRouteReadiness {
       throw new ReadinessSigningKeyMissingError();
     }
     this.signingKey = options.signingKey;
+    this.additionalConfigRoots = options.additionalConfigRoots ?? [];
   }
 
   issue(input: {
@@ -204,6 +210,20 @@ export class ModelRouteReadiness {
       return digest;
     }).sort();
     if (!sameArray(actualHashes, [...manifest.fileHashes].sort())) throw new AttestationMismatchError("manifest file hash list is invalid");
+
+    const sources = resolveForeignAgentSources({
+       workspaceRoot: this.root,
+       additionalConfigRoots: this.additionalConfigRoots
+    });
+    assertNoForeignAgentDefinitions({
+       workspaceRoot: this.root,
+       sources,
+       ownedAgentFiles: manifest.routes.map(r => ({
+          relativePath: r.agentFile.relativePath,
+          sha256: r.agentFile.sha256
+       })),
+       reservedPrefix: ROUTED_HOST_NAME_PREFIX
+    });
   }
 
   private sign(body: Omit<ReadinessAttestation, "signature">): string {

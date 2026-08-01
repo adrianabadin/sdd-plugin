@@ -182,3 +182,16 @@ export function scanForForeignAgentDefinitions(input: {
   
   return findings;
 }
+import { ForeignAgentInspectionError, ForeignAgentDefinitionError } from "./foreign-agent-errors.js";
+export function assertNoForeignAgentDefinitions(input: {
+  readonly workspaceRoot: AbsolutePath | string;
+  readonly sources: readonly ObservableAgentSource[];
+  readonly ownedAgentFiles: readonly OwnedAgentFile[];
+  readonly reservedPrefix: string;
+}): void {
+  const findings = scanForForeignAgentDefinitions(input);
+  const inspection = findings.filter((f) => f.kind === "inspection-failure");
+  if (inspection.length) throw new ForeignAgentInspectionError("FOREIGN_AGENT_INSPECTION", inspection);
+  const definitions = findings.filter((f) => f.kind !== "inspection-failure");
+  if (definitions.length) throw new ForeignAgentDefinitionError("FOREIGN_AGENT_DEFINITION", definitions);
+}

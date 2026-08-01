@@ -54,8 +54,9 @@ import {
 import path from "node:path";
 
 import { hashHostName, ROUTED_HOST_NAME_PREFIX } from "../../domain/model-routing/model-route-host-naming.js";
-import { REQUIRED_OPENCODE_VERSION } from "./model-route-readiness.js";
 import { renderCanonicalRoutedAgentMarkdown } from "./routed-agent-definition.js";
+import { resolveForeignAgentSources } from "./foreign-agent-sources.js";
+import { assertNoForeignAgentDefinitions } from "./foreign-agent-scan.js";
 
 // ============================================================================
 // Constants
@@ -873,12 +874,14 @@ export type DiskAgentGeneratorOptions =
       readonly routesConfigPath: string;
       readonly routesConfig?: never;
       readonly lockStaleAfterMs?: number;
+      readonly additionalConfigRoots?: readonly string[];
     }
   | {
       readonly workspaceRoot: string;
       readonly routesConfigPath?: never;
       readonly routesConfig: RoutesConfig;
       readonly lockStaleAfterMs?: number;
+      readonly additionalConfigRoots?: readonly string[];
     };
 
 export interface GeneratedRoute {
@@ -901,12 +904,14 @@ export class DiskAgentGenerator {
   private readonly routesConfigPath: string | null;
   private readonly routesConfig: RoutesConfig | null;
   private readonly lockStaleAfterMs: number;
+  private readonly additionalConfigRoots: readonly string[];
 
   constructor(options: DiskAgentGeneratorOptions) {
     this.workspace = prepareWorkspace(options.workspaceRoot);
     this.routesConfigPath = options.routesConfigPath ? path.resolve(options.routesConfigPath) : null;
     this.routesConfig = options.routesConfig ?? null;
     this.lockStaleAfterMs = options.lockStaleAfterMs ?? LOCK_STALE_AFTER_MS;
+    this.additionalConfigRoots = options.additionalConfigRoots ?? [];
   }
 
   async generate(): Promise<GenerateResult> {
@@ -954,6 +959,21 @@ export class DiskAgentGenerator {
           });
         }
       }
+
+      // Assert no foreign agents (Task 7)
+      const sources = resolveForeignAgentSources({
+         workspaceRoot: this.workspace.root,
+         additionalConfigRoots: this.additionalConfigRoots
+      });
+      assertNoForeignAgentDefinitions({
+         workspaceRoot: this.workspace.root,
+         sources,
+         ownedAgentFiles: previous ? previous.routes.map(r => ({
+            relativePath: r.agentFile.relativePath,
+            sha256: r.agentFile.sha256
+         })) : [],
+         reservedPrefix: ROUTED_HOST_NAME_PREFIX
+      });
 
       // Unconditional prefix-scoped sweep (REQ-5)
       const sweepRes = sweepOwnedFleetFiles({ workspaceRoot: this.workspace.root });
