@@ -26,7 +26,6 @@
     "noEmit": true
   },
   "include": [
-    "tests/types/node-sqlite.d.ts",
     "tests/helpers/temp-database.ts",
     "tests/helpers/init-child-runner.ts",
     "tests/runtime-database-path.test.ts",

@@ -30,6 +30,9 @@ import { ModelRouteTaskHook } from "../infrastructure/opencode/model-route-task-
 import { resolveDatabasePath, initializeDatabase } from "../infrastructure/runtime/database-path.js";
 import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
+import { SqliteMcpToolClient } from "../infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
+import { PmcSddArtifactStoreAdapter } from "../infrastructure/pmc/pmc-sdd-artifact-store.adapter.js";
+import { buildSddTools } from "./sdd-tools.js";
 
 /**
  * Clients created by this composition root.
@@ -222,7 +225,24 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
     `Plugin loaded (cwd=${directory}). Background model refresh coordinator initialized.`,
   );
 
+  // SDD MCP tool surface: the seven tools the phase-agent system exposes to
+  // the LLM. The persistence backend is the SQLite-direct McpToolClient
+  // (Option B bridge) talking to the same agent-memory-mcp DB OpenCode spawns.
+  // Construction is defensive: if the SQLite bridge cannot resolve its DB
+  // path, the tools are omitted rather than crashing the whole plugin (the
+  // routing hook still works) — but a clear error is logged.
+  let sddTools: Record<string, unknown> | undefined;
+  try {
+    const sddMcpClient = new SqliteMcpToolClient();
+    const sddStore = new PmcSddArtifactStoreAdapter(sddMcpClient);
+    sddTools = buildSddTools({ store: sddStore });
+    logger.info("SDD MCP tool surface registered (7 tools).");
+  } catch (err) {
+    logger.error("SDD MCP tool surface disabled (persistence backend unavailable).", err);
+  }
+
   return {
+    ...(sddTools ? { tool: sddTools } : {}),
     /**
      * Intercept the `task` tool to take control of the workflow /
      * subagent spawning. We MUST NOT mutate `output` — the task must
