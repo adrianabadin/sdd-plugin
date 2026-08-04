@@ -1,29 +1,82 @@
 /**
- * The SDD MCP tool surface: the seven tools the SDD phase-agent system
- * exposes to the LLM (`sdd_status`, `sdd_compose_phase_prompt`,
- * `sdd_save_artifact`, `sdd_parse_request`, `sdd_init_questions`,
- * `sdd_save_config`, `sdd_checkpoint`).
+ * The SDD MCP tool surface: the EIGHT tools the SDD phase-agent system
+ * exposes to the LLM.
  *
- * This module is the bridge between the OpenCode plugin SDK's `tool()`
- * builder and the pure application-layer functions in `src/application/sdd/`.
- * Each tool is a thin adapter: parse zod args → call the application function
- * → return a `ToolResult`. No business logic lives here.
+ *   1. `sdd_status`                         — read-only unified status
+ *   2. `sdd_compose_phase_prompt`           — acquire dispatch lock + compose
+ *   3. `sdd_save_artifact`                  — atomic persist (verify + write)
+ *   4. `sdd_parse_request`                  — split free-text into SDD fields
+ *   5. `sdd_init_questions`                  — detection + residual questions
+ *   6. `sdd_save_config`                     — atomic validate + init checkpoint
+ *   7. `sdd_checkpoint`                      — mid-phase resumability
+ *   8. `sdd_recover_phase_lock`              — explicit deliberate clear
  *
- * The earlier system shipped 131 tasks / 132 tests against a library NOBODY
- * called — the application layer existed but no MCP wiring registered these
- * tools with OpenCode. This module is that wiring (closes the structural
- * CRITICAL from the verify report). It is constructed once in the bootstrap
- * (`src/bootstrap/index.ts`) with its persistence/gateway dependencies and
- * the resulting `tool` map is returned alongside the existing
- * `tool.execute.before` hook.
+ * The eighth tool, `sdd_recover_phase_lock`, is a versioned-contract
+ * addition. See the `VERSIONED CONTRACT NOTE — 7 → 8 tool surface` below.
+ *
+ * Every port operation backing these tools is the versioned CONTRACT
+ * surface documented in the apply log under "Pass 3" (reviewer-finding
+ * pass). The previous seven-tool docs in
+ * `docs/superpowers/specs/2026-08-01-sdd-phase-agents-design.md` (design
+ * §2) and `docs/superpowers/specs/2026-08-02-sdd-phase-agents-VERIFY.md`
+ * ("none of the seven tools") have been SUPERSEDED by this eight-tool
+ * surface; the apply log records the diff.
+ *
+ * --------------------------------------------------------------------------
+ * VERSIONED CONTRACT NOTE — 7 → 8 tool surface
+ * --------------------------------------------------------------------------
+ * The pre-recovery design documented seven tools. The DL-6 explicit-recovery
+ * requirement (SPEC §sdd-dispatch-lock: "the clear is explicit, never
+ * automatic on timeout") cannot be satisfied by the seven-tool surface
+ * alone — there is no public seam through which an operator can clear a
+ * stuck lock with audit metadata, and any silent fallback would violate
+ * the "never automatic" rule. The eighth tool, `sdd_recover_phase_lock`,
+ * is the versioned contract change.
+ *
+ * Consumer impact: orchestrator code that introspects the registered tool
+ * map and expects exactly seven entries must update to expect eight. The
+ * new tool is additive (no other tool's signature changed). The change is
+ * reflected in `src/bootstrap/index.ts` registration log and in the apply
+ * log under the versioned-contract section.
+ *
+ * Why this is not hidden: per the user instruction "update
+ * registration/contracts/tests coherently rather than hiding
+ * functionality", the seven→eight transition is documented at:
+ *   - this header comment (module-level);
+ *   - `src/bootstrap/index.ts` registration log (process-level);
+ *   - `docs/superpowers/specs/2026-08-03-sdd-phase-agents-remediation-APPLY.md`
+ *     (workstream-level).
+ * --------------------------------------------------------------------------
+ *
+ * Companion ports (also versioned by this pass):
+ *   - `SddChangeStateStorePort`: `acquireChangeStateLock` and
+ *     `reclaimChangeStateLock` and `recoverChangeStateLock` now accept an
+ *     optional `boundChangeName`/`expectedBoundChangeName` so the
+ *     project-init sentinel can bind to its owning change (reviewer
+ *     finding #1). A new `verifyInitRoundOwnership` method validates
+ *     BOTH the user change and the sentinel atomically so a stale init
+ *     runner cannot cause a persisted config mutation (reviewer finding
+ *     #2).
+ *   - `SddArtifactStorePort`: a new `persistArtifactWithOwnership` method
+ *     wraps verify + write + readback + state-update + lock-release in a
+ *     single SQLite transaction, closing the verify-then-write TOCTOU
+ *     window (reviewer finding #3).
+ *
+ * All consumer-impact details and real RED→GREEN cycles are in
+ * `docs/superpowers/specs/2026-08-03-sdd-phase-agents-remediation-APPLY.md`.
  */
+
+import { randomUUID } from "node:crypto";
 
 import { tool } from "@opencode-ai/plugin/tool";
 import type { ToolDefinition } from "@opencode-ai/plugin/tool";
 
-import { assembleStatus } from "../application/sdd/compute-status.js";
+import { assembleStatus, hasUnresolvedCriticalFinding } from "../application/sdd/compute-status.js";
+import { assembleDiscoveryStatus } from "../application/sdd/compute-discovery-status.js";
+import { isProjectInitialized } from "../application/sdd/init-round.js";
 import { composePhasePrompt } from "../application/sdd/prompt-composition.js";
 import { saveArtifact } from "../application/sdd/save-artifact.js";
+import { captureWorktreeFingerprint } from "../application/sdd/worktree-fingerprint.js";
 import { sddParseRequest } from "../application/sdd/entry-flow.js";
 import {
   detectProjectFacts,
@@ -38,15 +91,30 @@ import {
   readCheckpointData,
 } from "../application/sdd/checkpoint.js";
 import { canonicalizeProjectRoot } from "../domain/sdd/project-identity.js";
-import { changeArtifactKey } from "../domain/sdd/sdd-keys.js";
-import type { SddArtifactStorePort } from "../ports/sdd-artifact-store.port.js";
+import { changeArtifactKey, initConfigKey } from "../domain/sdd/sdd-keys.js";
+import {
+  compareWorktreeFingerprints,
+  isPhaseMutating,
+  PHASE_MUTATING_TABLE,
+  type WorktreeFingerprint,
+} from "../domain/sdd/worktree-fingerprint.js";
+import {
+  SddChangeStateLockConflictError,
+  SddChangeStateVersionConflictError,
+  type SddArtifactStorePort,
+  type SddChangeState,
+  type SddChangeStateStorePort,
+} from "../ports/sdd-artifact-store.port.js";
 
 export interface SddToolsDeps {
   readonly store: SddArtifactStorePort;
+  readonly changeStateStore: SddChangeStateStorePort;
   /** Resolves skill names to readable paths; null means "unresolvable" (PC-6). */
   readonly skillResolver?: (skillName: string) => string | null;
   /** The default model reference for phases that don't name one (EF-15). */
   readonly defaultModel?: string;
+  /** Injectable only to make worktree guardrails deterministic in integration tests. */
+  readonly captureFingerprint?: (projectRoot: string) => Promise<WorktreeFingerprint>;
 }
 
 /**
@@ -57,87 +125,265 @@ export interface SddToolsDeps {
  */
 export function buildSddTools(deps: SddToolsDeps): Record<string, ToolDefinition> {
   const defaultModel = deps.defaultModel ?? "claude-3-5-sonnet";
+  const captureFingerprint = deps.captureFingerprint ?? captureWorktreeFingerprint;
+  const ownerTokens = new Map<string, string>();
+  const projectInitLockChangeName = "__sdd_project_init_lock__";
+  const artifactPhaseByName = {
+    explore: "sdd-explore",
+    proposal: "sdd-propose",
+    spec: "sdd-spec",
+    design: "sdd-design",
+    tasks: "sdd-tasks",
+    apply: "sdd-apply",
+    verifyReport: "sdd-verify",
+    archiveReport: "sdd-archive",
+  } as const;
+  const artifacts = Object.keys(artifactPhaseByName) as Array<keyof typeof artifactPhaseByName>;
 
   const resolveProjectHash = (projectRoot: string): string =>
     canonicalizeProjectRoot(projectRoot).projectRootHash;
+
+  const stateIdentity = (projectRoot: string, changeName: string): string =>
+    `${resolveProjectHash(projectRoot)}/${changeName}`;
+
+  const assertPublicChangeName = (changeName: string): void => {
+    if (changeName.startsWith("__sdd_")) {
+      throw new Error(`SDD_CHANGE_NAME_RESERVED: '${changeName}' is reserved for internal SDD state.`);
+    }
+  };
+
+  const ensureChangeState = async (projectRoot: string, changeName: string): Promise<SddChangeState> => {
+    const existing = await deps.changeStateStore.readChangeState(projectRoot, changeName);
+    if (existing !== null) return existing;
+    return deps.changeStateStore.writeChangeState({ projectRoot, changeName, artifactIndex: [] }, 0);
+  };
+
+  const loadArtifactContents = async (projectRootHash: string, changeName: string) => {
+    const reads = await Promise.all(
+      artifacts.map(async (artifact) => [artifact, await deps.store.readArtifact(changeArtifactKey(projectRootHash, changeName, artifact))] as const),
+    );
+    return Object.fromEntries(reads) as Record<(typeof artifacts)[number], string | null>;
+  };
+
+  const loadStatus = async (projectRoot: string, changeName: string, allIds: readonly string[]) => {
+    const projectRootHash = resolveProjectHash(projectRoot);
+    const [state, data, artifactContents] = await Promise.all([
+      deps.changeStateStore.readChangeState(projectRoot, changeName),
+      readCheckpointData(deps.store, projectRootHash, changeName),
+      loadArtifactContents(projectRootHash, changeName),
+    ]);
+    const blockedReasons = state?.lock === undefined ? [] : [`Phase '${state.lock.phase}' is currently in flight.`];
+    return assembleStatus({
+      changeName,
+      projectRoot,
+      artifactContents,
+      allIds,
+      checkpoints: data.checkpoints,
+      inFlightPhase: state?.lock?.phase ?? null,
+      blockedReasons,
+      verifyReportHasUnresolvedCritical: hasUnresolvedCriticalFinding(artifactContents.verifyReport),
+      ...(data.blockedOn !== undefined ? { blockedOn: data.blockedOn } : {}),
+    });
+  };
 
   const sddStatus: ToolDefinition = tool({
     description:
       "Compute the unified SDD status for a named change: artifacts present/missing, dependency-graph readiness per phase, blockedReasons, nextRecommended, and checkpoint progress. Read-only.",
     args: {
       projectRoot: tool.schema.string().describe("Absolute path to the project root."),
-      changeName: tool.schema.string().describe("The change slug to report status for."),
-      allIds: tool.schema.array(tool.schema.string()).describe("All scenario ids for the change (from tasks.md)."),
-      verifyReportHasUnresolvedCritical: tool.schema
-        .boolean()
-        .optional()
-        .describe("Whether the verify report carries an unresolved CRITICAL finding."),
+      changeName: tool.schema.string().optional().describe("Optional change slug to report a selected change."),
+      allIds: tool.schema.array(tool.schema.string()).optional().describe("All scenario ids for the change (from tasks.md)."),
     },
     async execute(args) {
+      if (args.changeName !== undefined) assertPublicChangeName(args.changeName);
       const projectRootHash = resolveProjectHash(args.projectRoot);
-      const data = await readCheckpointData(deps.store, projectRootHash, args.changeName);
-      const read = async (artifact: string): Promise<string | null> => {
-        const key = changeArtifactKey(projectRootHash, args.changeName, artifact);
-        return deps.store.readArtifact(key);
-      };
-      const [explore, proposal, spec, design, tasks, verifyReport, archiveReport] = await Promise.all([
-        read("explore"),
-        read("proposal"),
-        read("spec"),
-        read("design"),
-        read("tasks"),
-        read("verifyReport"),
-        read("archiveReport"),
-      ]);
-      const status = assembleStatus({
-        changeName: args.changeName,
-        projectRoot: args.projectRoot,
-        artifactContents: { explore, proposal, spec, design, tasks, verifyReport, archiveReport },
-        allIds: args.allIds,
-        checkpoints: data.checkpoints,
-        inFlightPhase: null,
-        blockedReasons: [],
-        ...(args.verifyReportHasUnresolvedCritical !== undefined
-          ? { verifyReportHasUnresolvedCritical: args.verifyReportHasUnresolvedCritical }
-          : {}),
-      });
+      if (args.changeName === undefined) {
+        const [initialized, states] = await Promise.all([
+          isProjectInitialized(deps.store, projectRootHash),
+          deps.changeStateStore.listChangeStates(args.projectRoot),
+        ]);
+        const changes = await Promise.all(states
+          .filter((state) => state.changeName !== projectInitLockChangeName)
+          .map(async (state) => {
+          const status = await loadStatus(args.projectRoot, state.changeName, []);
+          return { changeName: state.changeName, nextRecommended: status.nextRecommended };
+          }));
+        return { output: JSON.stringify(assembleDiscoveryStatus(args.projectRoot, initialized, changes), null, 2) };
+      }
+      const status = await loadStatus(args.projectRoot, args.changeName, args.allIds ?? []);
       return { output: JSON.stringify(status, null, 2) };
     },
   });
 
-  const sddComposePhasePrompt: ToolDefinition = tool({
+const sddComposePhasePrompt: ToolDefinition = tool({
     description:
       "Compose the prompt for a single SDD phase, acquiring the dispatch lock. Returns the subagentType grammar string and the composed prompt body.",
     args: {
       phase: tool.schema.string().describe("The phase name, e.g. sdd-explore, sdd-apply, sdd-verify."),
+      projectRoot: tool.schema.string().describe("Absolute path to the project root."),
+      changeName: tool.schema.string().describe("The change slug to compose."),
       modelReference: tool.schema.string().describe("Canonical model reference (provider/model)."),
-      upstreamArtifacts: tool.schema
-        .record(tool.schema.string(), tool.schema.string())
-        .optional()
-        .describe("Map of artifact name → content to inline."),
-      projectConfig: tool.schema
-        .record(tool.schema.string(), tool.schema.unknown())
-        .optional()
-        .describe("Merged project config (testingSkill, etc.)."),
-      currentInFlightPhase: tool.schema.string().nullable().optional().describe("Current in-flight phase (for lock acquire)."),
     },
     async execute(args) {
+      assertPublicChangeName(args.changeName);
+      if (!Object.hasOwn(PHASE_MUTATING_TABLE, args.phase)) {
+        throw new Error(`SDD_PHASE_INVALID: '${args.phase}' is not a supported SDD phase.`);
+      }
+      let projectInitLock: SddChangeState | null = null;
+      let projectInitOwnerToken: string | null = null;
+      const projectInitOwnerKey = stateIdentity(args.projectRoot, projectInitLockChangeName);
+      let sentinelReclaimed = false;
+      if (args.phase === "sdd-init") {
+        // Final-review finding #1 — the project-global init sentinel is
+        // BOUND to the change that acquired it. A different change trying
+        // to acquire, reclaim, or recover a sentinel currently held by
+        // another change receives `SddChangeStateSentinelBindingConflictError`
+        // at the port layer. We pass `args.changeName` as `boundChangeName`
+        // on every acquire/reclaim so the binding is set on first acquire
+        // and verified on every subsequent reclaim.
+        projectInitOwnerToken = ownerTokens.get(projectInitOwnerKey) ?? randomUUID();
+        try {
+          const projectInitState = await ensureChangeState(args.projectRoot, projectInitLockChangeName);
+          projectInitLock = await deps.changeStateStore.acquireChangeStateLock(
+            args.projectRoot,
+            projectInitLockChangeName,
+            "sdd-init",
+            projectInitOwnerToken,
+            projectInitState.version,
+            args.changeName,
+          );
+        } catch (error) {
+          if (error instanceof SddChangeStateLockConflictError) {
+            const latest = await deps.changeStateStore.readChangeState(args.projectRoot, projectInitLockChangeName);
+            if (latest?.lock?.phase === "sdd-init" && latest.boundChangeName === args.changeName) {
+              projectInitOwnerToken = randomUUID();
+              projectInitLock = await deps.changeStateStore.reclaimChangeStateLock(
+                args.projectRoot,
+                projectInitLockChangeName,
+                "sdd-init",
+                projectInitOwnerToken,
+                latest.version,
+                args.changeName,
+              );
+              sentinelReclaimed = true;
+            } else {
+              throw error;
+            }
+          } else {
+            throw error;
+          }
+        }
+        ownerTokens.set(projectInitOwnerKey, projectInitOwnerToken);
+      }
+      const ownerKey = stateIdentity(args.projectRoot, args.changeName);
+      let ownerToken = ownerTokens.get(ownerKey) ?? randomUUID();
+      let lockedState: SddChangeState;
+      let reclaimed = false;
+      try {
+        const state = await ensureChangeState(args.projectRoot, args.changeName);
+        lockedState = await deps.changeStateStore.acquireChangeStateLock(
+          args.projectRoot,
+          args.changeName,
+          args.phase,
+          ownerToken,
+          state.version,
+        );
+      } catch (error) {
+// SPEC DL-6 — passive same-phase reclaim. A freshly constructed tool
+      // surface composing the SAME phase as a stuck lock atomically replaces
+      // the prior owner token (the previous process is presumed dead) instead
+      // of refusing. A DIFFERENT phase still surfaces the typed conflict so
+      // unrelated runners remain blocked. Reviewer finding #1 extends this
+      // to the project-global init sentinel: an sdd-init compose transparently
+      // reclaims the sentinel if it is held by sdd-init, and the response
+      // carries `sentinelReclaimed: true` so the operator can observe it.
+      if (error instanceof SddChangeStateLockConflictError) {
+        const latest = await deps.changeStateStore.readChangeState(args.projectRoot, args.changeName);
+          if (latest?.lock?.phase === args.phase) {
+            ownerToken = randomUUID();
+            lockedState = await deps.changeStateStore.reclaimChangeStateLock(
+              args.projectRoot,
+              args.changeName,
+              args.phase,
+              ownerToken,
+              latest.version,
+            );
+            reclaimed = true;
+          } else {
+            if (projectInitLock !== null && projectInitOwnerToken !== null) {
+              await deps.changeStateStore.releaseChangeStateLock(
+                args.projectRoot,
+                projectInitLockChangeName,
+                projectInitOwnerToken,
+                projectInitLock.version,
+              );
+              ownerTokens.delete(projectInitOwnerKey);
+            }
+            throw error;
+          }
+        } else {
+          if (projectInitLock !== null && projectInitOwnerToken !== null) {
+            await deps.changeStateStore.releaseChangeStateLock(
+              args.projectRoot,
+              projectInitLockChangeName,
+              projectInitOwnerToken,
+              projectInitLock.version,
+            );
+            ownerTokens.delete(projectInitOwnerKey);
+          }
+          throw error;
+        }
+      }
+      ownerTokens.set(ownerKey, ownerToken);
+      let baseline: WorktreeFingerprint;
+      if (reclaimed && lockedState.baselineFingerprint !== undefined) {
+        // SPEC DL-6 — passive same-phase reclaim. The original baseline was
+        // captured by the first acquire of THIS phase; reusing it keeps the
+        // worktree-fingerprint delta meaningful across the crash boundary so
+        // unexpected writes from the crashed dispatch are still reported.
+        baseline = JSON.parse(lockedState.baselineFingerprint) as WorktreeFingerprint;
+      } else {
+        baseline = await captureFingerprint(args.projectRoot);
+      }
+      const preparedState = await deps.changeStateStore.updateOwnedChangeState({
+        projectRoot: lockedState.projectRoot,
+        changeName: lockedState.changeName,
+        artifactIndex: lockedState.artifactIndex,
+        baselineFingerprint: JSON.stringify(baseline),
+      }, ownerToken, lockedState.version);
+      const projectConfig = await deps.store.readCheckpoint(initConfigKey(resolveProjectHash(args.projectRoot)));
+      const upstreamArtifacts = Object.fromEntries(
+        await Promise.all(preparedState.artifactIndex.map(async (artifact) => [
+          artifact,
+          await deps.store.readArtifact(changeArtifactKey(resolveProjectHash(args.projectRoot), args.changeName, artifact)),
+        ] as const)),
+      ) as Record<string, string | null>;
       const result = composePhasePrompt({
         phase: args.phase,
         modelReference: args.modelReference,
-        upstreamArtifacts: args.upstreamArtifacts ?? {},
-        projectConfig: (args.projectConfig ?? null) as Exclude<
+        upstreamArtifacts: Object.fromEntries(
+          Object.entries(upstreamArtifacts).filter((entry): entry is [string, string] => entry[1] !== null),
+        ),
+        projectConfig: (projectConfig?.content ?? null) as Exclude<
           Parameters<typeof composePhasePrompt>[0]["projectConfig"],
           undefined
         >,
         // Spread conditionally: under exactOptionalPropertyTypes an explicit
         // `undefined` is not assignable to an optional property.
         ...(deps.skillResolver !== undefined ? { skillResolver: deps.skillResolver } : {}),
-        currentInFlightPhase: args.currentInFlightPhase ?? null,
+        currentInFlightPhase: null,
       });
       return {
         output: JSON.stringify(
-          { subagentType: result.subagentType, prompt: result.prompt, inFlightPhase: result.inFlightPhase, mutating: result.mutating },
+          {
+            subagentType: result.subagentType,
+            prompt: result.prompt,
+            inFlightPhase: result.inFlightPhase,
+            mutating: result.mutating,
+            worktreeFingerprint: baseline,
+            ...(reclaimed ? { lockReclaimed: true } : {}),
+            ...(sentinelReclaimed ? { sentinelReclaimed: true } : {}),
+          },
           null,
           2,
         ),
@@ -151,22 +397,95 @@ export function buildSddTools(deps: SddToolsDeps): Record<string, ToolDefinition
     args: {
       projectRoot: tool.schema.string().describe("Absolute path to the project root."),
       changeName: tool.schema.string().describe("The change slug."),
-      artifact: tool.schema.string().describe("Artifact name (explore, proposal, spec, design, tasks, verifyReport, archiveReport)."),
+      artifact: tool.schema.string().describe("Artifact name (explore, proposal, spec, design, tasks, apply, verifyReport, archiveReport)."),
       content: tool.schema.string().describe("The artifact content."),
-      phase: tool.schema.string().optional().describe("Phase that produced this artifact (for mutating detection)."),
-      currentInFlightPhase: tool.schema.string().nullable().optional().describe("Current in-flight phase to release."),
     },
-    async execute(args) {
-      const projectRootHash = resolveProjectHash(args.projectRoot);
-      const key = changeArtifactKey(projectRootHash, args.changeName, args.artifact);
-      const result = await saveArtifact(
-        deps.store,
-        key,
-        args.content,
-        args.currentInFlightPhase ?? null,
-        args.phase !== undefined ? { phase: args.phase } : undefined,
+async execute(args) {
+assertPublicChangeName(args.changeName);
+      const ownerKey = stateIdentity(args.projectRoot, args.changeName);
+      const ownerToken = ownerTokens.get(ownerKey);
+      if (ownerToken === undefined) {
+        // No in-memory token at all — fail closed before reading durable
+        // state so we surface the same error shape regardless of whether a
+        // lock is durably held.
+        throw new SddChangeStateLockConflictError(undefined, "save");
+      }
+      const expectedPhase = artifactPhaseByName[args.artifact as keyof typeof artifactPhaseByName];
+      if (expectedPhase === undefined) {
+        throw new Error(`SDD_ARTIFACT_INVALID: '${args.artifact}' is not a writable SDD artifact.`);
+      }
+      // Pre-flight read: verify the durable owner AND gather the
+      // baseline fingerprint + lock phase for the unexpected-writes
+      // check. This read is NOT atomic with the eventual write; the
+      // TOCTOU window for the ARTIFACT WRITE is closed below by
+      // `persistArtifactWithOwnership` (final-review finding #3).
+      const verified = await deps.changeStateStore.verifyOwnedLock(
+        args.projectRoot,
+        args.changeName,
+        ownerToken,
       );
-      return { output: JSON.stringify(result, null, 2) };
+      if (verified.lock === undefined || verified.lock.phase !== expectedPhase) {
+        throw new Error(
+          `SDD_ARTIFACT_PHASE_MISMATCH: '${args.artifact}' belongs to '${expectedPhase}', not held phase '${verified.lock?.phase ?? "<none>"}'.`,
+        );
+      }
+      let baseline: WorktreeFingerprint;
+      let current: WorktreeFingerprint;
+      try {
+        if (verified.baselineFingerprint === undefined) throw new Error("missing durable baseline fingerprint");
+        baseline = JSON.parse(verified.baselineFingerprint) as WorktreeFingerprint;
+        current = await captureFingerprint(args.projectRoot);
+      } catch {
+        return { output: JSON.stringify({ ok: false, inFlightPhase: verified.lock!.phase, unexpectedWrites: true }, null, 2) };
+      }
+      if (
+        baseline.gitProbeFailed ||
+        current.gitProbeFailed ||
+        compareWorktreeFingerprints(baseline, current, isPhaseMutating(verified.lock!.phase)).unexpectedWrites
+      ) {
+        return { output: JSON.stringify({ ok: false, inFlightPhase: verified.lock!.phase, unexpectedWrites: true }, null, 2) };
+      }
+      // Final-review finding #3 — atomic ownership + artifact persistence.
+      // Wraps verify + write + readback + state update + lock release in a
+      // single SQLite transaction. A concurrent reclaim that lands
+      // between the pre-flight read above and the atomic commit advances
+      // the durable version, so the conditional write fails and the
+      // transaction rolls back the artifact insert. There is no path
+      // that persists the artifact without first proving ownership holds
+      // at commit time.
+      //
+      // The atomic operation lives on the ARTIFACT-store port so a test
+      // fixture like `ArtifactFaultStore` can intercept the entire
+      // atomic operation and exercise the failure paths (write-failure,
+      // readback-failure) at the right seam.
+      const projectRootHash = resolveProjectHash(args.projectRoot);
+      const artifactKey = changeArtifactKey(projectRootHash, args.changeName, args.artifact);
+      try {
+        await deps.store.persistArtifactWithOwnership(
+          args.projectRoot,
+          args.changeName,
+          ownerToken,
+          artifactKey,
+          args.content,
+          args.artifact,
+        );
+      } catch (error) {
+        // Lock / version conflict raised as the typed conflict so the
+        // caller can surface it. Other failures (read-back mismatch,
+        // unexpected-writes pre-flight, etc.) surface as `{ ok: false }`
+        // — the transaction has rolled back, no artifact is persisted,
+        // and the lock is RETAINED (the atomic operation releases only on
+        // successful commit).
+        if (error instanceof SddChangeStateLockConflictError) {
+          throw error;
+        }
+        if (error instanceof SddChangeStateVersionConflictError) {
+          throw new SddChangeStateLockConflictError(undefined, expectedPhase);
+        }
+        return { output: JSON.stringify({ ok: false, inFlightPhase: expectedPhase }, null, 2) };
+      }
+      ownerTokens.delete(ownerKey);
+      return { output: JSON.stringify({ ok: true, inFlightPhase: null, artifact: args.artifact }, null, 2) };
     },
   });
 
@@ -204,13 +523,67 @@ export function buildSddTools(deps: SddToolsDeps): Record<string, ToolDefinition
       "Merge detected facts with user answers (user answers win) and persist the project config at sdd-init/{projectRootHash}. IR-6/IR-12.",
     args: {
       projectRoot: tool.schema.string().describe("Absolute path to the project root."),
+      changeName: tool.schema.string().describe("The change whose held sdd-init lock authorizes this config save."),
       detection: tool.schema.unknown().describe("The InitDetectionResult from sdd_init_questions."),
       userAnswers: tool.schema
         .record(tool.schema.string(), tool.schema.unknown())
         .optional()
         .describe("User answers (win over detection on conflict)."),
     },
-    async execute(args) {
+async execute(args) {
+      assertPublicChangeName(args.changeName);
+      const ownerKey = stateIdentity(args.projectRoot, args.changeName);
+      const ownerToken = ownerTokens.get(ownerKey);
+      const projectInitOwnerKey = stateIdentity(args.projectRoot, projectInitLockChangeName);
+      const projectInitOwnerToken = ownerTokens.get(projectInitOwnerKey);
+      if (ownerToken === undefined || projectInitOwnerToken === undefined) {
+        // No in-memory token for either lock — fail closed before reading
+        // durable state so we surface the same error shape regardless of
+        // whether a lock is durably held.
+        throw new SddChangeStateLockConflictError(undefined, "sdd-init");
+      }
+      // Final-review finding #2 — atomically validate BOTH the user
+      // change and the bound project-init sentinel BEFORE any config
+      // checkpoint write. A stale init runner whose in-memory token map
+      // is out of date is refused with the typed conflict (and the
+      // sentinel binding mismatch surfaces as
+      // `SddChangeStateSentinelBindingConflictError`) before
+      // `saveInitConfig` can land any persisted config mutation.
+      let validated;
+      try {
+        validated = await deps.changeStateStore.verifyInitRoundOwnership(
+          args.projectRoot,
+          args.changeName,
+          projectInitLockChangeName,
+          ownerToken,
+          projectInitOwnerToken,
+        );
+      } catch (error) {
+        throw error;
+      }
+      const state = validated.userState;
+      if (state.lock === undefined || state.lock.phase !== "sdd-init") {
+        throw new SddChangeStateLockConflictError(
+          state.lock === undefined ? undefined : { phase: state.lock.phase },
+          "sdd-init",
+        );
+      }
+      let baseline: WorktreeFingerprint;
+      let current: WorktreeFingerprint;
+      try {
+        if (state.baselineFingerprint === undefined) throw new Error("missing durable baseline fingerprint");
+        baseline = JSON.parse(state.baselineFingerprint) as WorktreeFingerprint;
+        current = await captureFingerprint(args.projectRoot);
+      } catch {
+        return { output: JSON.stringify({ ok: false, inFlightPhase: state.lock!.phase, unexpectedWrites: true }, null, 2) };
+      }
+      if (
+        baseline.gitProbeFailed ||
+        current.gitProbeFailed ||
+        compareWorktreeFingerprints(baseline, current, isPhaseMutating(state.lock!.phase)).unexpectedWrites
+      ) {
+        return { output: JSON.stringify({ ok: false, inFlightPhase: state.lock!.phase, unexpectedWrites: true }, null, 2) };
+      }
       const projectRootHash = resolveProjectHash(args.projectRoot);
       const saved = await saveInitConfig(
         deps.store,
@@ -218,7 +591,21 @@ export function buildSddTools(deps: SddToolsDeps): Record<string, ToolDefinition
         args.detection as Parameters<typeof saveInitConfig>[2],
         (args.userAnswers ?? {}) as Parameters<typeof saveInitConfig>[3],
       );
-      return { output: JSON.stringify(saved, null, 2) };
+      await deps.changeStateStore.releaseChangeStateLock(
+        args.projectRoot,
+        args.changeName,
+        ownerToken,
+        validated.userState.version,
+      );
+      await deps.changeStateStore.releaseChangeStateLock(
+        args.projectRoot,
+        projectInitLockChangeName,
+        projectInitOwnerToken,
+        validated.sentinelState.version,
+      );
+      ownerTokens.delete(ownerKey);
+      ownerTokens.delete(projectInitOwnerKey);
+      return { output: JSON.stringify({ ...saved, inFlightPhase: null }, null, 2) };
     },
   });
 
@@ -242,6 +629,7 @@ export function buildSddTools(deps: SddToolsDeps): Record<string, ToolDefinition
       answer: tool.schema.string().optional().describe("For 'resume': the user's answer."),
     },
     async execute(args) {
+      assertPublicChangeName(args.changeName);
       const projectRootHash = resolveProjectHash(args.projectRoot);
       const base = { store: deps.store, projectRootHash, changeName: args.changeName, phase: args.phase };
 
@@ -281,6 +669,90 @@ export function buildSddTools(deps: SddToolsDeps): Record<string, ToolDefinition
     },
   });
 
+  // SPEC DL-6 — the EIGHTH SDD MCP tool. Explicit deliberate clear/release of
+  // a stuck dispatch lock. NEVER invoked automatically: it requires an
+  // explicit `reason` from the caller, returns a server-stamped audit
+  // record, and clears the durable lock so any phase (including the same
+  // one) can re-acquire.
+  //
+  // When the cleared lock was held by `sdd-init`, the recovery also clears
+  // the project-global `__sdd_project_init_lock__` sentinel (reviewer
+  // finding #1) so a subsequent init dispatch can proceed. The sentinel
+  // name is resolved internally; the public surface never accepts or
+  // surfaces a reserved name. The sentinel's audit record carries a
+  // cross-reference to the originating user change so downstream review can
+  // attribute the clear.
+  const sddRecoverPhaseLock: ToolDefinition = tool({
+    description:
+      "Explicitly clear a stuck dispatch lock with audit metadata. NEVER automatic. Caller supplies `reason`; the durable lock is removed and the audit record is returned so downstream review can attribute the clear.",
+    args: {
+      projectRoot: tool.schema.string().describe("Absolute path to the project root."),
+      changeName: tool.schema.string().describe("The change slug whose lock is being recovered."),
+      reason: tool.schema.string().min(1).describe("Caller-supplied reason recorded verbatim in the audit. Must be non-empty."),
+    },
+    async execute(args) {
+      assertPublicChangeName(args.changeName);
+      const ownerKey = stateIdentity(args.projectRoot, args.changeName);
+      const state = await deps.changeStateStore.readChangeState(args.projectRoot, args.changeName);
+      const currentVersion = state?.version ?? 0;
+      // Final-review finding #1 — pass `args.changeName` as the expected
+      // bound change name so the recovery of a sentinel bound to a
+      // different change is refused with a typed conflict.
+      const recovery = await deps.changeStateStore.recoverChangeStateLock(
+        args.projectRoot,
+        args.changeName,
+        currentVersion,
+        args.reason,
+        args.changeName,
+      );
+      // The held owner token (if any) is dropped because the lock is gone —
+      // any subsequent compose will re-acquire with a fresh token via the
+      // reclaim-or-acquire path in sdd_compose_phase_prompt.
+      ownerTokens.delete(ownerKey);
+
+      // Final-review finding #1 — recovery of an init change MUST also
+      // clear the project-global init sentinel, otherwise the sentinel
+      // remains held and a subsequent init dispatch cannot proceed. The
+      // sentinel is identified by the in-source constant
+      // `projectInitLockChangeName`, never via any user-supplied change
+      // name (the public surface rejects reserved names before reaching
+      // this branch). The sentinel recovery also passes
+      // `args.changeName` as `expectedBoundChangeName` so a sentinel
+      // currently bound to a DIFFERENT live init is refused with
+      // `SddChangeStateSentinelBindingConflictError` — the explicit
+      // clear/recovery operation MUST NOT clobber a sentinel held by a
+      // different change.
+      let sentinelAudit: import("../ports/sdd-artifact-store.port.js").SddChangeStateLockRecovery | null = null;
+      if (recovery.audit.priorLock?.phase === "sdd-init") {
+        const sentinelState = await deps.changeStateStore.readChangeState(args.projectRoot, projectInitLockChangeName);
+        if (sentinelState?.lock !== undefined) {
+          const sentinelRecovery = await deps.changeStateStore.recoverChangeStateLock(
+            args.projectRoot,
+            projectInitLockChangeName,
+            sentinelState.version,
+            `${args.reason} [sentinel-recovery from ${args.changeName}]`,
+            args.changeName,
+          );
+          sentinelAudit = sentinelRecovery.audit;
+          ownerTokens.delete(stateIdentity(args.projectRoot, projectInitLockChangeName));
+        }
+      }
+
+      return {
+        output: JSON.stringify(
+          {
+            ok: true,
+            inFlightPhase: null,
+            audit: recovery.audit,
+            ...(sentinelAudit !== null ? { sentinelAudit } : {}),
+          },
+          null,
+          2,
+        ),
+      };
+    },
+  });
+
   return {
     sdd_status: sddStatus,
     sdd_compose_phase_prompt: sddComposePhasePrompt,
@@ -289,5 +761,6 @@ export function buildSddTools(deps: SddToolsDeps): Record<string, ToolDefinition
     sdd_init_questions: sddInitQuestions,
     sdd_save_config: sddSaveConfig,
     sdd_checkpoint: sddCheckpoint,
+    sdd_recover_phase_lock: sddRecoverPhaseLock,
   };
 }

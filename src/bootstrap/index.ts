@@ -225,18 +225,30 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
     `Plugin loaded (cwd=${directory}). Background model refresh coordinator initialized.`,
   );
 
-  // SDD MCP tool surface: the seven tools the phase-agent system exposes to
-  // the LLM. The persistence backend is the SQLite-direct McpToolClient
-  // (Option B bridge) talking to the same agent-memory-mcp DB OpenCode spawns.
-  // Construction is defensive: if the SQLite bridge cannot resolve its DB
-  // path, the tools are omitted rather than crashing the whole plugin (the
-  // routing hook still works) — but a clear error is logged.
+// SDD MCP tool surface: the EIGHT tools the phase-agent system exposes to
+  // the LLM (versioned-contract surface — see
+  // `src/bootstrap/sdd-tools.ts` module header and the apply log under
+  // the versioned-contract section). The persistence backend is the
+  // SQLite-direct McpToolClient (Option B bridge) talking to the same
+  // agent-memory-mcp DB OpenCode spawns. Construction is defensive: if
+  // the SQLite bridge cannot resolve its DB path, the tools are omitted
+  // rather than crashing the whole plugin (the routing hook still works)
+  // — but a clear error is logged.
   let sddTools: Record<string, unknown> | undefined;
   try {
     const sddMcpClient = new SqliteMcpToolClient();
     const sddStore = new PmcSddArtifactStoreAdapter(sddMcpClient);
-    sddTools = buildSddTools({ store: sddStore });
-    logger.info("SDD MCP tool surface registered (7 tools).");
+    sddTools = buildSddTools({ store: sddStore, changeStateStore: sddStore });
+    // The eight-tool shape is a deliberate versioned-contract change vs
+    // the pre-recovery seven-tool design (design §2). The companion
+    // port changes (`boundChangeName` on the change-state port,
+    // `persistArtifactWithOwnership` on the artifact-store port,
+    // `verifyInitRoundOwnership` on the change-state port) are also
+    // documented at the module level in `src/bootstrap/sdd-tools.ts`
+    // and in the apply log under the versioned-contract section.
+    logger.info(
+      "SDD MCP tool surface registered (8 tools: sdd_status, sdd_compose_phase_prompt, sdd_save_artifact, sdd_parse_request, sdd_init_questions, sdd_save_config, sdd_checkpoint, sdd_recover_phase_lock).",
+    );
   } catch (err) {
     logger.error("SDD MCP tool surface disabled (persistence backend unavailable).", err);
   }
