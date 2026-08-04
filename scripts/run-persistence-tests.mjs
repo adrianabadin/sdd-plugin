@@ -52,7 +52,10 @@ const SUITE = [
   { file: "tests/dist-firstrun-probe.test.ts", needsDist: true },
   { file: "tests/c9-ctrls-save.bun.test.ts", runner: "bun" },
   { file: "tests/rapid-pricing-saves.test.ts" },
-  { file: "tests/sqlite-contention.test.ts" },
+{ file: "tests/sqlite-contention.test.ts" },
+  { file: "tests/sqlite-mcp-tool-client-occ.test.ts" },
+  { file: "tests/sdd-change-state.test.ts" },
+  { file: "tests/sdd-tools.integration.test.ts" },
   { file: "tests/persistence-guard.test.ts" },
 ];
 
