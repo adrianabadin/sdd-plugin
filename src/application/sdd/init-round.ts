@@ -3,6 +3,7 @@
  */
 
 import { initConfigKey } from "../../domain/sdd/sdd-keys.js";
+import { isDeepStrictEqual } from "node:util";
 import {
   detectProjectFacts,
   getInitQuestions,
@@ -17,6 +18,13 @@ export class SaveConfigBeforeDetectionError extends Error {
   constructor() {
     super("Refused sdd_save_config: detection must run before saving config");
     this.name = "SaveConfigBeforeDetectionError";
+  }
+}
+
+export class InitConfigReadbackMismatchError extends Error {
+  constructor(readonly key: string) {
+    super(`SDD_INIT_CONFIG_READBACK_MISMATCH: '${key}' did not read back the persisted config.`);
+    this.name = "InitConfigReadbackMismatchError";
   }
 }
 
@@ -53,6 +61,10 @@ export async function saveInitConfig(
 
   // IR-6: persisted at sdd-init/{projectRootHash}
   await store.writeCheckpoint(key, merged);
+  const readBack = await store.readCheckpoint(key);
+  if (!isDeepStrictEqual(readBack?.content, merged)) {
+    throw new InitConfigReadbackMismatchError(key);
+  }
   return merged;
 }
 
