@@ -21,6 +21,23 @@ import type { ModelRouteAliasTable } from "./model-route-resolver.js";
 
 export const NATURAL_MODEL_ALIASES: ModelRouteAliasTable = new Map<string, string>([
   ["gemini flash 3.6 tiered", "google/antigravity-gemini-3.6-flash-tiered"],
+  ["laguna s 2.1", "opencode/laguna-s-2.1-free"],
+  ["laguna", "opencode/laguna-s-2.1-free"],
+  ["antigravity gemini 3.6 flash tiered", "google/antigravity-gemini-3.6-flash-tiered"],
+  ["kimi 3", "kimi-for-coding/k3-256k"],
+  ["minimax 3", "minimax/MiniMax-M3"],
+  ["gpt 5.6 luna", "openai/gpt-5.6-luna"],
+  ["luna", "openai/gpt-5.6-luna"],
+  ["gpt 5.6 terra", "openai/gpt-5.6-terra"],
+  ["terra", "openai/gpt-5.6-terra"],
+  ["gpt 5.6 sol", "openai/gpt-5.6-sol"],
+  ["sol", "openai/gpt-5.6-sol"],
+  ["glm 5.2", "zai-coding-plan/glm-5.2"],
+  ["gemini 3.1 pro", "google/antigravity-gemini-pro-agent"],
+  ["opus 5", "anthropic/claude-opus-5"],
+  ["sonnet 5", "anthropic/claude-sonnet-5"],
+  ["deepseek 4 flash", "opencode-go/deepseek-v4-flash"],
+  ["gemini 3 flash preview", "google/gemini-3-flash-preview"],
 ]);
 
 Object.freeze(NATURAL_MODEL_ALIASES);

@@ -1,0 +1,49 @@
+{
+  "mcp": {
+    "servers": {
+      "agent-memory": {
+        "enabled": true,
+        "environment": {
+          "MEMORY_DB_PATH": "C:\\Users\\aabad\\documents\\code\\ia\\sdd-plugin2\\.planning\\project-memory-context\\memory-db",
+          "EMBEDDING_CACHE_PATH": "C:\\Users\\aabad\\documents\\code\\ia\\sdd-plugin2\\.planning\\project-memory-context\\embedding-cache"
+        },
+        "command": "npx",
+        "args": [
+          "-y",
+          "@aabadin/agent-memory-mcp"
+        ],
+        "type": "stdio",
+        "enable": false
+      },
+      "pmc-query": {
+        "enabled": true,
+        "environment": {
+          "PMC_PROJECT_ROOT": "C:\\Users\\aabad\\documents\\code\\ia\\sdd-plugin2"
+        },
+        "command": "npx",
+        "args": [
+          "--yes",
+          "--package",
+          "@aabadin/project-memory-context",
+          "pmc-query-server"
+        ],
+        "type": "stdio"
+      },
+      "pmc-agent-memory": {
+        "enabled": true,
+        "environment": {
+          "MEMORY_DB_PATH": "C:\\Users\\aabad\\documents\\code\\ia\\sdd-plugin2\\.planning\\project-memory-context\\memory-db",
+          "EMBEDDING_MODEL": "Xenova/bge-m3",
+          "EMBEDDING_DIMENSIONS": "1024",
+          "EMBEDDING_POOLING": "cls"
+        },
+        "command": "npx",
+        "args": [
+          "-y",
+          "@aabadin/agent-memory-mcp"
+        ],
+        "type": "stdio"
+      }
+    }
+  }
+}

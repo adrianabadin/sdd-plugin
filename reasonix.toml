@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash=git log --oneline -15; echo \"===\"; git status --short | head -30; echo \"===\"; git branch -a | head", "Bash=grep -l \"engram\" ~/.claude.json ~/.config/opencode/opencode.json 2>/dev/null; grep -o '\"engram\"[^}]*}' ~/.claude.json 2>/dev/null | head -5; echo \"---\"; ls ~/.claude/ 2>/dev/null; echo \"---\"; env | grep -i -E \"engram|mem_\" | head", "Bash=ls /c/Users/aabad/AppData/Local/engram/bin/ 2>/dev/null; echo \"===\"; which engram mem_search mem_get_observation mem_save 2>/dev/null; engram --help 2>&1 | head -30"]

@@ -1,13 +1,73 @@
 {
   "schemaVersion": 1,
   "generatorVersion": "1.0.0",
-  "cap": 8,
+  "cap": 16,
   "sizeException": null,
   "routes": [
     {
       "baseTemplate": "sdd-mr-base",
       "providerId": "google",
       "modelId": "antigravity-gemini-3.6-flash-tiered"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-pro-agent"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "kimi-for-coding",
+      "modelId": "k3-256k"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "minimax",
+      "modelId": "MiniMax-M3"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-luna"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-terra"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-sol"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "zai-coding-plan",
+      "modelId": "glm-5.2"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "anthropic",
+      "modelId": "claude-opus-5"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "anthropic",
+      "modelId": "claude-sonnet-5"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "opencode-go",
+      "modelId": "deepseek-v4-flash"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "gemini-3-flash-preview"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "opencode",
+      "modelId": "laguna-s-2.1-free"
     }
   ]
 }

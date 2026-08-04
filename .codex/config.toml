@@ -76,3 +76,18 @@ args = ["-y", "@aabadin/agent-memory-mcp"]
 env = { MEMORY_DB_PATH = "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/memory-db", NPM_CONFIG_CACHE = "C:/Users/aabad/documents/code/ia/sdd-plugin2/.planning/project-memory-context/npm-cache" }
 startup_timeout_sec = 60
 tool_timeout_sec = 60
+
+[mcp_servers.agent-memory.tools.set_session_context]
+approval_mode = "approve"
+
+[mcp_servers.agent-memory.tools.recall]
+approval_mode = "approve"
+
+[mcp_servers.agent-memory.tools.find_related]
+approval_mode = "approve"
+
+[mcp_servers.agent-memory.tools.store]
+approval_mode = "approve"
+
+[mcp_servers.agent-memory.tools.store_session_summary]
+approval_mode = "approve"

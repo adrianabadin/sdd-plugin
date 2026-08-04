@@ -10,8 +10,12 @@
  *
  * Hard guarantees enforced here:
  *
- *   - Fleet default cap 8, hard max 16 (a committed `sizeException.reason`
- *     is required for 9..16 entries; >16 is rejected outright).
+ *   - Fleet default cap 8, hard max 24 (a committed `sizeException.reason`
+ *     is required for 9..24 entries; >24 is rejected outright). The hard
+ *     max is derived from ~20 connected models, one host per model (the
+ *     permission-tier design was abandoned after a spike showed OpenCode's
+ *     `permission` deny is bypassable via direct `pty_spawn`/`pty_write`),
+ *     plus slack -> 24.
  *   - 4 KiB descriptor budget per generated file.
  *   - Canonical containment: every generated/inspected path is realpath
  *     resolved and asserted to live under the workspace root; absolute
@@ -67,7 +71,7 @@ import { REQUIRED_OPENCODE_VERSION } from "./model-route-readiness.js";
 export const SCHEMA_VERSION = 1 as const;
 export const GENERATOR_VERSION = "1.1.0";
 export const ROUTING_NAMESPACE_VERSION = "sdd-mr-v1";
-export const HARD_MAX_ROUTES = 16;
+export const HARD_MAX_ROUTES = 24;
 export const FLEET_DEFAULT_CAP = 8;
 export const DESCRIPTOR_BUDGET_BYTES = 4 * 1024;
 export const LOCK_STALE_AFTER_MS = 30_000;
@@ -128,7 +132,7 @@ export class RouteCapExceededError extends DiskAgentGeneratorError {
     super(
       "ROUTE_CAP_EXCEEDED",
       `routes.json declares ${actual} entries but fleet cap is ${cap}` +
-        (cap === HARD_MAX_ROUTES ? "" : "; commit a sizeException.reason for 9..16 entries"),
+        (cap === HARD_MAX_ROUTES ? "" : `; commit a sizeException.reason for 9..${HARD_MAX_ROUTES} entries`),
       `actual=${actual};cap=${cap}`,
     );
     this.name = "RouteCapExceededError";

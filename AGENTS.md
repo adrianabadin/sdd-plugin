@@ -37,6 +37,20 @@ to drain those entries — that is the only step that requires LLM involvement.
 - **Default context depth**: Always use `depth=compact`. Use `extended` or `deep` ONLY when explicitly asked.
 - **`map-project --all`** is only needed for full reinstall or ground-up graph rebuild. Day-to-day, `refresh-context` keeps everything current.
 
+## Generación de Agentes Ruteados (Model Routing)
+
+Para habilitar e interceptar modelos por alias (como `"laguna s 2.1"`, `"laguna"` o `"gemini flash 3.6 tiered"`) o mediante la gramática explícita `model-route:v1|...`, ejecutá la generación manual de agentes:
+
+```bash
+npm run generate:model-routes
+```
+
+O usá el supervisor de ruteo para mantener los agentes y la atestación sincronizados:
+
+```bash
+npx tsx src/cli/model-route-boot.ts start .
+```
+
 ## Context Retrieval Rules
 
 | Situation | Command | Depth |

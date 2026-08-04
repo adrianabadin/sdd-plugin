@@ -36,14 +36,14 @@ export function resolveForeignAgentSources(
   }
 
   function addConfigRoot(root: string, labelPrefix: string, isWorkspace: boolean = false) {
-    pushFile(path.resolve(root, "opencode.json"), "foreign", labelPrefix ? "${labelPrefix} opencode.json" : "opencode.json");
-    pushFile(path.resolve(root, "opencode.jsonc"), "foreign", labelPrefix ? "${labelPrefix} opencode.jsonc" : "opencode.jsonc");
+    pushFile(path.resolve(root, "opencode.json"), "foreign", labelPrefix ? `${labelPrefix} opencode.json` : "opencode.json");
+    pushFile(path.resolve(root, "opencode.jsonc"), "foreign", labelPrefix ? `${labelPrefix} opencode.jsonc` : "opencode.jsonc");
     
     const opencodeDir = isWorkspace ? path.resolve(root, ".opencode") : root;
-    pushDir(path.resolve(opencodeDir, "agent"), "agent", isWorkspace ? "workspace-owned-candidate" : "foreign", labelPrefix ? "${labelPrefix} agent dir" : "agent dir");
-    pushDir(path.resolve(opencodeDir, "agents"), "agent", isWorkspace ? "workspace-owned-candidate" : "foreign", labelPrefix ? "${labelPrefix} agents dir" : "agents dir");
-    pushDir(path.resolve(opencodeDir, "mode"), "mode", "foreign", labelPrefix ? "${labelPrefix} mode dir" : "mode dir");
-    pushDir(path.resolve(opencodeDir, "modes"), "mode", "foreign", labelPrefix ? "${labelPrefix} modes dir" : "modes dir");
+    pushDir(path.resolve(opencodeDir, "agent"), "agent", isWorkspace ? "workspace-owned-candidate" : "foreign", labelPrefix ? `${labelPrefix} agent dir` : "agent dir");
+    pushDir(path.resolve(opencodeDir, "agents"), "agent", isWorkspace ? "workspace-owned-candidate" : "foreign", labelPrefix ? `${labelPrefix} agents dir` : "agents dir");
+    pushDir(path.resolve(opencodeDir, "mode"), "mode", "foreign", labelPrefix ? `${labelPrefix} mode dir` : "mode dir");
+    pushDir(path.resolve(opencodeDir, "modes"), "mode", "foreign", labelPrefix ? `${labelPrefix} modes dir` : "modes dir");
   }
 
   // 1 & 2: Workspace root

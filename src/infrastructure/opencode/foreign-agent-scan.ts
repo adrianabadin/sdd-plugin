@@ -49,7 +49,7 @@ export function scanForForeignAgentDefinitions(input: {
 
   function checkName(name: string, sourceLabel: string, filePath?: string, ownership?: string) {
     if (name.toLowerCase().startsWith(prefixLower)) {
-      if (ownership === "workspace-owned-candidate" && filePath) {
+      if (filePath) {
         const canonical = path.resolve(filePath).toLowerCase();
         if (ownedMap.has(canonical)) {
           const expectedHash = ownedMap.get(canonical);
@@ -61,6 +61,9 @@ export function scanForForeignAgentDefinitions(input: {
           } catch (e: any) {
              report("inspection-failure", sourceLabel, "Failed to read owned file", name);
           }
+          return;
+        }
+        if (ownership === "workspace-owned-candidate" && filePath) {
           return;
         }
       }

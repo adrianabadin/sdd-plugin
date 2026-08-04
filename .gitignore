@@ -53,3 +53,6 @@ scratch/
 Thumbs.db
 .vscode/
 .idea/
+
+# Reasonix config dumps (key-shaped filenames — never commit)
+sk-*

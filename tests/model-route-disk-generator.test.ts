@@ -30,7 +30,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const SCHEMA_VERSION = 1 as const;
 const GENERATOR_VERSION = "1.1.0";
 const ROUTING_NAMESPACE_VERSION = "sdd-mr-v1";
-const HARD_MAX_ROUTES = 16;
+const HARD_MAX_ROUTES = 24;
 const FLEET_DEFAULT_CAP = 8;
 const DESCRIPTOR_BUDGET_BYTES = 4 * 1024;
 const MANIFEST_RELATIVE = path.join(".opencode", "sdd-model-routing", "manifest.json");
@@ -185,17 +185,35 @@ async function run(): Promise<void> {
   assert.equal(acceptedWithException.sizeException?.reason.length, "tiered fleet needs 9 entries".length);
   assert.match(acceptedWithException.sizeException?.reason ?? "", /\S+/, "sizeException.reason is non-empty");
 
-  // 6. >16 routes are ALWAYS rejected even with sizeException
+  // 6. 17 routes WITH committed sizeException.reason are accepted (hard max is 24)
   const seventeenRoutes = Array.from({ length: 17 }, (_, i) => makeRoute(i + 1));
+  const acceptedSeventeen = decodeRoutesConfig(
+    makeRoutesConfig(seventeenRoutes, {
+      sizeException: { reason: "tiered fleet needs 17 entries", approvedBy: "operator" },
+    }),
+  );
+  assert.equal(acceptedSeventeen.routes.length, 17, "17 routes accepted under hard max with sizeException");
+
+  // 6a. 24 routes (new hard max) WITH sizeException are accepted
+  const twentyFourRoutes = Array.from({ length: 24 }, (_, i) => makeRoute(i + 1));
+  const acceptedTwentyFour = decodeRoutesConfig(
+    makeRoutesConfig(twentyFourRoutes, {
+      sizeException: { reason: "tiered fleet needs 24 entries", approvedBy: "operator" },
+    }),
+  );
+  assert.equal(acceptedTwentyFour.routes.length, 24, "24 routes accepted at new hard max with sizeException");
+
+  // 6b. >24 routes are ALWAYS rejected even with sizeException
+  const twentyFiveRoutes = Array.from({ length: 25 }, (_, i) => makeRoute(i + 1));
   assert.throws(
     () =>
       decodeRoutesConfig(
-        makeRoutesConfig(seventeenRoutes, {
+        makeRoutesConfig(twentyFiveRoutes, {
           sizeException: { reason: "should not help", approvedBy: "operator" },
         }),
       ),
     RouteCapExceededError,
-    "17 routes are rejected even with sizeException",
+    "25 routes are rejected even with sizeException",
   );
 
   // 7. Default cap is exactly 8 when no cap provided
