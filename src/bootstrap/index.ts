@@ -32,6 +32,7 @@ import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 import { SqliteMcpToolClient } from "../infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
 import { PmcSddArtifactStoreAdapter } from "../infrastructure/pmc/pmc-sdd-artifact-store.adapter.js";
+import { createSkillRegistryResolver } from "../infrastructure/skills/skill-registry-resolver.adapter.js";
 import { buildSddTools } from "./sdd-tools.js";
 
 /**
@@ -238,7 +239,18 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
   try {
     const sddMcpClient = new SqliteMcpToolClient();
     const sddStore = new PmcSddArtifactStoreAdapter(sddMcpClient);
-    sddTools = buildSddTools({ store: sddStore, changeStateStore: sddStore });
+    // C-N1 remediation (part A2) — without a real skillResolver here, the
+    // default resolver in `composePhasePrompt` always returns null (PC-6),
+    // so `sdd-tasks` and `sdd-apply` (the only phases with mandatory
+    // skills) could never successfully compose in production. The resolver
+    // reads `<directory>/.atl/skill-registry.md` — see
+    // `src/infrastructure/skills/skill-registry-resolver.adapter.ts` for
+    // the design-ambiguity note on the registry file location/format.
+    sddTools = buildSddTools({
+      store: sddStore,
+      changeStateStore: sddStore,
+      skillResolver: createSkillRegistryResolver(directory || process.cwd()),
+    });
     // The eight-tool shape is a deliberate versioned-contract change vs
     // the pre-recovery seven-tool design (design §2). The companion
     // port changes (`boundChangeName` on the change-state port,

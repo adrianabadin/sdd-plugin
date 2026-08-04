@@ -68,6 +68,7 @@
     "tests/sdd-entry-flow.test.ts",
     "tests/sdd-executor-contract.test.ts",
     "tests/sdd-tools.integration.test.ts",
+    "tests/sdd-skill-registry.test.ts",
     "tests/sqlite-mcp-tool-client.test.ts",
     "tests/sqlite-mcp-tool-client-occ.test.ts",
     "tests/_helpers/sqlite-mcp-tool-client-occ-worker.ts",
