@@ -58,6 +58,12 @@ class FakeStore implements SddArtifactStorePort {
     const val = this.checkpoints.get(key);
     return val ? { content: JSON.parse(JSON.stringify(val.content)), version: val.version } : null;
   }
+  /** Final-review finding #3 — stub for the atomic persist seam. The
+   *  tests that use this fake exercise SS-9 / SS-10, NOT atomic
+   *  persistence; throwing here makes a misuse loud rather than silent. */
+  async persistArtifactWithOwnership(): Promise<never> {
+    throw new Error("FakeStore.persistArtifactWithOwnership is not exercised by these tests");
+  }
 }
 
 class FakeMcpToolClient implements McpToolClientPort {

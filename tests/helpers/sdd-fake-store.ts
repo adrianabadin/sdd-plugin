@@ -17,6 +17,7 @@ import type {
   CheckpointRecord,
   CheckpointWriteResult,
   SddArtifactStorePort,
+  SddChangeState,
 } from "../../src/ports/sdd-artifact-store.port.js";
 
 export class SddFakeStore implements SddArtifactStorePort {
@@ -67,5 +68,52 @@ export class SddFakeStore implements SddArtifactStorePort {
   injectConcurrentWrite(key: string, content: unknown): void {
     const version = this.nextVersion++;
     this.checkpoints.set(key, { content: JSON.parse(JSON.stringify(content)), version });
+  }
+
+  /**
+   * Final-review finding #3 — default implementation for the atomic
+   * persist. The SddFakeStore does not implement real atomicity; it
+   * simply writes the artifact, indexes it, and returns a synthetic
+   * SddChangeState. Suites that need to exercise the real atomic
+   * boundary (sdd-change-state, sdd-tools.integration) use the
+   * SQLite-direct adapter instead.
+   */
+  async persistArtifactWithOwnership(
+    projectRoot: string,
+    changeName: string,
+    _ownerToken: string,
+    artifactKey: string,
+    artifactContent: string,
+    artifactName: string,
+  ): Promise<SddChangeState> {
+    await this.writeArtifact(artifactKey, artifactContent);
+    const existing = this.checkpoints.get(`sdd-state:${changeName}`);
+    const prevArtifactIndex: readonly string[] = Array.isArray(
+      (existing?.content as { artifactIndex?: unknown } | undefined)?.artifactIndex,
+    )
+      ? ((existing?.content as { artifactIndex: readonly string[] }).artifactIndex)
+      : [];
+    const prevBaseline =
+      (existing?.content as { baselineFingerprint?: string } | undefined)?.baselineFingerprint;
+    const prevBound =
+      (existing?.content as { boundChangeName?: string } | undefined)?.boundChangeName;
+    const nextArtifactIndex: readonly string[] = prevArtifactIndex.includes(artifactName)
+      ? [...prevArtifactIndex]
+      : [...prevArtifactIndex, artifactName];
+    const nextContent: Record<string, unknown> = {
+      projectRoot,
+      changeName,
+      artifactIndex: nextArtifactIndex,
+    };
+    if (prevBaseline !== undefined) nextContent.baselineFingerprint = prevBaseline;
+    if (prevBound !== undefined) nextContent.boundChangeName = prevBound;
+    const version = this.nextVersion++;
+    this.checkpoints.set(`sdd-state:${changeName}`, { content: nextContent, version });
+    return {
+      projectRoot,
+      changeName,
+      artifactIndex: nextArtifactIndex,
+      version,
+    };
   }
 }
