@@ -358,21 +358,62 @@ const sddComposePhasePrompt: ToolDefinition = tool({
           await deps.store.readArtifact(changeArtifactKey(resolveProjectHash(args.projectRoot), args.changeName, artifact)),
         ] as const)),
       ) as Record<string, string | null>;
-      const result = composePhasePrompt({
-        phase: args.phase,
-        modelReference: args.modelReference,
-        upstreamArtifacts: Object.fromEntries(
-          Object.entries(upstreamArtifacts).filter((entry): entry is [string, string] => entry[1] !== null),
-        ),
-        projectConfig: (projectConfig?.content ?? null) as Exclude<
-          Parameters<typeof composePhasePrompt>[0]["projectConfig"],
-          undefined
-        >,
-        // Spread conditionally: under exactOptionalPropertyTypes an explicit
-        // `undefined` is not assignable to an optional property.
-        ...(deps.skillResolver !== undefined ? { skillResolver: deps.skillResolver } : {}),
-        currentInFlightPhase: null,
-      });
+      let result: ReturnType<typeof composePhasePrompt>;
+      try {
+        result = composePhasePrompt({
+          phase: args.phase,
+          modelReference: args.modelReference,
+          upstreamArtifacts: Object.fromEntries(
+            Object.entries(upstreamArtifacts).filter((entry): entry is [string, string] => entry[1] !== null),
+          ),
+          projectConfig: (projectConfig?.content ?? null) as Exclude<
+            Parameters<typeof composePhasePrompt>[0]["projectConfig"],
+            undefined
+          >,
+          // Spread conditionally: under exactOptionalPropertyTypes an explicit
+          // `undefined` is not assignable to an optional property.
+          ...(deps.skillResolver !== undefined ? { skillResolver: deps.skillResolver } : {}),
+          currentInFlightPhase: null,
+        });
+      } catch (composeError) {
+        // C-N1 remediation. The durable change-state lock was already
+        // acquired above (and the baseline fingerprint already persisted
+        // via updateOwnedChangeState) BEFORE this call. `composePhasePrompt`
+        // can still throw (UnresolvableSkillError, PromptBudgetExceededError)
+        // — without releasing here, that throw would leave the lock durably
+        // held: same-phase retries would only keep re-acquiring their own
+        // stuck phase via passive reclaim, and any OTHER phase would be
+        // blocked until an operator ran sdd_recover_phase_lock. Release is
+        // best-effort: if it itself fails (e.g. a concurrent reclaim already
+        // replaced this token), the lock is no longer ours to leak either
+        // way, and the caller needs to see the ORIGINAL compose error, not a
+        // secondary release failure.
+        try {
+          await deps.changeStateStore.releaseChangeStateLock(
+            args.projectRoot,
+            args.changeName,
+            ownerToken,
+            preparedState.version,
+          );
+          ownerTokens.delete(ownerKey);
+        } catch {
+          // best-effort — see comment above.
+        }
+        if (projectInitLock !== null && projectInitOwnerToken !== null) {
+          try {
+            await deps.changeStateStore.releaseChangeStateLock(
+              args.projectRoot,
+              projectInitLockChangeName,
+              projectInitOwnerToken,
+              projectInitLock.version,
+            );
+            ownerTokens.delete(projectInitOwnerKey);
+          } catch {
+            // best-effort — see comment above.
+          }
+        }
+        throw composeError;
+      }
       return {
         output: JSON.stringify(
           {

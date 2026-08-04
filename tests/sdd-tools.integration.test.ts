@@ -1160,6 +1160,64 @@ async function runTests(): Promise<void> {
     injectionOriginalClient.close();
     injectionReplacementClient.close();
 
+    // C-N1 remediation — sdd_compose_phase_prompt for a phase with
+    // mandatory skills (sdd-tasks), with NO skillResolver injected. This
+    // is exactly the real `src/bootstrap/index.ts` wiring gap the prior
+    // verification found: the durable lock is acquired and the baseline
+    // fingerprint is persisted BEFORE composePhasePrompt runs, so a throw
+    // from composition must not leave that lock durably held. The tool
+    // MUST throw UnresolvableSkillError, and the lock it just acquired
+    // MUST NOT survive the throw.
+    const noResolverRoot = path.join(tempDir, "no-skill-resolver");
+    mkdirSync(noResolverRoot);
+    const noResolverClient = new SqliteMcpToolClient({ dbPath });
+    const noResolverStore = new PmcSddArtifactStoreAdapter(noResolverClient);
+    const noResolverTools = buildSddTools({
+      store: noResolverStore,
+      changeStateStore: noResolverStore,
+      captureFingerprint: async () => baseline,
+      // Deliberately omitted: this reproduces the real bootstrap wiring
+      // gap (C-N1), not a contrived test-only condition.
+    }) as unknown as Record<string, unknown>;
+    await assert.rejects(
+      () =>
+        invoke(noResolverTools, "sdd_compose_phase_prompt", {
+          projectRoot: noResolverRoot,
+          changeName: "no-resolver-target",
+          phase: "sdd-tasks",
+          modelReference: "test/model",
+        }),
+      /UNRESOLVABLE_SKILL/,
+      "compose throws when no skillResolver is injected for a phase with mandatory skills",
+    );
+    const stateAfterFailedCompose = await noResolverStore.readChangeState(noResolverRoot, "no-resolver-target");
+    assert.equal(
+      stateAfterFailedCompose?.lock,
+      undefined,
+      "the durable lock acquired by the failed compose does not survive the throw",
+    );
+    // A subsequent compose for a DIFFERENT phase on the same change must
+    // succeed WITHOUT needing sdd_recover_phase_lock — this is what
+    // distinguishes "released" from the passive same-phase reclaim that
+    // would merely keep re-acquiring the same stuck phase forever.
+    const recoveryTools = buildSddTools({
+      store: noResolverStore,
+      changeStateStore: noResolverStore,
+      captureFingerprint: async () => baseline,
+      skillResolver: (skill) => `/skills/${skill}`,
+    }) as unknown as Record<string, unknown>;
+    const recoveredCompose = await invoke<{ subagentType: string }>(recoveryTools, "sdd_compose_phase_prompt", {
+      projectRoot: noResolverRoot,
+      changeName: "no-resolver-target",
+      phase: "sdd-explore",
+      modelReference: "test/model",
+    });
+    assert.ok(
+      recoveredCompose.subagentType.includes("sdd-mr-base"),
+      "a different phase composes successfully after the leaked lock was released, with no recovery tool needed",
+    );
+    noResolverClient.close();
+
     console.log("All sdd-tools integration tests passed.");
   } finally {
     client.close();
