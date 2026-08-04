@@ -88,6 +88,7 @@ export class SqliteMcpToolClient implements McpToolClientPort {
   constructor(options: SqliteMcpToolClientOptions = {}) {
     const dbPath = options.dbPath ?? resolveMemoryDbPath();
     this.db = new DatabaseSync(dbPath);
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     // Ensure the table exists (idempotent). On the real agent-memory-mcp DB
     // this is a no-op; on a fresh test DB it creates the minimal shape this
     // adapter needs. We intentionally do NOT recreate the full upstream
@@ -131,27 +132,102 @@ export class SqliteMcpToolClient implements McpToolClientPort {
     this.db.close();
   }
 
+  /**
+   * Synchronous, transaction-safe variant of `callTool`. Used inside
+   * `runInTransactionSync` so the adapter can drive the SQLite-direct
+   * store without an async hop. The caller MUST be inside an active
+   * BEGIN ... COMMIT window. The result is the same shape as
+   * `callTool`'s result, but synchronous.
+   */
+  rawCall<T = unknown>(toolName: string, args: Readonly<Record<string, unknown>>): T {
+    if (toolName === STORE_TOOL) {
+      return this.handleStore(args as unknown as StoreArgs) as unknown as T;
+    }
+    if (toolName === RECALL_TOOL) {
+      return this.handleRecall(args as unknown as RecallArgs) as unknown as T;
+    }
+    throw new Error(`SqliteMcpToolClient: unsupported tool '${toolName}'`);
+  }
+
+  /**
+   * Run `work` inside a single SQLite transaction (BEGIN ... COMMIT). If
+   * `work` throws, ROLLBACK is issued and the error re-raised. Used by
+   * `PmcSddArtifactStoreAdapter.persistArtifactWithOwnership` to wrap the
+   * verify + artifact write + readback + state update in one atomic
+   * operation, closing the verify-then-write TOCTOU window that a
+   * concurrent same-phase reclaim could otherwise exploit.
+   *
+   * The `work` callback is invoked synchronously and may issue any
+   * `rawCall` invocations; all such calls share the transactional view
+   * for the duration of the callback.
+   */
+  runInTransactionSync<T>(work: () => T): T {
+    this.db.exec("BEGIN");
+    try {
+      const result = work();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Rollback itself failed; rethrow the original error.
+      }
+      throw error;
+    }
+  }
+
   private handleStore(args: StoreArgs): StoreResult {
     const now = new Date().toISOString();
     const tags = JSON.stringify(args.kind ? [args.kind] : []);
+    const content = typeof args.content === "string" ? args.content : JSON.stringify(args.content);
 
-    // OCC: if expectedVersion is supplied, read the current version and reject
-    // on mismatch (the durable write loop re-reads and recomputes). Without
-    // expectedVersion the write is unconditional (fresh/append path).
+    // A conditional write must compare and mutate in one SQLite statement.
+    // A read followed by an upsert lets two clients both accept the same
+    // expected version and silently overwrite each other.
     if (args.expectedVersion !== undefined) {
+      const updated = this.db
+        .prepare(
+          `UPDATE memories SET
+             content = ?,
+             tags = ?,
+             updated_at = ?,
+             last_accessed_at = ?,
+             version = version + 1
+           WHERE id = ? AND version = ?
+           RETURNING version`,
+        )
+        .get(content, tags, now, now, args.key, args.expectedVersion) as
+        | { version: number }
+        | undefined;
+      if (updated) {
+        return { version: updated.version };
+      }
+
+      if (args.expectedVersion === 0) {
+        const inserted = this.db
+          .prepare(
+            `INSERT INTO memories (id, content, category, tags, created_at, updated_at, access_count, last_accessed_at, version, origin, source_tool, status, memory_state)
+             VALUES (?, ?, 'other', ?, ?, ?, 0, ?, 1, 'sdd-plugin', 'sdd-artifact-store', 'active', 'active')
+             ON CONFLICT(id) DO NOTHING
+             RETURNING version`,
+          )
+          .get(args.key, content, tags, now, now, now) as { version: number } | undefined;
+        if (inserted) {
+          return { version: inserted.version };
+        }
+      }
+
       const existing = this.db.prepare("SELECT version FROM memories WHERE id = ?").get(args.key) as
         | { version: number }
         | undefined;
-      if (existing && existing.version !== args.expectedVersion) {
-        return { version: existing.version, conflict: true };
-      }
+      return { version: existing?.version ?? 0, conflict: true };
     }
 
     const existingForVersion = this.db.prepare("SELECT version FROM memories WHERE id = ?").get(args.key) as
       | { version: number }
       | undefined;
     const nextVersion = (existingForVersion?.version ?? 0) + 1;
-    const content = typeof args.content === "string" ? args.content : JSON.stringify(args.content);
 
     this.db
       .prepare(

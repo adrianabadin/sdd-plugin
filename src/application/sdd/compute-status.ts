@@ -45,6 +45,21 @@ export function computeStatusFlag(blockedReasons: readonly string[], blockedOn?:
   return blockedReasons.length > 0 || blockedOn !== undefined ? "blocked" : "ok";
 }
 
+/**
+ * A persisted verify report is the sole authority for archive-critical state.
+ * The report convention admits exactly two clean summary lines. Any other
+ * CRITICAL-bearing line is unresolved by default, so incidental words such as
+ * "fixed" cannot silently downgrade a finding.
+ */
+export function hasUnresolvedCriticalFinding(verifyReport: string | null): boolean {
+  if (verifyReport === null) return false;
+  return verifyReport.split(/\r?\n/).some((line) => {
+    const normalized = line.trim();
+    if (/^No(?:\s+unresolved)?\s+CRITICAL\s+findings\.$/i.test(normalized)) return false;
+    return /\bCRITICAL\b/i.test(normalized);
+  });
+}
+
 export interface AssembleStatusInput {
   changeName: string;
   projectRoot: string;

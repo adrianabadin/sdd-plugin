@@ -79,6 +79,11 @@ class FakeStore implements SddArtifactStorePort {
     const version = this.nextVersion++;
     this.checkpoints.set(key, { content: JSON.parse(JSON.stringify(content)), version });
   }
+
+  /** Final-review finding #3 — stub for the atomic persist seam. */
+  async persistArtifactWithOwnership(): Promise<never> {
+    throw new Error("FakeStore.persistArtifactWithOwnership is not exercised by these tests");
+  }
 }
 
 /** Mock semantic gateway for distilling notes */

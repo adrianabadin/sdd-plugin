@@ -36,6 +36,10 @@ function createMockStore(): SddArtifactStorePort & { storage: Map<string, string
     async readCheckpoint(_key: string): Promise<CheckpointRecord | null> {
       return null;
     },
+    /** Final-review finding #3 — stub for the atomic persist seam. */
+    async persistArtifactWithOwnership(): Promise<never> {
+      throw new Error("FakeStore.persistArtifactWithOwnership is not exercised by these tests");
+    },
   };
 }
 

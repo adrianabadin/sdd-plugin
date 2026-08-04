@@ -11,6 +11,16 @@ export function changeArtifactKey(projectRootHash: string, changeName: string, a
   return `sdd/${projectRootHash}/${changeName}/${artifact}`;
 }
 
+/** Versioned durable state for one SDD change. */
+export function changeStateKey(projectRootHash: string, changeName: string): string {
+  return changeArtifactKey(projectRootHash, changeName, "state");
+}
+
+/** Deterministic project-level index used to enumerate durable SDD changes. */
+export function changeStateIndexKey(projectRootHash: string): string {
+  return `sdd/${projectRootHash}/changes/index`;
+}
+
 /** SS-12: `sdd/{projectRootHash}/specs/{capability}` */
 export function consolidatedSpecKey(projectRootHash: string, capability: string): string {
   return `sdd/${projectRootHash}/specs/${capability}`;

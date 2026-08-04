@@ -50,6 +50,10 @@ class MockArtifactStore implements SddArtifactStorePort {
     const val = this.checkpoints.get(key);
     return val ? { content: val.content, version: val.version } : null;
   }
+  /** Final-review finding #3 — stub for the atomic persist seam. */
+  async persistArtifactWithOwnership(): Promise<never> {
+    throw new Error("MockArtifactStore.persistArtifactWithOwnership is not exercised by these tests");
+  }
 }
 
 /** Mock for store that fails readback */
@@ -70,6 +74,10 @@ class FailingReadbackStore implements SddArtifactStorePort {
   async readCheckpoint(_key: string): Promise<CheckpointRecord | null> {
     // Returns corrupt/mismatched content
     return { content: "corrupt-content", version: 1 };
+  }
+  /** Final-review finding #3 — stub for the atomic persist seam. */
+  async persistArtifactWithOwnership(): Promise<never> {
+    throw new Error("FailingReadbackStore.persistArtifactWithOwnership is not exercised by these tests");
   }
 }
 
