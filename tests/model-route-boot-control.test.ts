@@ -438,6 +438,13 @@ function run(): void {
       "test:all must directly execute the stop-control regression test",
     );
     assert.equal(packageJson.scripts?.["test"], "npm run test:all", "npm test must delegate to test:all");
+    for (const file of ["model-route-canary-isolation", "model-route-boot-partial-fleet"]) {
+      assert.match(
+        packageJson.scripts?.["test:model-routes"] ?? "",
+        new RegExp(`(?:^|\\s)npx tsx tests\\/${file}\\.test\\.ts(?:\\s|$)`),
+        `test:model-routes must execute the ${file} suite`,
+      );
+    }
     console.log("  pass: test:model-routes and npm test require the stop-control regression test");
   }
 

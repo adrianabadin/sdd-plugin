@@ -18,6 +18,7 @@ import {
   type BootAuditPort,
 } from "../src/infrastructure/runtime/windows-model-route-boot-manager.js";
 import type { CanaryHostTransport, CanarySession } from "../src/infrastructure/opencode/model-route-canary.js";
+import { CanaryBlockedError } from "../src/infrastructure/opencode/model-route-canary.js";
 import { REQUIRED_OPENCODE_VERSION } from "../src/infrastructure/opencode/model-route-readiness.js";
 import { ModelRouteAuditLogger } from "../src/infrastructure/logging/model-route-audit.logger.js";
 import { RegenerateFleetAgentsUseCase } from "../src/application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
@@ -545,6 +546,10 @@ async function run(): Promise<void> {
         assert.equal(mismatch.code, CANARY_MANIFEST_MISMATCH_EXIT_CODE, "CANARY_MANIFEST_MISMATCH maps to its documented exit code");
         assert.match(mismatch.message, /CANARY_MANIFEST_MISMATCH/, "mismatch message names the error class");
         assert.equal(mismatch.message.includes("sdd-mr-v1-pf-b"), true, "mismatch message surfaces the differing host set");
+
+        const blocked = classify(new CanaryBlockedError("CANARY_TIMEOUT", "operation exceeded 300000ms"));
+        assert.equal(blocked.code, 4, "transport-level CanaryBlockedError keeps exit 4");
+        assert.match(blocked.message, /canary failed: CANARY_TIMEOUT/, "exit-4 message names the canary code");
       } finally {
         await cleanupDirAsync(bootRoot);
       }
