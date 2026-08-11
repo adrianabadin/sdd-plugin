@@ -31,6 +31,9 @@ import {
   WindowsModelRouteBootManager,
   CatalogRouteMissingError,
   StaleLockUnrecoverableError,
+  CanaryFleetEmptyError,
+  CanaryManifestMismatchError,
+  type BootAuditPort,
   type BootLifecycleState,
   type BootChildProcess,
   type BootProcessSupervisor,
@@ -194,6 +197,21 @@ export function buildServeArgs(baseUrl: string): string[] {
  */
 export const PORT_IN_USE_EXIT_CODE = 8;
 
+/**
+ * Exit code for a whole-fleet canary failure: every configured route
+ * failed canary, so readiness is never published (fail closed).
+ */
+export const CANARY_FLEET_EMPTY_EXIT_CODE = 9;
+
+/**
+ * Exit code for a canary/regeneration host-set disagreement: the
+ * regenerated manifest does not cover the exact hosts the canary
+ * proved, so readiness would lie and the boot fails closed. Kept
+ * distinct from 9 so scripts can branch the two remediations
+ * (provider outage vs generator disagreement).
+ */
+export const CANARY_MANIFEST_MISMATCH_EXIT_CODE = 10;
+
 export function classify(err: unknown): { code: number; message: string } {
   if (err instanceof CliArgumentError) {
     return { code: 2, message: `argument error: ${err.message}` };
@@ -209,6 +227,12 @@ export function classify(err: unknown): { code: number; message: string } {
   }
   if (err instanceof CanaryBlockedError) {
     return { code: 4, message: `canary failed: ${err.code} ${err.message}` };
+  }
+  if (err instanceof CanaryFleetEmptyError) {
+    return { code: CANARY_FLEET_EMPTY_EXIT_CODE, message: err.message };
+  }
+  if (err instanceof CanaryManifestMismatchError) {
+    return { code: CANARY_MANIFEST_MISMATCH_EXIT_CODE, message: err.message };
   }
   if (err instanceof Error && /MANIFEST_MISSING/.test(err.message)) {
     return { code: 5, message: err.message };
@@ -276,6 +300,14 @@ export function createProductionBootComponents(
     catalogSync,
     fleetRegeneration,
     routesConfigPath,
+    // The manager's BootAuditPort declares append(Record<string, unknown>),
+    // while ModelRouteAuditLogger.append is narrowed to its ModelRouteAuditEntry
+    // union (whose FleetEmptyGenerationAuditEntry member lacks an index
+    // signature), so the structural check fails in both directions. The runtime
+    // shapes are compatible: the manager appends plain record literals and the
+    // logger sanitizes + persists any record. The cast is the minimal seam.
+    quarantine: quarantinePort,
+    audit: auditLogger as BootAuditPort,
     processSupervisor: options?.processSupervisor ?? new OpenCodeProcessSupervisor(openCodeBaseUrl),
   });
 
@@ -306,7 +338,7 @@ async function main(): Promise<number> {
   const handshakePath = path.join(routingDir, ROUTING_HANDSHAKE_FILENAME);
 
   if (args.subcommand === "status") {
-    return reportStatus(attestationPath, lockPath);
+    return reportStatus(attestationPath, lockPath, path.join(routingDir, "routing.audit.jsonl"));
   }
 
   if (args.subcommand === "stop") {
@@ -319,8 +351,9 @@ async function main(): Promise<number> {
 
   try {
     await manager.start();
-    process.stdout.write(`boot: state=${manager.getState()} bootIdentity=${manager.getBootIdentity()}\n`);
-
+    // The manager prints the authoritative ready line (state, boot identity,
+    // routes=proven/configured, blocked count); the CLI prints nothing else,
+    // so stdout carries exactly one ready line per boot.
     await new Promise<void>((resolve) => {
       const shutdown = async (signal: string): Promise<void> => {
         process.stdout.write(`boot: received ${signal}, stopping supervisor\n`);
@@ -342,7 +375,46 @@ async function main(): Promise<number> {
   }
 }
 
-function reportStatus(attestationPath: string, lockPath: string): number {
+interface BlockedAuditEntry {
+  readonly hostName: string;
+  readonly targetCanonicalId: string;
+  readonly code: string;
+  readonly message: string;
+  readonly ts: number;
+}
+
+function readBlockedAuditEntries(auditPath: string): BlockedAuditEntry[] {
+  if (!existsSync(auditPath)) return [];
+  const latestByHost = new Map<string, BlockedAuditEntry>();
+  for (const rawLine of readFileSync(auditPath, "utf8").split("\n")) {
+    if (rawLine.trim().length === 0) continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(rawLine) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (parsed["stage"] !== "boot.route.canary_blocked") continue;
+    const hostName = typeof parsed["hostName"] === "string" ? parsed["hostName"] : "";
+    const code = typeof parsed["code"] === "string" ? parsed["code"] : "";
+    const message = typeof parsed["message"] === "string" ? parsed["message"] : "";
+    const targetCanonicalId = typeof parsed["targetCanonicalId"] === "string" ? parsed["targetCanonicalId"] : "";
+    const ts = typeof parsed["ts"] === "number" ? parsed["ts"] : 0;
+    if (hostName.length === 0) continue;
+    const previous = latestByHost.get(hostName);
+    if (!previous || ts >= previous.ts) {
+      latestByHost.set(hostName, { hostName, targetCanonicalId, code, message, ts });
+    }
+  }
+  return [...latestByHost.values()].sort((a, b) => a.hostName.localeCompare(b.hostName));
+}
+
+function statusReasonLine(entry: BlockedAuditEntry): string {
+  const message = entry.message.replace(/\s+/g, " ").slice(0, 200);
+  return `boot: blocked host=${entry.hostName} canonical=${entry.targetCanonicalId} code=${entry.code} reason=${message}`;
+}
+
+function reportStatus(attestationPath: string, lockPath: string, auditPath: string): number {
   if (!existsSync(attestationPath)) {
     process.stdout.write("boot: state=idle (no attestation on disk)\n");
     return 0;
@@ -352,10 +424,14 @@ function reportStatus(attestationPath: string, lockPath: string): number {
     const identity = typeof attestation["bootIdentity"] === "string" ? attestation["bootIdentity"] : "unknown";
     const expiresAt = typeof attestation["expiresAt"] === "number" ? attestation["expiresAt"] : 0;
     const state: BootLifecycleState = "ready";
+    const blockedEntries = readBlockedAuditEntries(auditPath);
     process.stdout.write(
       `boot: state=${state} bootIdentity=${identity} expiresAt=${expiresAt}` +
-      ` lock=${existsSync(lockPath) ? "held" : "released"}\n`,
+      ` lock=${existsSync(lockPath) ? "held" : "released"} blocked=${blockedEntries.length}\n`,
     );
+    for (const entry of blockedEntries) {
+      process.stdout.write(`${statusReasonLine(entry)}\n`);
+    }
     return 0;
   } catch (err) {
     process.stderr.write(`status: failed to read attestation: ${(err as Error).message}\n`);

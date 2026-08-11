@@ -728,8 +728,9 @@ export class WindowsModelRouteBootManager {
   private async quarantineBlockedRoute(failure: CanaryFailure): Promise<void> {
     if (!this.quarantine) return;
     const slash = failure.targetCanonicalId.indexOf("/");
-    const providerId = slash === -1 ? failure.targetCanonicalId : failure.targetCanonicalId.slice(0, slash);
-    const modelId = slash === -1 ? undefined : failure.targetCanonicalId.slice(slash + 1);
+    if (slash === -1) return;
+    const providerId = failure.targetCanonicalId.slice(0, slash);
+    const modelId = failure.targetCanonicalId.slice(slash + 1);
     await this.quarantine.setQuarantine({
       level: "modelProvider",
       providerId,
