@@ -9,6 +9,7 @@ import {
 import * as modelRouting from "../src/domain/model-routing/index.js";
 import {
   OpenCodeCompatError,
+  OPENCODE_COMPAT_VERSION,
   assertOpenCodeCompatible,
 } from "../src/domain/model-routing/opencode-compat.js";
 
@@ -70,7 +71,7 @@ function run(): void {
     "pure naming helper is detached from synthetic Config shapes",
   );
 
-  assert.doesNotThrow(() => assertOpenCodeCompatible("1.18.9"));
+  assert.doesNotThrow(() => assertOpenCodeCompatible(OPENCODE_COMPAT_VERSION));
   assert.throws(
     () => assertOpenCodeCompatible("1.18.4"),
     OpenCodeCompatError,

@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { deriveQuarantineView } from "../src/tui/quarantine-view.js";
 import type { QuarantineEntry } from "../src/domain/model/quarantine.js";
 
@@ -17,32 +18,32 @@ async function runTests() {
   const view = deriveQuarantineView(entries, baseDate);
 
   // 1. All entries transformed
-  console.assert(view.items.length === 3, "View items count matches entries length");
+  assert(view.items.length === 3, "View items count matches entries length");
 
   // 2. Sorting & Status
   // Anthropic provider (permanent) active -> first
   const item0 = view.items[0];
-  console.assert(item0?.level === "provider", "Provider level first");
-  console.assert(item0?.targetLabel === "anthropic", "Provider targetLabel is providerId");
-  console.assert(item0?.statusLabel === "ACTIVE (Permanent)", "Status label for permanent");
-  console.assert(item0?.isActive === true, "Permanent is active");
+  assert(item0?.level === "provider", "Provider level first");
+  assert(item0?.targetLabel === "anthropic", "Provider targetLabel is providerId");
+  assert(item0?.statusLabel === "ACTIVE (Permanent)", "Status label for permanent");
+  assert(item0?.isActive === true, "Permanent is active");
 
   // OpenAI gpt-4o connection (active TTL) -> second
   const item1 = view.items[1];
-  console.assert(item1?.level === "modelProvider", "Active TTL connection second");
-  console.assert(item1?.targetLabel === "openai/gpt-4o", "Connection targetLabel is provider/model");
-  console.assert(item1?.isActive === true, "Future TTL is active");
+  assert(item1?.level === "modelProvider", "Active TTL connection second");
+  assert(item1?.targetLabel === "openai/gpt-4o", "Connection targetLabel is provider/model");
+  assert(item1?.isActive === true, "Future TTL is active");
 
   // Claude 3.5 model (expired TTL) -> third
   const item2 = view.items[2];
-  console.assert(item2?.level === "model", "Expired model last");
-  console.assert(item2?.statusLabel.includes("EXPIRED"), "Status label reflects expired");
-  console.assert(item2?.isActive === false, "Past TTL is inactive");
+  assert(item2?.level === "model", "Expired model last");
+  assert(item2?.statusLabel.includes("EXPIRED"), "Status label reflects expired");
+  assert(item2?.isActive === false, "Past TTL is inactive");
 
   // Empty entries handling
   const emptyView = deriveQuarantineView([], baseDate);
-  console.assert(emptyView.items.length === 0, "Empty input produces empty view items");
-  console.assert(emptyView.isEmpty === true, "isEmpty flag is set");
+  assert(emptyView.items.length === 0, "Empty input produces empty view items");
+  assert(emptyView.isEmpty === true, "isEmpty flag is set");
 
   console.log("✅ All TUI Quarantine View tests passed.");
 }

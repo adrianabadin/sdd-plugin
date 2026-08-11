@@ -17,7 +17,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 
 import { ModelRouteTaskHook } from "../src/infrastructure/opencode/model-route-task-hook.js";

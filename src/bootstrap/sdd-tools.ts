@@ -91,6 +91,7 @@ import {
   readCheckpointData,
 } from "../application/sdd/checkpoint.js";
 import { canonicalizeProjectRoot } from "../domain/sdd/project-identity.js";
+import { UnresolvableSkillError } from "../domain/sdd/prompt-composition.js";
 import { changeArtifactKey, initConfigKey } from "../domain/sdd/sdd-keys.js";
 import {
   compareWorktreeFingerprints,
@@ -109,8 +110,24 @@ import {
 export interface SddToolsDeps {
   readonly store: SddArtifactStorePort;
   readonly changeStateStore: SddChangeStateStorePort;
-  /** Resolves skill names to readable paths; null means "unresolvable" (PC-6). */
-  readonly skillResolver?: (skillName: string) => string | null;
+  /**
+   * Creates the skill resolver for the PER-CALL `args.projectRoot` — invoked
+   * on every tool call, so resolution follows the module's documented
+   * invariant (per-call root, never a startup-time capture; W-N1). The
+   * returned resolver may optionally expose `searchedRegistries()`
+   * diagnostics, which are folded into `UnresolvableSkillError` so a compose
+   * failure names the registry paths and per-path reasons (C-R1). Null from
+   * the resolver means "unresolvable" (PC-6).
+   */
+  readonly createSkillResolver?: (projectRoot: string) => ((skillName: string) => string | null) & {
+    readonly searchedRegistries?: () => readonly { readonly path: string; readonly status: string }[];
+  };
+  /**
+   * Observability for the best-effort lock release on compose failure (W-N2):
+   * a release failure is reported here instead of vanishing silently. The
+   * ORIGINAL compose error is still the one rethrown to the caller.
+   */
+  readonly onLockReleaseError?: (error: unknown) => void;
   /** The default model reference for phases that don't name one (EF-15). */
   readonly defaultModel?: string;
   /** Injectable only to make worktree guardrails deterministic in integration tests. */
@@ -118,7 +135,7 @@ export interface SddToolsDeps {
 }
 
 /**
- * Builds the seven SDD tools, each closing over the injected dependencies.
+ * Builds the eight SDD tools, each closing over the injected dependencies.
  * `projectRoot` arrives per-call from the tool's `context.directory` so each
  * invocation is namespaced by the session's actual project, not a startup-time
  * capture.
@@ -359,6 +376,10 @@ const sddComposePhasePrompt: ToolDefinition = tool({
         ] as const)),
       ) as Record<string, string | null>;
       let result: ReturnType<typeof composePhasePrompt>;
+      // W-N1 — the resolver is created HERE, per call, from args.projectRoot,
+      // so resolution always follows the session's actual project root and
+      // never a startup-time capture.
+      const skillResolver = deps.createSkillResolver?.(args.projectRoot);
       try {
         result = composePhasePrompt({
           phase: args.phase,
@@ -372,7 +393,7 @@ const sddComposePhasePrompt: ToolDefinition = tool({
           >,
           // Spread conditionally: under exactOptionalPropertyTypes an explicit
           // `undefined` is not assignable to an optional property.
-          ...(deps.skillResolver !== undefined ? { skillResolver: deps.skillResolver } : {}),
+          ...(skillResolver !== undefined ? { skillResolver } : {}),
           currentInFlightPhase: null,
         });
       } catch (composeError) {
@@ -396,8 +417,9 @@ const sddComposePhasePrompt: ToolDefinition = tool({
             preparedState.version,
           );
           ownerTokens.delete(ownerKey);
-        } catch {
-          // best-effort — see comment above.
+        } catch (releaseError) {
+          // best-effort — see comment above — but no longer silent (W-N2).
+          deps.onLockReleaseError?.(releaseError);
         }
         if (projectInitLock !== null && projectInitOwnerToken !== null) {
           try {
@@ -408,8 +430,22 @@ const sddComposePhasePrompt: ToolDefinition = tool({
               projectInitLock.version,
             );
             ownerTokens.delete(projectInitOwnerKey);
-          } catch {
-            // best-effort — see comment above.
+          } catch (releaseError) {
+            // best-effort — see comment above — but no longer silent (W-N2).
+            deps.onLockReleaseError?.(releaseError);
+          }
+        }
+        // C-R1 diagnosability — fold the resolver's registry-search
+        // diagnostics into the UnresolvableSkillError so the caller sees
+        // WHICH registries were searched and why each failed, not just the
+        // skill name.
+        if (composeError instanceof UnresolvableSkillError) {
+          const searched = skillResolver?.searchedRegistries?.();
+          if (searched !== undefined && searched.length > 0) {
+            throw new UnresolvableSkillError(
+              composeError.skillName,
+              `searched registries: ${searched.map((entry) => `${entry.path} (${entry.status})`).join("; ")}`,
+            );
           }
         }
         throw composeError;

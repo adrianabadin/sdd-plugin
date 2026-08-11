@@ -76,6 +76,7 @@ import type { Manifest } from "../src/infrastructure/opencode/disk-agent-generat
 import type { ModelRouteCatalogPort, RouteCandidate } from "../src/ports/model-route-catalog.port.js";
 import type { CanaryEvidence, CanaryHostTransport, CanarySession } from "../src/infrastructure/opencode/model-route-canary.js";
 import { CanaryBlockedError } from "../src/infrastructure/opencode/model-route-canary.js";
+import { REQUIRED_OPENCODE_VERSION } from "../src/infrastructure/opencode/model-route-readiness.js";
 
 function sleep(ms: number): Promise<void> { return new Promise<void>((r) => setTimeout(r, ms)); }
 async function cleanupDir(dir: string): Promise<void> {
@@ -105,10 +106,10 @@ function seedManifest(hostName: string, providerId: string, modelId: string, roo
     schemaVersion: 1 as const,
     generatorVersion: "1.0.0",
     generationEpoch: new Date().toISOString(),
-    workspaceIdentity: "test-workspace-id",
+    workspaceIdentity: path.resolve(root),
     routingNamespace: "v1",
     descriptorBudgetBytes: 4096,
-    requiredOpenCodeVersion: "1.18.9",
+    requiredOpenCodeVersion: REQUIRED_OPENCODE_VERSION,
     routes: [{
       baseTemplate: "sdd-mr-base",
       providerId, modelId, hostName,
@@ -303,7 +304,7 @@ async function run(): Promise<void> {
       assert.equal(recomputed, attestation["signature"], "attestation.signature recomputes under the live HMAC key");
       // Attestation shape: nonce + openCodeVersion + verifierVersion + fileHashes + expiresAt
       assert.equal(typeof attestation["nonce"], "string", "attestation carries a nonce");
-      assert.equal(attestation["openCodeVersion"], "1.18.9", "attestation pins openCodeVersion=1.18.9");
+      assert.equal(attestation["openCodeVersion"], REQUIRED_OPENCODE_VERSION, "attestation pins the required OpenCode version");
       assert.equal(attestation["verifierVersion"], "1.0.0", "attestation carries verifierVersion");
       assert.ok(Array.isArray(attestation["fileHashes"]), "attestation carries the manifest file hash set");
       assert.equal(typeof attestation["expiresAt"], "number", "attestation carries an expiresAt TTL");
@@ -402,7 +403,7 @@ async function run(): Promise<void> {
         workspaceIdentity: path.resolve(workspaceRoot),
         routingNamespace: "sdd-mr-v1",
         descriptorBudgetBytes: 4096,
-        requiredOpenCodeVersion: "1.18.9",
+        requiredOpenCodeVersion: REQUIRED_OPENCODE_VERSION,
         routes: [
           {
             baseTemplate: "sdd-mr-base",
@@ -691,12 +692,12 @@ async function run(): Promise<void> {
       // can verify the attestation. We can verify in-process now.
       const { ModelRouteReadiness } = await import("../src/infrastructure/opencode/model-route-readiness.js");
       const verifier = new ModelRouteReadiness({ workspaceRoot, now: () => now, signingKey: manager.getSigningKey() });
-      const verified = verifier.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: manager.getBootIdentity() });
+      const verified = verifier.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: manager.getBootIdentity() });
       assert.equal(verified.nonce, attestation!.nonce, "verifier reads back the same attestation that was issued");
       // Past TTL: verify throws AttestationExpiredError.
       now = 1_501;
       assert.throws(
-        () => verifier.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: manager.getBootIdentity() }),
+        () => verifier.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: manager.getBootIdentity() }),
         /ATTESTATION_EXPIRED/,
         "verify with now() > expiresAt throws AttestationExpiredError",
       );

@@ -45,9 +45,9 @@ function assertOk(condition: unknown, message: string): void {
 
 async function run() {
   // === Build artifacts exist ===
-  const rootDist = path.resolve("dist/bootstrap/index.js");
+  const rootDist = path.resolve("dist/plugin.js");
   const tuiDist = path.resolve("dist/tui.js");
-  assertOk(existsSync(rootDist), "dist/bootstrap/index.js exists after build");
+  assertOk(existsSync(rootDist), "dist/plugin.js exists after build");
   assertOk(existsSync(tuiDist), "dist/tui.js exists after build");
 
   // === package.json exports map is correct ===
@@ -57,14 +57,27 @@ async function run() {
     main?: string;
     scripts: Record<string, string>;
   };
-  assertOk(packageJson.exports["."] === "./dist/bootstrap/index.js", 'package.json exports["."] points to dist/bootstrap/index.js');
+  assertOk(packageJson.exports["."] === "./dist/plugin.js", 'package.json exports["."] points to dist/plugin.js');
   assertOk(packageJson.exports["./tui"] === "./dist/tui.js", 'package.json exports["./tui"] points to dist/tui.js');
 
   // === Root self-reference resolves and is callable as a factory ===
   const rootMod = (await import(pathToFileURL(rootDist).href)) as Record<string, unknown>;
-  assertOk(typeof rootMod["SddPlugin"] === "function", "dist/bootstrap/index.js exports callable SddPlugin");
-  assertOk(typeof rootMod["default"] === "function", "dist/bootstrap/index.js exports callable default");
+  assertOk(typeof rootMod["SddPlugin"] === "function", "dist/plugin.js exports callable SddPlugin");
+  assertOk(typeof rootMod["default"] === "function", "dist/plugin.js exports callable default");
   assertOk(rootMod["SddPlugin"] === rootMod["default"], "root default and named SddPlugin exports refer to the same function");
+  // Host contract: OpenCode iterates EVERY export and treats it as a plugin
+  // factory. A non-function export drops the plugin ("Plugin export is not a
+  // function"); an exported helper would be invoked with the plugin context.
+  const rootExportNames = Object.keys(rootMod);
+  const rootNonFunctionExports = rootExportNames.filter((name) => typeof rootMod[name] !== "function");
+  assertOk(
+    rootNonFunctionExports.length === 0,
+    `package entry exports only functions (offenders: ${rootNonFunctionExports.join(", ") || "none"})`,
+  );
+  assertOk(
+    new Set(rootExportNames.map((name) => rootMod[name])).size === 1,
+    `package entry exports only the plugin function (exports: ${rootExportNames.join(", ")})`,
+  );
   // Invoke the built plugin against an ISOLATED temp user-data directory with a
   // temp legacy source. Without this the call would silently resolve the real
   // per-user database and could pass purely because that database is already

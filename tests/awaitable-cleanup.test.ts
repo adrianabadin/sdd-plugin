@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import path from "node:path";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 
 import { tui, waitForTuiShutdown } from "../src/tui.js";
 import { createPersistenceContext } from "../src/infrastructure/runtime/persistence-context.js";

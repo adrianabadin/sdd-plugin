@@ -4,7 +4,7 @@
  * never selects benchmark/pricing/subscription columns (design c96148ae).
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { ModelRouteCatalogPort, RouteCandidate } from "../../ports/model-route-catalog.port.js";
 
 export class PrismaModelRouteCatalogAdapter implements ModelRouteCatalogPort {

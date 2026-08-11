@@ -15,6 +15,8 @@ export interface StopModelRouteSupervisorOptions {
   readonly attestationPath: string;
   readonly lockPath: string;
   readonly controlPath: string;
+  /** Optional persisted handshake artifact; cleaned alongside the others when provided. */
+  readonly handshakePath?: string;
   readonly currentPid?: number;
   readonly probeProcess?: (pid: number) => void;
   readonly signalProcess?: (pid: number, signal: NodeJS.Signals) => void;
@@ -121,7 +123,9 @@ function cleanArtifacts(
     ?? ((artifactPath: string) => { rmSync(artifactPath, { force: true }); });
   const remainingPaths: string[] = [];
   const cleanupErrors: string[] = [];
-  for (const artifactPath of [options.attestationPath, options.lockPath, options.controlPath]) {
+  const artifactPaths = [options.attestationPath, options.lockPath, options.controlPath];
+  if (options.handshakePath !== undefined) artifactPaths.push(options.handshakePath);
+  for (const artifactPath of artifactPaths) {
     try {
       removeArtifact(artifactPath);
     } catch (error) {

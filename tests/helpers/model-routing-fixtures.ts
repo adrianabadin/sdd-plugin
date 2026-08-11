@@ -25,6 +25,7 @@ import { WindowsModelRouteBootManager } from "../../src/infrastructure/runtime/w
 import type { ModelRouteCatalogPort, RouteCandidate } from "../../src/ports/model-route-catalog.port.js";
 import type { CanaryHostTransport, CanarySession } from "../../src/infrastructure/opencode/model-route-canary.js";
 import type { Manifest } from "../../src/infrastructure/opencode/disk-agent-generator.js";
+import { REQUIRED_OPENCODE_VERSION } from "../../src/infrastructure/opencode/model-route-readiness.js";
 
 // ---------------------------------------------------------------------------
 // Generic fs / timing / crypto helpers
@@ -185,7 +186,7 @@ function buildManifest(args: BuildManifestArgs): { hostName: string; body: Omit<
     workspaceIdentity: path.resolve(workspaceRoot),
     routingNamespace: "sdd-mr-v1",
     descriptorBudgetBytes: 4096,
-    requiredOpenCodeVersion: "1.18.9",
+    requiredOpenCodeVersion: REQUIRED_OPENCODE_VERSION,
     routes: [{
       baseTemplate: "sdd-mr-base",
       providerId, modelId, hostName,
@@ -208,7 +209,7 @@ export function seedManifestAndAttestation(root: string, providerId: string, mod
   const attestationBody = {
     schemaVersion: 1 as const,
     verifierVersion: "1.0.0",
-    openCodeVersion: "1.18.9",
+    openCodeVersion: REQUIRED_OPENCODE_VERSION,
     workspaceIdentity: path.resolve(root),
     generationEpoch: "epoch-wu4",
     manifestHash: manifest.manifestHash,

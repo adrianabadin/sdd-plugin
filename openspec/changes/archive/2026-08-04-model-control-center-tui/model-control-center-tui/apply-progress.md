@@ -1,4 +1,72 @@
-# Apply Progress — Task 7: Final Integration & Release Safety
+
+
+---
+
+# Apply Progress — Phase 5: Verification Remediation & Strict-TDD Assertion Hardening
+
+**Change**: `model-control-center-tui`
+**Tasks**: Phase 5, tasks 5.1–5.3
+**Mode**: Strict TDD Mode
+**Delivery**: single PR with `size:exception` (maintainer-approved narrow test-remediation slice)
+
+## Status
+
+Completed the assigned Phase 5 test-evidence remediation only. Product behavior was not changed.
+All cumulative prior Task 2–7 work remains preserved above.
+
+## Root-Cause Investigation
+
+The five quarantine unit/integration scripts used `console.assert`, which logs a failed condition but does not throw or set a non-zero process status. As a result, a false assertion could still produce a successful command exit. The interception test covered provider and model blocking separately but did not exercise all three overlapping scopes in one hook invocation. The Ctrl+S Bun test checked only the edited `mmlu` field, so it did not prove the complete `SaveModelDetailInput` contract or the optimistic `expectedEnvelopeHash` forwarding.
+
+## Completed Tasks
+
+- [x] 5.1 Replaced every `console.assert` in the five named quarantine scripts with throwing `node:assert/strict` assertions; existing catch/fail handlers now terminate the process on assertion failure.
+- [x] 5.2 Added an interception-level overlap case with active provider, model, and modelProvider quarantines and asserted the task hook rejects the route.
+- [x] 5.3 Added a Bun C9 deep payload assertion covering every editable save field and the baseline `expectedEnvelopeHash`.
+
+## TDD Cycle Evidence
+
+| Task | Test File(s) | RED | GREEN | REFACTOR |
+|---|---|---|---|---|
+| 5.1 | Five quarantine scripts | Baseline execution showed all scripts could report success while using non-throwing `console.assert`; a deliberate false assertion in `domain-quarantine.test.ts` then exited non-zero with `AssertionError` after conversion | All five targeted scripts passed with throwing assertions | Added `node:assert/strict` imports only where needed; no product changes |
+| 5.2 | `tests/integration-quarantine-interception.test.ts` | Added overlap acceptance assertion before final verification; targeted integration gate initially exposed a real test-fixture cleanup issue (modelProvider remained active), proving the new path exercised the full interception state | Released the modelProvider fixture and reran; overlap hook rejection and full integration suite passed | Kept assertion at interception boundary and added explicit scope-presence checks |
+| 5.3 | `tests/c9-ctrls-save.bun.test.ts` | Added the complete-input expectation before relying on the existing green implementation; the assertion is process-failing via `node:assert/strict` if any field/hash is dropped | C9 passed through the Bun runner during `npm test` / persistence gates | Reused existing production renderer harness; no TUI/product edits |
+
+## Verification Evidence
+
+- `npx tsx tests/domain-quarantine.test.ts` → PASS
+- `npx tsx tests/runtime-quarantine-store.test.ts` → PASS
+- `npx tsx tests/use-case-quarantine.test.ts` → PASS
+- `npx tsx tests/prisma-quarantine-adapter.test.ts` → PASS
+- `npx tsx tests/tui-quarantine-view.test.ts` → PASS
+- `npx tsx tests/integration-quarantine-interception.test.ts` → PASS
+- `bun tests/c9-ctrls-save.bun.test.ts` → unavailable directly (`bun` is not on PATH); the repository's Bun runner executed C9 successfully during `npm test` persistence gates
+- `npm run build` → PASS
+- `npm test` → PASS; full relevant Node, strict typecheck, integration, persistence, and Bun-backed gates passed
+
+## Files Changed (Phase 5)
+
+- `tests/domain-quarantine.test.ts` — throwing assertions
+- `tests/runtime-quarantine-store.test.ts` — throwing assertions
+- `tests/use-case-quarantine.test.ts` — throwing assertions
+- `tests/prisma-quarantine-adapter.test.ts` — throwing assertions
+- `tests/tui-quarantine-view.test.ts` — throwing assertions
+- `tests/integration-quarantine-interception.test.ts` — overlapping-scope interception case and cleanup
+- `tests/c9-ctrls-save.bun.test.ts` — complete draft/hash forwarding assertion
+- `openspec/changes/model-control-center-tui/tasks.md` — Phase 5 checkboxes
+- `openspec/changes/model-control-center-tui/apply-progress.md` — cumulative Phase 5 evidence
+
+## Workload / PR Boundary
+
+- Mode: single PR with `size:exception`
+- Current work unit: Phase 5 tasks 5.1–5.3
+- Boundary: test assertion reliability and evidence only; no product behavior changes
+- Estimated review budget impact: narrow remediation slice, accepted `size:exception`
+
+## Remaining Tasks
+
+- [ ] None in Phase 5; proceed to SDD verification.
+
 
 **Change**: `model-control-center-tui`
 **Task**: Task 7 — Final Integration & Release Safety

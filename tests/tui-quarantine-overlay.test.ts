@@ -30,11 +30,18 @@ import {
   type QuarantineOverlayFocus,
   createQuarantineOverlay,
   buildQuarantineDraft,
+  buildQuarantineDraftFromCandidate,
+  buildQuarantineTarget,
   validateQuarantineOverlayBuffers,
   updateQuarantineOverlayBuffer,
+  updateQuarantineOverlayFilter,
   setQuarantineOverlayFocus,
+  setQuarantineOverlayLevel,
+  cycleQuarantineOverlayLevel,
+  resolveQuarantineCandidates,
+  isCandidateShadowed,
 } from "../src/tui/quarantine-overlay.js";
-import type { QuarantineEntry, QuarantineTarget, QuarantineDraft } from "../src/domain/model/quarantine.js";
+import { resolveQuarantinePrecedence, type QuarantineEntry, type QuarantineTarget, type QuarantineDraft } from "../src/domain/model/quarantine.js";
 import {
   SetQuarantineUseCase,
   ReleaseQuarantineUseCase,
@@ -339,10 +346,343 @@ function testReleaseFromTargetUsesVerifier(): Promise<void> {
     });
 }
 
+function testResolveCandidatesFromSnapshot(): void {
+  console.log("\n--- T1: create overlay candidate set is the catalog snapshot only ---");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    },
+    {
+      providerId: "anthropic",
+      modelId: "claude-3-5-sonnet",
+      modelName: "Claude 3.5 Sonnet",
+      provider: { isBlocked: false },
+    },
+  ] as unknown as Parameters<typeof resolveQuarantineCandidates>[1];
+
+  const overlayProvider = createQuarantineOverlay("create"); // default level: "provider"
+  const candidatesProvider = resolveQuarantineCandidates(overlayProvider, models);
+  assert.equal(candidatesProvider.length, 2, "returns candidates for connected providers");
+  assert.equal(candidatesProvider[0]?.kind, "provider");
+  assert.equal(candidatesProvider[0]?.providerId, "anthropic"); // sorted ascending
+  assert.equal(candidatesProvider[1]?.providerId, "openai");
+
+  const overlayModel = { ...overlayProvider, level: "modelProvider" as const };
+  const candidatesModel = resolveQuarantineCandidates(overlayModel, models);
+  assert.equal(candidatesModel.length, 2, "returns candidates for connected models");
+  assert.equal(candidatesModel[0]?.kind, "modelProvider");
+}
+
+function testDisconnectedProviderExcluded(): void {
+  console.log("\n--- T2: disconnected provider is not selectable ---");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    },
+  ] as unknown as Parameters<typeof resolveQuarantineCandidates>[1];
+
+  const overlayProvider = createQuarantineOverlay("create");
+  const candidatesProvider = resolveQuarantineCandidates(overlayProvider, models);
+  assert.equal(candidatesProvider.length, 1);
+  assert.equal(candidatesProvider.find((c) => c.providerId === "anthropic"), undefined, "disconnected provider anthropic is not present in candidates");
+}
+
+function testBuildDraftFromProviderCandidate(): void {
+  console.log("\n--- T3: Operator selects provider mode and confirms ---");
+  const overlay = {
+    ...createQuarantineOverlay("create"),
+    reasonBuffer: "  high error rate  ",
+    durationKind: "permanent" as const,
+  };
+  const candidate = {
+    kind: "provider" as const,
+    providerId: "openai",
+    modelCount: 3,
+  };
+
+  const draft = buildQuarantineDraftFromCandidate(overlay, candidate);
+  assert.equal(draft.level, "provider");
+  assert.equal(draft.providerId, "openai");
+  assert.equal(draft.reason, "high error rate");
+  assert.equal(draft.duration.kind, "permanent");
+
+  const validated = validateQuarantineOverlayBuffers(draft);
+  assert.equal(validated.ok, true);
+}
+
+function testBuildDraftFromModelProviderCandidate(): void {
+  console.log("\n--- T4: Operator selects provider-model mode and confirms ---");
+  const overlay = {
+    ...createQuarantineOverlay("create"),
+    level: "modelProvider" as const,
+    reasonBuffer: "  model specific issue  ",
+    durationKind: "permanent" as const,
+  };
+  const candidate = {
+    kind: "modelProvider" as const,
+    providerId: "openai",
+    modelId: "gpt-4o",
+    modelName: "GPT-4o",
+  };
+
+  const draft = buildQuarantineDraftFromCandidate(overlay, candidate);
+  assert.equal(draft.level, "modelProvider");
+  assert.equal(draft.providerId, "openai");
+  assert.equal(draft.modelId, "gpt-4o");
+  assert.equal(draft.reason, "model specific issue");
+  assert.equal(draft.duration.kind, "permanent");
+
+  const validated = validateQuarantineOverlayBuffers(draft);
+  assert.equal(validated.ok, true);
+
+  // Also test modify overlay with modelProvider level in buildQuarantineDraft
+  const modifyOverlay: QuarantineOverlayState = {
+    ...createQuarantineOverlay("modify", 0),
+    level: "modelProvider",
+    providerIdBuffer: "openai",
+    modelIdBuffer: "gpt-4o",
+    reasonBuffer: "modify reason",
+  };
+  const modifyDraft = buildQuarantineDraft(modifyOverlay);
+  assert.equal(modifyDraft.level, "modelProvider");
+  assert.equal(modifyDraft.providerId, "openai");
+  assert.equal(modifyDraft.modelId, "gpt-4o");
+}
+
+function testProviderModelNotGlobalModelRule(): void {
+  console.log("\n--- T5: Provider-model mode is not a global model rule ---");
+  const candidate = {
+    kind: "modelProvider" as const,
+    providerId: "openai",
+    modelId: "gpt-4o",
+    modelName: "GPT-4o",
+  };
+  const overlay = {
+    ...createQuarantineOverlay("create"),
+    level: "modelProvider" as const,
+    reasonBuffer: "model specific",
+  };
+  const draft = buildQuarantineDraftFromCandidate(overlay, candidate);
+  assert.equal(draft.level, "modelProvider");
+  assert.equal(draft.providerId, "openai");
+  assert.equal(draft.modelId, "gpt-4o");
+
+  const entryModelProvider: QuarantineEntry = {
+    level: "modelProvider",
+    providerId: draft.providerId,
+    modelId: draft.modelId,
+    type: "permanent",
+    reason: draft.reason,
+  };
+  const entryGlobalModel: QuarantineEntry = {
+    level: "model",
+    modelId: "gpt-4o",
+    type: "permanent",
+    reason: "global model block",
+  };
+  const entryProvider: QuarantineEntry = {
+    level: "provider",
+    providerId: "openai",
+    type: "permanent",
+    reason: "provider block",
+  };
+
+  const resolved = resolveQuarantinePrecedence([entryModelProvider, entryGlobalModel, entryProvider], "openai", "gpt-4o");
+  assert.equal(resolved?.level, "provider", "provider block takes precedence over model and modelProvider");
+
+  // Check candidate shadowing
+  const shadowedByProvider = isCandidateShadowed(candidate, [entryProvider]);
+  assert.equal(shadowedByProvider, true, "candidate is shadowed by provider rule");
+
+  const shadowedByModel = isCandidateShadowed(candidate, [entryGlobalModel]);
+  assert.equal(shadowedByModel, true, "candidate is shadowed by global model rule");
+
+  const shadowedBySelf = isCandidateShadowed(candidate, [entryModelProvider]);
+  assert.equal(shadowedBySelf, false, "candidate is not shadowed by its own level");
+}
+
+function testFilterNarrowsCandidates(): void {
+  console.log("\n--- T6: Typing narrows the candidate list ---");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    },
+    {
+      providerId: "anthropic",
+      modelId: "claude-3-5-sonnet",
+      modelName: "Claude 3.5 Sonnet",
+      provider: { isBlocked: false },
+    },
+  ] as unknown as Parameters<typeof resolveQuarantineCandidates>[1];
+
+  let overlay: QuarantineOverlayState = {
+    ...createQuarantineOverlay("create"),
+    level: "modelProvider",
+    candidateIndex: 1,
+  };
+
+  overlay = updateQuarantineOverlayFilter(overlay, "c");
+  overlay = updateQuarantineOverlayFilter(overlay, "l");
+  assert.equal(overlay.filterQueryBuffer, "cl");
+  assert.equal(overlay.candidateIndex, 0, "candidate index resets to 0 when filter changes");
+
+  const candidates = resolveQuarantineCandidates(overlay, models);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.kind, "modelProvider");
+  assert.equal(candidates[0]?.modelId, "claude-3-5-sonnet");
+}
+
+function testClearingFilterRestoresFullList(): void {
+  console.log("\n--- T7: Clearing the filter restores the full list ---");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    },
+    {
+      providerId: "anthropic",
+      modelId: "claude-3-5-sonnet",
+      modelName: "Claude 3.5 Sonnet",
+      provider: { isBlocked: false },
+    },
+  ] as unknown as Parameters<typeof resolveQuarantineCandidates>[1];
+
+  let overlay: QuarantineOverlayState = {
+    ...createQuarantineOverlay("create"),
+    level: "modelProvider",
+  };
+
+  overlay = updateQuarantineOverlayFilter(overlay, "c");
+  overlay = updateQuarantineOverlayFilter(overlay, "l");
+  assert.equal(resolveQuarantineCandidates(overlay, models).length, 1);
+
+  // Backspace twice
+  overlay = updateQuarantineOverlayFilter(overlay, "<backspace>");
+  overlay = updateQuarantineOverlayFilter(overlay, "<backspace>");
+  assert.equal(overlay.filterQueryBuffer, "");
+  assert.equal(resolveQuarantineCandidates(overlay, models).length, 2, "clearing filter restores all candidates");
+}
+
+function testProviderModeHasNoFilterField(): void {
+  console.log("\n--- T8: Provider mode has no filter field ---");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    },
+    {
+      providerId: "anthropic",
+      modelId: "claude-3-5-sonnet",
+      modelName: "Claude 3.5 Sonnet",
+      provider: { isBlocked: false },
+    },
+  ] as unknown as Parameters<typeof resolveQuarantineCandidates>[1];
+
+  let overlay = {
+    ...createQuarantineOverlay("create"),
+    level: "provider" as const,
+  };
+
+  // Attempting to filter in provider mode is a no-op
+  const updated = updateQuarantineOverlayFilter(overlay, "c");
+  assert.equal(updated, overlay, "updateQuarantineOverlayFilter returns overlay unchanged in provider mode");
+
+  // Even if filterQueryBuffer had text, resolveQuarantineCandidates ignores it in provider mode
+  const overlayWithFilter = { ...overlay, filterQueryBuffer: "nonmatching" };
+  const candidates = resolveQuarantineCandidates(overlayWithFilter, models);
+  assert.equal(candidates.length, 2, "provider mode candidate list ignores filterQueryBuffer");
+}
+
+function testCreateOverlayRejectsModelLevel(): void {
+  console.log("\n--- T9: Create overlay cannot author a global model rule ---");
+  const createOverlay = createQuarantineOverlay("create");
+  assert.equal(createOverlay.level, "provider");
+
+  // Explicit set to "model" in create mode is rejected (returns overlay unchanged)
+  const rejectedSet = setQuarantineOverlayLevel(createOverlay, "model");
+  assert.equal(rejectedSet.level, "provider", "setQuarantineOverlayLevel rejects level 'model' in create mode");
+
+  // Cycling in create mode toggles provider <-> modelProvider, skipping "model"
+  const cycled1 = cycleQuarantineOverlayLevel(createOverlay, "next");
+  assert.equal(cycled1.level, "modelProvider");
+  const cycled2 = cycleQuarantineOverlayLevel(cycled1, "next");
+  assert.equal(cycled2.level, "provider");
+}
+
+function testModifyOverlayPreservesModelLevel(): void {
+  console.log("\n--- T10: Modify overlay still accepts persisted model entries ---");
+  const modifyOverlay = createQuarantineOverlay("modify", 0, {
+    level: "model",
+    modelId: "gpt-4o",
+    reason: "persisted model rule",
+  });
+  assert.equal(modifyOverlay.mode, "modify");
+  assert.equal(modifyOverlay.level, "model", "modify overlay preserves seed level 'model'");
+
+  // setQuarantineOverlayLevel accepts 'model' in modify mode
+  const setModel = setQuarantineOverlayLevel(modifyOverlay, "model");
+  assert.equal(setModel.level, "model");
+
+  // Cycle levels in modify mode
+  const cycled1 = cycleQuarantineOverlayLevel(modifyOverlay, "next");
+  assert.equal(cycled1.level, "modelProvider");
+  const cycled2 = cycleQuarantineOverlayLevel(cycled1, "next");
+  assert.equal(cycled2.level, "provider");
+  const cycled3 = cycleQuarantineOverlayLevel(cycled2, "next");
+  assert.equal(cycled3.level, "model");
+
+  const draft = buildQuarantineDraft(modifyOverlay);
+  assert.equal(draft.level, "model");
+  assert.equal(draft.modelId, "gpt-4o");
+  assert.equal(draft.reason, "persisted model rule");
+}
+
+function testReleaseOverlayPreservesModelLevel(): void {
+  console.log("\n--- T11: Release overlay still accepts persisted model entries ---");
+  const seed: QuarantineEntry = {
+    level: "model",
+    modelId: "gpt-4o",
+    type: "permanent",
+    reason: "release test",
+  };
+  const releaseOverlay = createQuarantineOverlay("release", 0, seed);
+  assert.equal(releaseOverlay.mode, "release");
+  assert.equal(releaseOverlay.level, "model");
+
+  const target = buildQuarantineTarget(releaseOverlay, seed);
+  assert.equal(target.level, "model");
+  assert.equal(target.modelId, "gpt-4o");
+  assert.equal(target.providerId, undefined);
+}
+
 async function run(): Promise<void> {
   testDeriveQuarantineViewReason();
   testOverlayStateFactory();
   testOverlayBufferAcceptContract();
+  testResolveCandidatesFromSnapshot();
+  testDisconnectedProviderExcluded();
+  testBuildDraftFromProviderCandidate();
+  testBuildDraftFromModelProviderCandidate();
+  testProviderModelNotGlobalModelRule();
+  testFilterNarrowsCandidates();
+  testClearingFilterRestoresFullList();
+  testProviderModeHasNoFilterField();
+  testCreateOverlayRejectsModelLevel();
+  testModifyOverlayPreservesModelLevel();
+  testReleaseOverlayPreservesModelLevel();
   await testSubmitDraftDispatchesThroughVerifier();
   await testReleaseFromTargetUsesVerifier();
   console.log("\nAll PR3 TUI quarantine overlay pure assertions passed.");

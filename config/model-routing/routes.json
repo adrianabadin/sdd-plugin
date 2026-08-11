@@ -1,8 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatorVersion": "1.0.0",
-  "cap": 16,
-  "sizeException": null,
+  "generatorVersion": "1.1.0",
+  "cap": 32,
+  "sizeException": {
+    "reason": "Fleet SDD restringida a modelos disponibles sin Kimi y con Anthropic limitado a Opus 5",
+    "approvedBy": "aabad",
+    "approvedAt": "2026-08-08T00:00:00.000Z"
+  },
   "routes": [
     {
       "baseTemplate": "sdd-mr-base",
@@ -16,13 +20,13 @@
     },
     {
       "baseTemplate": "sdd-mr-base",
-      "providerId": "kimi-for-coding",
-      "modelId": "k3-256k"
+      "providerId": "minimax",
+      "modelId": "MiniMax-M3"
     },
     {
       "baseTemplate": "sdd-mr-base",
       "providerId": "minimax",
-      "modelId": "MiniMax-M3"
+      "modelId": "MiniMax-M2.7"
     },
     {
       "baseTemplate": "sdd-mr-base",
@@ -51,11 +55,6 @@
     },
     {
       "baseTemplate": "sdd-mr-base",
-      "providerId": "anthropic",
-      "modelId": "claude-sonnet-5"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
       "providerId": "opencode-go",
       "modelId": "deepseek-v4-flash"
     },
@@ -68,6 +67,76 @@
       "baseTemplate": "sdd-mr-base",
       "providerId": "opencode",
       "modelId": "laguna-s-2.1-free"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-sol-fast"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-terra-fast"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-luna-fast"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "opencode-go",
+      "modelId": "minimax-m3"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "opencode",
+      "modelId": "deepseek-v4-flash-free"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-3.1-pro"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-3.1-pro-low"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "gemini-3.1-pro"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "gemini-3.1-pro-preview"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-3.6-flash"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-3.6-flash-high"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-3.6-flash-low"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "antigravity-gemini-3.6-flash-medium"
+    },
+    {
+      "baseTemplate": "sdd-mr-base",
+      "providerId": "google",
+      "modelId": "gemini-3.6-flash"
     }
   ]
 }

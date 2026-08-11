@@ -25,6 +25,7 @@ import process from "node:process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import net from "node:net";
 
 import {
   WindowsModelRouteBootManager,
@@ -35,7 +36,7 @@ import {
   type BootProcessSupervisor,
 } from "../infrastructure/runtime/windows-model-route-boot-manager.js";
 import { PrismaModelRouteCatalogAdapter } from "../infrastructure/prisma/model-route-catalog.adapter.js";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../infrastructure/prisma/generated-prisma-client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 import { initializeDatabase } from "../infrastructure/runtime/database-path.js";
 import { OpenCodeHttpCanaryTransport, CanaryBlockedError } from "../infrastructure/opencode/model-route-canary.js";
@@ -44,6 +45,7 @@ import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-mo
 import { SyncConnectedModelsUseCase } from "../application/sync-connected-models/sync-connected-models.use-case.js";
 import { REQUIRED_OPENCODE_VERSION } from "../infrastructure/opencode/model-route-readiness.js";
 import { stopModelRouteSupervisor } from "../infrastructure/runtime/model-route-boot-control.js";
+import { ROUTING_HANDSHAKE_FILENAME } from "../infrastructure/runtime/model-route-handshake.js";
 import { mapModelRouteStopResult } from "./model-route-boot-stop-output.js";
 import { ModelRouteAuditLogger } from "../infrastructure/logging/model-route-audit.logger.js";
 import { RegenerateFleetAgentsUseCase } from "../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
@@ -80,21 +82,74 @@ class CliArgumentError extends Error {
   }
 }
 
+/** Probe whether something is already accepting connections on host:port. */
+function isPortAccepting(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+    const finish = (accepting: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(accepting);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => { finish(true); });
+    socket.once("timeout", () => { finish(false); });
+    socket.once("error", () => { finish(false); });
+    socket.connect(port, host);
+  });
+}
+
 export class OpenCodeProcessSupervisor implements BootProcessSupervisor {
   constructor(private readonly baseUrl: string) {}
 
+  /**
+   * Fail closed when the supervisor port is already taken.
+   *
+   * The supervisor MUST own the OpenCode serve process: it is the only way
+   * the routing secrets reach the serve child's environment. Without this
+   * guard, `waitForHealthy` happily accepts a FOREIGN OpenCode that is
+   * already listening on the same port (a version match is not proof of
+   * ownership). The boot then publishes readiness for a process that never
+   * received `SDD_MODEL_ROUTING_BOOT_ID` / `SDD_MODEL_ROUTING_SIGNING_KEY`,
+   * so every routed dispatch keeps failing with ROUTING_NOT_CONFIGURED
+   * while the supervisor reports success.
+   *
+   * Running this check BEFORE spawning also turns the port collision into an
+   * immediate, actionable error instead of an unbounded hang further down the
+   * boot sequence (catalog sync and canary both issue HTTP calls that would
+   * otherwise target the foreign server).
+   */
+  async preflight(): Promise<void> {
+    const url = new URL(this.baseUrl);
+    const port = Number(url.port || (url.protocol === "https:" ? "443" : "80"));
+    const host = url.hostname;
+
+    if (await isPortAccepting(host, port, PREFLIGHT_PROBE_TIMEOUT_MS)) {
+      throw new Error(
+        `OPENCODE_PORT_IN_USE: ${host}:${port} is already accepting connections, so the ` +
+        `supervisor cannot own the OpenCode serve process. Stop the process holding that ` +
+        `port (or point SDD_OPENCODE_BASE_URL at a free one) and start the supervisor again.`,
+      );
+    }
+  }
+
   spawnServe(env: NodeJS.ProcessEnv): BootChildProcess {
     const command = process.platform === "win32" ? "opencode.cmd" : "opencode";
-    return this.wrap(spawn(command, ["serve", "--hostname", "127.0.0.1"], { env, stdio: "ignore", windowsHide: true, shell: process.platform === "win32" }));
+    return this.wrap(spawn(command, buildServeArgs(this.baseUrl), { env, stdio: "ignore", windowsHide: true, shell: process.platform === "win32" }));
   }
 
   async waitForHealthy(child: BootChildProcess): Promise<void> {
+    let childExited = false;
+    child.once("exit", () => { childExited = true; });
     const deadline = Date.now() + 30_000;
     let lastError = "not reachable";
     while (Date.now() < deadline) {
       try {
         const response = await fetch(`${this.baseUrl}/global/health`);
         if (response.ok) {
+          if (childExited) throw new Error("OPENCODE_SERVE_EXITED: supervised serve process exited before health became authoritative");
           const body = await response.json() as { version?: unknown; data?: { version?: unknown } };
           const version = body.version ?? body.data?.version;
           if (version !== REQUIRED_OPENCODE_VERSION) throw new Error(`expected OpenCode ${REQUIRED_OPENCODE_VERSION}, got ${String(version)}`);
@@ -102,6 +157,7 @@ export class OpenCodeProcessSupervisor implements BootProcessSupervisor {
         }
         lastError = `health returned ${response.status}`;
       } catch (error) {
+        if (childExited) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -120,9 +176,30 @@ export class OpenCodeProcessSupervisor implements BootProcessSupervisor {
   }
 }
 
-function classify(err: unknown): { code: number; message: string } {
+/** Bound for the pre-spawn port probe; a loopback connect is either fast or absent. */
+export const PREFLIGHT_PROBE_TIMEOUT_MS = 1_000;
+
+export function buildServeArgs(baseUrl: string): string[] {
+  const url = new URL(baseUrl);
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  return ["serve", "--hostname", url.hostname, "--port", port];
+}
+
+/**
+ * Exit code reserved for "the supervisor port is already taken".
+ *
+ * A port collision is a diagnosable, operator-fixable precondition, not an
+ * unexpected crash, so scripts that boot the supervisor can branch on it
+ * instead of pattern-matching stderr.
+ */
+export const PORT_IN_USE_EXIT_CODE = 8;
+
+export function classify(err: unknown): { code: number; message: string } {
   if (err instanceof CliArgumentError) {
     return { code: 2, message: `argument error: ${err.message}` };
+  }
+  if (err instanceof Error && /^OPENCODE_PORT_IN_USE\b/.test(err.message)) {
+    return { code: PORT_IN_USE_EXIT_CODE, message: err.message };
   }
   if (err instanceof CatalogRouteMissingError) {
     return { code: 3, message: `catalog readback failed: ${err.message}` };
@@ -143,7 +220,7 @@ function classify(err: unknown): { code: number; message: string } {
 export async function defaultSelectParentModel(targetCanonicalId: string): Promise<string | null> {
   const [provider] = targetCanonicalId.split("/");
   if (!provider) return null;
-  if (provider === "google") return "openai/gpt-4o";
+  if (provider === "google") return "openai/gpt-5.6-luna";
   return "google/antigravity-gemini-3.6-flash-tiered";
 }
 
@@ -226,13 +303,14 @@ async function main(): Promise<number> {
   const lockPath = path.join(routingDir, "generator.lock");
   const attestationPath = path.join(routingDir, "attestation.json");
   const controlPath = path.join(routingDir, "boot-control.json");
+  const handshakePath = path.join(routingDir, ROUTING_HANDSHAKE_FILENAME);
 
   if (args.subcommand === "status") {
     return reportStatus(attestationPath, lockPath);
   }
 
   if (args.subcommand === "stop") {
-    return runStop(lockPath, attestationPath, controlPath);
+    return runStop(lockPath, attestationPath, controlPath, handshakePath);
   }
 
   // subcommand === "start"
@@ -285,8 +363,8 @@ function reportStatus(attestationPath: string, lockPath: string): number {
   }
 }
 
-function runStop(lockPath: string, attestationPath: string, controlPath: string): number {
-  const result = stopModelRouteSupervisor({ lockPath, attestationPath, controlPath });
+function runStop(lockPath: string, attestationPath: string, controlPath: string, handshakePath: string): number {
+  const result = stopModelRouteSupervisor({ lockPath, attestationPath, controlPath, handshakePath });
   const output = mapModelRouteStopResult(result);
   if (output.stdout.length > 0) process.stdout.write(output.stdout);
   if (output.stderr.length > 0) process.stderr.write(output.stderr);

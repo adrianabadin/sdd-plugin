@@ -130,7 +130,7 @@ distinguish prior intermediate work from this batch's own diff:
 | `src/application/sdd/init-round.ts` | prior work in this worktree (NOT touched by any apply pass) |
 | `src/domain/sdd/sdd-keys.ts` | prior work in this worktree (NOT touched by any apply pass) |
 | `src/infrastructure/pmc/sqlite-mcp-tool-client.adapter.ts` | **CORRECTED, see CORRECTIONS above (item 2)** — FALSE. This file IS modified by this remediation, in `d072168`. |
-| `tsconfig.test.json` | **CORRECTED, see CORRECTIONS above (item 2)** — FALSE. This file IS modified by this remediation, in `d072168` and `db8e67a`. |
+| `tsconfig.test.json` | **CORRECTED, see CORRECTIONS above (item 2)** — FALSE. This file IS modified by this remediation. **RE-CORRECTED 2026-08-04 (W-N4): the prior correction mis-attributed the change to `d072168` — `git show --name-only d072168` does not list this file. The commits that actually touched it are `db8e67a` and `e049eb2`.** |
 | `tests/_helpers/` (directory, with the SQLite OCC worker) | **CORRECTED, see CORRECTIONS above (item 3)** — UNVERIFIABLE from git, not confirmed as pre-existing. `git diff --name-status d10b292..f9c2534` marks `tests/_helpers/sqlite-mcp-tool-client-occ-worker.ts` as `A` (added) by `d072168`, the same commit as the fix it is claimed to prove. |
 | `tests/sqlite-mcp-tool-client-occ.test.ts` (file present at session start) | **CORRECTED, see CORRECTIONS above (item 3)** — UNVERIFIABLE from git, not confirmed as pre-existing. `git diff --name-status d10b292..f9c2534` marks this file as `A` (added) by `d072168`, the same commit as the fix it is claimed to prove. |
 

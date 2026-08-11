@@ -239,10 +239,21 @@ round. What WAS directly observed instead:
   same `AssertionError` (`bootstrap must not register the obsolete config
   staging hook`, actual includes an unexpected `'tool'` key), same
   location. This is a **pre-existing environmental failure unrelated to
-  this round's changes** (it stems from the Prisma bootstrap client
-  closing before the async PRAGMA call resolves in this test's temp-dir
-  setup, independent of `skillResolver`), not a regression introduced
+  this round's changes**, not a regression introduced
   here, and it is **not** one of the mandated gates for this round.
+
+  **CORRECTION 2026-08-04 (W-N7): the *conclusion* above (pre-existing, not
+  a regression) stands, but the *diagnosis* this log originally gave —
+  "it stems from the Prisma bootstrap client closing before the async
+  PRAGMA call resolves in this test's temp-dir setup" — was wrong. The
+  real cause is the unexpected `'tool'` hook key that SDD tool-surface
+  registration adds to the bootstrap result, which this test's assertion
+  does not expect; the failure reproduces byte-identically at `d10b292`,
+  older than this log claimed. The original (wrong) sentence is preserved
+  below struck through, per the in-place correction rule:**
+  ~~(it stems from the Prisma bootstrap client closing before the async
+  PRAGMA call resolves in this test's temp-dir setup, independent of
+  `skillResolver`)~~
 This is reported here as **not directly observed** for the wiring line
 itself, per the instruction to label unobserved cycles honestly.
 

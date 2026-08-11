@@ -1,10 +1,10 @@
 {
   "name": "sdd-plugin2",
-  "version": "1.0.2",
+  "version": "1.0.5",
   "description": "",
-  "main": "dist/bootstrap/index.js",
+  "main": "dist/plugin.js",
   "exports": {
-    ".": "./dist/bootstrap/index.js",
+    ".": "./dist/plugin.js",
     "./tui": "./dist/tui.js"
   },
   "files": [
@@ -14,7 +14,8 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "tsc && tsup --config tsup.tui.config.ts",
+    "build": "npm run prisma:generate && tsc && node scripts/copy-generated-prisma-package.mjs && tsup --config tsup.tui.config.ts",
+    "prisma:generate": "prisma generate",
     "test": "npm run test:all",
     "test:verification": "npx tsx test-verification.ts",
     "test:focused": "npx tsx tests/background-model-refresh-coordinator.test.ts",
@@ -26,13 +27,14 @@
     "test:typecheck:persistence": "npx tsc --project tsconfig.persistence-tests.json --noEmit",
     "test:tui:bun": "node scripts/run-bun-tests.mjs tests/tui-bun-renderer.test.ts tests/tui-numeric-editing.test.ts tests/c9-ctrls-save.bun.test.ts tests/tui-quarantine-overlay.bun.test.ts tests/tui-subscription-editing.bun.test.ts",
     "test:exports": "npx tsx tests/root-package-exports.test.ts",
+    "test:package-artifact": "npm run build && node tests/package-artifact.test.mjs",
     "test:typecheck:strict": "npx tsc --project tsconfig.test.json --noEmit",
     "test:integration": "npx tsx tests/integration-model-edit-flow.test.ts && npx tsx tests/integration-quarantine-interception.test.ts && npx tsx tests/integration-route-cleanup.test.ts && npx tsx tests/integration-package-exports.test.ts && npx tsx tests/integration-release-safety.test.ts",
     "test:release-safety": "npm run test:integration && npm run test:exports && npm run test:typecheck:strict",
     "verify:release-safety": "node scripts/verify-release-safety.mjs",
-    "generate:model-routes": "npx tsx src/cli/model-route-agents.ts",
+    "generate:model-routes": "npx tsx src/cli/model-route-agents.ts . config/model-routing/routes.json",
     "test:fleet-regeneration": "npx tsx tests/fleet-route-filter.test.ts && npx tsx tests/fleet-generation-audit.test.ts && npx tsx tests/fleet-agent-sweep.test.ts && npx tsx tests/fleet-agent-regeneration.test.ts && npx tsx tests/model-route-boot-ordering.test.ts && npx tsx tests/model-route-boot-composition.test.ts",
-    "test:model-routes": "npm run test:fleet-regeneration && npx tsx tests/model-route-disk-generator.test.ts && npx tsx tests/model-route-cli.test.ts && npx tsx tests/model-route-canary-readiness.test.ts && npx tsx tests/model-route-quarantine.test.ts && npx tsx tests/model-route-audit.test.ts && npx tsx tests/model-route-task-hook.test.ts && npx tsx tests/model-route-boot-control.test.ts",
+    "test:model-routes": "npm run test:fleet-regeneration && npx tsx tests/model-route-disk-generator.test.ts && npx tsx tests/model-route-cli.test.ts && npx tsx tests/model-route-canary-readiness.test.ts && npx tsx tests/model-route-quarantine.test.ts && npx tsx tests/model-route-audit.test.ts && npx tsx tests/model-route-task-hook.test.ts && npx tsx tests/model-route-boot-control.test.ts && npx tsx tests/model-route-process-supervisor.test.ts && npx tsx tests/model-route-handshake.test.ts",
     "canary:model-routes:real": "npx tsx tests/model-route-real-host-canary.integration.ts",
     "e2e:model-routes": "npx tsx tests/model-route-routing-e2e.test.ts",
     "test:all": "npx tsx tests/model-route-boot-control.test.ts && npm run test:verification && npm run test:focused && npm run test:adapter && npm run test:trace && npm run build && npm run test:tui && npm run test:exports && npm run test:typecheck:strict && npm run test:typecheck:persistence && npm run test:integration && npm run test:persistence:guard",

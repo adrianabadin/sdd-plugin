@@ -1,5 +1,5 @@
 import { PrismaLibSql } from "@prisma/adapter-libsql";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaModelRepositoryAdapter } from "../src/infrastructure/prisma/prisma-model-repository.adapter.js";

@@ -1,4 +1,6 @@
-import { PrismaClient } from "@prisma/client";
+import assert from "node:assert/strict";
+
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 import path from "node:path";
 import { PrismaModelRepositoryAdapter } from "../src/infrastructure/prisma/prisma-model-repository.adapter.js";
@@ -40,16 +42,16 @@ async function runTests() {
     until,
     reason: "  provider-wide outage  ",
   });
-  console.assert(pEntry.level === "provider", "Provider level returned");
-  console.assert(pEntry.providerId === "openai", "Provider ID returned");
-  console.assert(pEntry.type === "ttl", "Type ttl returned");
-  console.assert(pEntry.reason === "provider-wide outage", "Provider entry returns trimmed reason");
+  assert(pEntry.level === "provider", "Provider level returned");
+  assert(pEntry.providerId === "openai", "Provider ID returned");
+  assert(pEntry.type === "ttl", "Type ttl returned");
+  assert(pEntry.reason === "provider-wide outage", "Provider entry returns trimmed reason");
 
   // Verify in DB directly
   const pDb = await prisma.provider.findUnique({ where: { id: "openai" } });
-  console.assert(pDb?.quarantineType === "ttl", "DB provider quarantineType updated");
-  console.assert(pDb?.quarantineUntil?.getTime() === until.getTime(), "DB provider quarantineUntil updated");
-  console.assert(
+  assert(pDb?.quarantineType === "ttl", "DB provider quarantineType updated");
+  assert(pDb?.quarantineUntil?.getTime() === until.getTime(), "DB provider quarantineUntil updated");
+  assert(
     pDb?.quarantineReason === "provider-wide outage",
     "DB provider quarantineReason stored (trimmed)",
   );
@@ -62,9 +64,9 @@ async function runTests() {
     reason: "deprecated model",
   });
   const mDb = await prisma.model.findUnique({ where: { id: "gpt-4o" } });
-  console.assert(mDb?.quarantineType === "permanent", "DB model quarantineType updated");
-  console.assert(mDb?.quarantineUntil === null, "DB model quarantineUntil null for permanent");
-  console.assert(
+  assert(mDb?.quarantineType === "permanent", "DB model quarantineType updated");
+  assert(mDb?.quarantineUntil === null, "DB model quarantineUntil null for permanent");
+  assert(
     mDb?.quarantineReason === "deprecated model",
     "DB model quarantineReason stored (trimmed)",
   );
@@ -79,27 +81,27 @@ async function runTests() {
     reason: "specific provider degradation",
   });
   const mpDb = await prisma.modelProvider.findFirst({ where: { providerId: "openai", modelId: "gpt-4o" } });
-  console.assert(mpDb?.quarantineType === "ttl", "DB modelProvider quarantineType updated");
-  console.assert(
+  assert(mpDb?.quarantineType === "ttl", "DB modelProvider quarantineType updated");
+  assert(
     mpDb?.quarantineReason === "specific provider degradation",
     "DB modelProvider quarantineReason stored (trimmed)",
   );
 
   // 4. List Quarantines (must include reason)
   const list = await adapter.listQuarantines();
-  console.assert(list.length === 3, `Expected 3 quarantines, got ${list.length}`);
+  assert(list.length === 3, `Expected 3 quarantines, got ${list.length}`);
   const listedProvider = list.find((entry) => entry.level === "provider" && entry.providerId === "openai");
-  console.assert(
+  assert(
     listedProvider?.reason === "provider-wide outage",
     "List reports persisted reason for provider entry",
   );
   const listedModel = list.find((entry) => entry.level === "model" && entry.modelId === "gpt-4o");
-  console.assert(
+  assert(
     listedModel?.reason === "deprecated model",
     "List reports persisted reason for model entry",
   );
   const listedConnection = list.find((entry) => entry.level === "modelProvider");
-  console.assert(
+  assert(
     listedConnection?.reason === "specific provider degradation",
     "List reports persisted reason for connection entry",
   );
@@ -109,9 +111,9 @@ async function runTests() {
     level: "provider",
     providerId: "openai",
   });
-  console.assert(foundProvider !== null, "findQuarantine returns a non-null entry for the persisted provider target");
-  console.assert(foundProvider?.type === "ttl", "findQuarantine returns the persisted type");
-  console.assert(
+  assert(foundProvider !== null, "findQuarantine returns a non-null entry for the persisted provider target");
+  assert(foundProvider?.type === "ttl", "findQuarantine returns the persisted type");
+  assert(
     foundProvider?.reason === "provider-wide outage",
     "findQuarantine returns the persisted reason",
   );
@@ -121,7 +123,7 @@ async function runTests() {
     level: "provider",
     providerId: "anthropic",
   });
-  console.assert(foundAbsent === null, "findQuarantine returns null for a target that has no quarantine row");
+  assert(foundAbsent === null, "findQuarantine returns null for a target that has no quarantine row");
 
   // 4d. findQuarantine returns null after release
   await adapter.releaseQuarantine({ level: "provider", providerId: "openai" });
@@ -129,14 +131,14 @@ async function runTests() {
     level: "provider",
     providerId: "openai",
   });
-  console.assert(
+  assert(
     afterReleaseProvider === null,
     "findQuarantine returns null after the matching quarantine has been released",
   );
   const pDbAfter = await prisma.provider.findUnique({ where: { id: "openai" } });
-  console.assert(pDbAfter?.quarantineType === null, "Release clears quarantineType");
-  console.assert(pDbAfter?.quarantineUntil === null, "Release clears quarantineUntil");
-  console.assert(
+  assert(pDbAfter?.quarantineType === null, "Release clears quarantineType");
+  assert(pDbAfter?.quarantineUntil === null, "Release clears quarantineUntil");
+  assert(
     pDbAfter?.quarantineReason === null,
     "Release clears quarantineReason (no leftover text)",
   );
@@ -147,13 +149,13 @@ async function runTests() {
     providerId: "openai",
     modelId: "gpt-4o",
   });
-  console.assert(
+  assert(
     foundModelProvider !== null && foundModelProvider.reason === "specific provider degradation",
     "findQuarantine still returns the matching modelProvider row when the provider row was released",
   );
 
   const listAfter = await adapter.listQuarantines();
-  console.assert(listAfter.length === 2, "List length reduced after release");
+  assert(listAfter.length === 2, "List length reduced after release");
 
   // 5. Idempotent update/extension: set again with new reason and TTL
   const newUntil = new Date(Date.now() + 30 * 60 * 1000);
@@ -165,22 +167,22 @@ async function runTests() {
     until: newUntil,
     reason: "extended outage",
   });
-  console.assert(extended.reason === "extended outage", "Extension returns the new reason");
+  assert(extended.reason === "extended outage", "Extension returns the new reason");
   const mpAfter = await prisma.modelProvider.findFirst({
     where: { providerId: "openai", modelId: "gpt-4o" },
   });
-  console.assert(
+  assert(
     mpAfter?.quarantineReason === "extended outage",
     "Idempotent update overwrites the prior reason",
   );
-  console.assert(
+  assert(
     mpAfter?.quarantineUntil?.getTime() === newUntil.getTime(),
     "Idempotent update extends the TTL",
   );
   const finalCount = await prisma.modelProvider.count({
     where: { providerId: "openai", modelId: "gpt-4o", quarantineType: { not: null } },
   });
-  console.assert(
+  assert(
     finalCount === 1,
     "Idempotent set must not produce duplicate rows for the same target",
   );
@@ -193,15 +195,15 @@ async function runTests() {
     adapter.setQuarantine({ level: "model", modelId: "gpt-4o", type: "ttl", until: future2, reason: "race-2" }),
   ]);
   const finalM = await prisma.model.findUnique({ where: { id: "gpt-4o" } });
-  console.assert(finalM?.quarantineType === "ttl", "Concurrent writes leave valid state");
-  console.assert(
+  assert(finalM?.quarantineType === "ttl", "Concurrent writes leave valid state");
+  assert(
     finalM?.quarantineReason === "race-1" || finalM?.quarantineReason === "race-2",
     "Concurrent writes leave a valid trimmed reason",
   );
 
   // 7. findQuarantine on ModelProvider after concurrent updates
   const foundModel = await adapter.findQuarantine({ level: "model", modelId: "gpt-4o" });
-  console.assert(
+  assert(
     foundModel !== null && (foundModel.reason === "race-1" || foundModel.reason === "race-2"),
     "findQuarantine returns the persisted reason after concurrent writes",
   );
@@ -213,7 +215,7 @@ async function runTests() {
     modelId: "gpt-4o",
   };
   const readbackAfterExtension = await adapter.findQuarantine(targetForReadback);
-  console.assert(
+  assert(
     readbackAfterExtension?.reason === "extended outage",
     "findQuarantine honors level/providerId/modelId tuple after extension",
   );

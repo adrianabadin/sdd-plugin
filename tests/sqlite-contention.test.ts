@@ -28,7 +28,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 
 import { createPersistenceContext } from "../src/infrastructure/runtime/persistence-context.js";

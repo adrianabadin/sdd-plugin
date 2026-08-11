@@ -19,6 +19,12 @@ import { defineConfig } from "tsup";
  * Externalized: `@opencode-ai/plugin` (peer dep) and `@opentui/solid`
  * (runtime dep, kept external so the bundler does not inline a JSX
  * runtime that would conflict with OpenCode's host runtime).
+ *
+ * `bun:sqlite` and `node:sqlite` are runtime built-ins selected at call time
+ * (see `src/infrastructure/runtime/sqlite-sync.ts`). Only one of them exists in
+ * any given process, so neither can be resolved at bundle time and both must
+ * stay external — otherwise the bundle fails to build on Node and fails to
+ * load on Bun.
  */
 export default defineConfig({
   entry: { tui: "src/tui.ts" },
@@ -30,5 +36,11 @@ export default defineConfig({
   dts: false,
   sourcemap: true,
   minify: false,
-  external: ["@opencode-ai/plugin", "@opentui/solid"],
+  external: [
+    "@opencode-ai/plugin",
+    "@opentui/solid",
+    "bun:sqlite",
+    "node:sqlite",
+    /generated-prisma-client|infrastructure\/runtime\/persistence-context/,
+  ],
 });

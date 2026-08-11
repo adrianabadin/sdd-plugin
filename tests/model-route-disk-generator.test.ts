@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -24,13 +25,14 @@ import {
   decodeRoutesConfig,
   encodeRoutesConfig,
 } from "../src/infrastructure/opencode/disk-agent-generator.js";
+import { REQUIRED_OPENCODE_VERSION } from "../src/infrastructure/opencode/model-route-readiness.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const SCHEMA_VERSION = 1 as const;
 const GENERATOR_VERSION = "1.1.0";
 const ROUTING_NAMESPACE_VERSION = "sdd-mr-v1";
-const HARD_MAX_ROUTES = 24;
+const HARD_MAX_ROUTES = 32;
 const FLEET_DEFAULT_CAP = 8;
 const DESCRIPTOR_BUDGET_BYTES = 4 * 1024;
 const MANIFEST_RELATIVE = path.join(".opencode", "sdd-model-routing", "manifest.json");
@@ -194,17 +196,17 @@ async function run(): Promise<void> {
   );
   assert.equal(acceptedSeventeen.routes.length, 17, "17 routes accepted under hard max with sizeException");
 
-  // 6a. 24 routes (new hard max) WITH sizeException are accepted
-  const twentyFourRoutes = Array.from({ length: 24 }, (_, i) => makeRoute(i + 1));
+  // 6a. 32 routes (new hard max) WITH sizeException are accepted
+  const twentyFourRoutes = Array.from({ length: 32 }, (_, i) => makeRoute(i + 1));
   const acceptedTwentyFour = decodeRoutesConfig(
     makeRoutesConfig(twentyFourRoutes, {
-      sizeException: { reason: "tiered fleet needs 24 entries", approvedBy: "operator" },
+      sizeException: { reason: "tiered fleet needs 32 entries", approvedBy: "operator" },
     }),
   );
-  assert.equal(acceptedTwentyFour.routes.length, 24, "24 routes accepted at new hard max with sizeException");
+  assert.equal(acceptedTwentyFour.routes.length, 32, "32 routes accepted at new hard max with sizeException");
 
-  // 6b. >24 routes are ALWAYS rejected even with sizeException
-  const twentyFiveRoutes = Array.from({ length: 25 }, (_, i) => makeRoute(i + 1));
+  // 6b. >32 routes are ALWAYS rejected even with sizeException
+  const twentyFiveRoutes = Array.from({ length: 33 }, (_, i) => makeRoute(i + 1));
   assert.throws(
     () =>
       decodeRoutesConfig(
@@ -213,7 +215,7 @@ async function run(): Promise<void> {
         }),
       ),
     RouteCapExceededError,
-    "25 routes are rejected even with sizeException",
+    "33 routes are rejected even with sizeException",
   );
 
   // 7. Default cap is exactly 8 when no cap provided
@@ -282,7 +284,7 @@ async function run(): Promise<void> {
     assert.equal(manifest.generatorVersion, GENERATOR_VERSION);
     assert.equal(manifest.routingNamespace, ROUTING_NAMESPACE_VERSION);
     assert.equal(manifest.descriptorBudgetBytes, DESCRIPTOR_BUDGET_BYTES);
-    assert.equal(manifest.requiredOpenCodeVersion, "1.18.9", "manifest binds to OpenCode 1.18.9");
+  assert.equal(manifest.requiredOpenCodeVersion, REQUIRED_OPENCODE_VERSION, "manifest binds to the required OpenCode runtime");
     assert.equal(manifest.routes.length, 3);
     assert.ok(manifest.generationEpoch.length > 0, "generation epoch present");
     assert.ok(manifest.workspaceIdentity.length > 0, "workspace identity present");
@@ -351,6 +353,13 @@ async function run(): Promise<void> {
     const second = await generate(workspaceRoot, routesPath);
     assert.equal(second.manifest.generationEpoch, firstEpoch, "epoch stable across idempotent runs");
     assert.deepEqual(second.manifest.fileHashes, manifest.fileHashes, "file hashes stable across idempotent runs");
+    assert.deepEqual(
+      existsSync(path.join(workspaceRoot, ".opencode", "sdd-model-routing", "journal"))
+        ? readdirSync(path.join(workspaceRoot, ".opencode", "sdd-model-routing", "journal"))
+        : [],
+      [],
+      "successful generation leaves no recovery journal entries",
+    );
 
     // 17. Modified owned file blocks cleanup: modify a route's files
     // THEN remove that route from config; the generator must refuse to

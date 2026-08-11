@@ -13,6 +13,7 @@
  * write, never publish, and never reach the verifier.
  */
 import {
+  isQuarantineActive,
   ttlHoursToUntil,
   validateQuarantineDraft,
   type QuarantineDraft,
@@ -20,6 +21,8 @@ import {
   type QuarantineLevel,
   type QuarantineTarget,
 } from "../domain/model/quarantine.js";
+import { buildProviderSummaries, filterModels } from "./catalog-view.js";
+import type { ConnectedModelInfo } from "../domain/model/connected-model.js";
 
 export type QuarantineOverlayMode = "create" | "modify" | "release";
 
@@ -38,15 +41,40 @@ export type QuarantineOverlayFocus =
 
 export type QuarantineOverlayDuration = "permanent" | "ttl";
 
+export interface QuarantineProviderCandidate {
+  readonly kind: "provider";
+  readonly providerId: string;
+  readonly modelCount: number;
+}
+
+export interface QuarantineModelCandidate {
+  readonly kind: "modelProvider";
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly modelName: string;
+}
+
+export type QuarantineCandidate =
+  | QuarantineProviderCandidate
+  | QuarantineModelCandidate;
+
+export const CREATE_LEVELS: readonly QuarantineLevel[] = ["provider", "modelProvider"];
+export const MODIFY_LEVELS: readonly QuarantineLevel[] = ["provider", "model", "modelProvider"];
+export const CANDIDATE_WINDOW_SIZE = 8;
+export const NO_CANDIDATE_SELECTED_ERROR =
+  "Select a connected target before committing";
+
 export interface QuarantineOverlayState {
   readonly mode: QuarantineOverlayMode;
-  readonly level: Extract<QuarantineLevel, "provider" | "model">;
+  readonly level: QuarantineLevel;
   readonly providerIdBuffer: string;
   readonly modelIdBuffer: string;
   readonly reasonBuffer: string;
   readonly durationKind: QuarantineOverlayDuration;
   readonly ttlHoursBuffer: string;
   readonly focus: QuarantineOverlayFocus;
+  readonly filterQueryBuffer: string;
+  readonly candidateIndex: number;
   readonly targetIndex?: number;
   readonly error?: string;
 }
@@ -70,7 +98,7 @@ export function createQuarantineOverlay(
 ): QuarantineOverlayState {
   const base: QuarantineOverlayState = {
     mode,
-    level: seed?.level === "model" ? "model" : "provider",
+    level: mode === "create" ? "provider" : (seed?.level ?? "provider"),
     providerIdBuffer: trimOrEmpty(seed?.providerId),
     modelIdBuffer: trimOrEmpty(seed?.modelId),
     reasonBuffer: trimOrEmpty(seed?.reason),
@@ -79,6 +107,8 @@ export function createQuarantineOverlay(
       ? formatRemainingHours(seed.until)
       : "",
     focus: mode === "release" ? null : DEFAULT_OVERLAY_FOCUS,
+    filterQueryBuffer: "",
+    candidateIndex: 0,
   };
   return targetIndex === undefined ? base : { ...base, targetIndex };
 }
@@ -219,11 +249,148 @@ export function setQuarantineOverlayDuration(
   return next;
 }
 
+export function updateQuarantineOverlayFilter(
+  overlay: QuarantineOverlayState,
+  rawInput: string,
+): QuarantineOverlayState {
+  if (overlay.mode !== "create" || overlay.level !== "modelProvider") {
+    return overlay;
+  }
+  let nextText = overlay.filterQueryBuffer;
+  if (rawInput === "<backspace>") {
+    nextText = nextText.slice(0, -1);
+  } else if (rawInput.length > 0) {
+    nextText += rawInput;
+  }
+  if (nextText === overlay.filterQueryBuffer) return overlay;
+  const nextState: QuarantineOverlayState = {
+    ...overlay,
+    filterQueryBuffer: nextText,
+    candidateIndex: 0,
+  };
+  return clearOverlayError(nextState);
+}
+
 export function setQuarantineOverlayLevel(
   overlay: QuarantineOverlayState,
-  level: Extract<QuarantineLevel, "provider" | "model">,
+  level: QuarantineLevel,
 ): QuarantineOverlayState {
-  return { ...overlay, level };
+  if (overlay.mode === "create" && level === "model") {
+    return overlay;
+  }
+  if (overlay.level === level) return overlay;
+  const next: QuarantineOverlayState = {
+    ...overlay,
+    level,
+    filterQueryBuffer: overlay.mode === "create" ? "" : overlay.filterQueryBuffer,
+    candidateIndex: overlay.mode === "create" ? 0 : overlay.candidateIndex,
+  };
+  return clearOverlayError(next);
+}
+
+export function cycleQuarantineOverlayLevel(
+  overlay: QuarantineOverlayState,
+  direction: "next" | "prev",
+): QuarantineOverlayState {
+  if (overlay.mode === "release") return overlay;
+  const levels = overlay.mode === "create" ? CREATE_LEVELS : MODIFY_LEVELS;
+  const currentIdx = levels.indexOf(overlay.level);
+  const baseIdx = currentIdx === -1 ? 0 : currentIdx;
+  const nextIdx =
+    direction === "next"
+      ? (baseIdx + 1) % levels.length
+      : (baseIdx - 1 + levels.length) % levels.length;
+  const targetLevel = levels[nextIdx] ?? "provider";
+  return setQuarantineOverlayLevel(overlay, targetLevel);
+}
+
+export function resolveQuarantineCandidates(
+  overlay: QuarantineOverlayState | null | undefined,
+  models: ReadonlyArray<ConnectedModelInfo>,
+): QuarantineCandidate[] {
+  if (!overlay || overlay.mode !== "create") return [];
+  if (overlay.level === "provider") {
+    return buildProviderSummaries(models).map((p) => ({
+      kind: "provider",
+      providerId: p.providerId,
+      modelCount: p.modelCount,
+    }));
+  }
+  if (overlay.level === "modelProvider") {
+    return filterModels(models, overlay.filterQueryBuffer).map((m) => ({
+      kind: "modelProvider",
+      providerId: m.providerId,
+      modelId: m.modelId,
+      modelName: m.modelName,
+    }));
+  }
+  return [];
+}
+
+export function clampCandidateIndex(index: number, count: number): number {
+  if (count <= 0 || !Number.isFinite(index)) return 0;
+  return Math.min(Math.max(Math.trunc(index), 0), count - 1);
+}
+
+export function moveQuarantineCandidateCursor(
+  overlay: QuarantineOverlayState,
+  direction: "up" | "down",
+  candidateCount: number,
+): QuarantineOverlayState {
+  if (candidateCount <= 0 || overlay.mode !== "create") return overlay;
+  const base = clampCandidateIndex(overlay.candidateIndex, candidateCount);
+  const nextIndex =
+    direction === "down"
+      ? (base + 1) % candidateCount
+      : (base - 1 + candidateCount) % candidateCount;
+  const nextState: QuarantineOverlayState = {
+    ...overlay,
+    candidateIndex: nextIndex,
+  };
+  return clearOverlayError(nextState);
+}
+
+export function resolveSelectedCandidate(
+  overlay: QuarantineOverlayState,
+  candidates: readonly QuarantineCandidate[],
+): QuarantineCandidate | null {
+  if (candidates.length === 0) return null;
+  const idx = clampCandidateIndex(overlay.candidateIndex, candidates.length);
+  return candidates[idx] ?? null;
+}
+
+export function isCandidateShadowed(
+  candidate: QuarantineCandidate,
+  entries: ReadonlyArray<QuarantineEntry>,
+  now = new Date(),
+): boolean {
+  if (candidate.kind !== "modelProvider") return false;
+  return entries.some((e) => {
+    if (!isQuarantineActive(e, now)) return false;
+    if (e.level === "provider" && e.providerId === candidate.providerId) return true;
+    if (e.level === "model" && e.modelId === candidate.modelId) return true;
+    return false;
+  });
+}
+
+export function formatCandidateLabel(candidate: QuarantineCandidate): string {
+  if (candidate.kind === "provider") {
+    return `${candidate.providerId} (${candidate.modelCount} ${candidate.modelCount === 1 ? "model" : "models"})`;
+  }
+  return `${candidate.providerId} / ${candidate.modelName} [${candidate.modelId}]`;
+}
+
+export function computeCandidateWindow(
+  index: number,
+  total: number,
+  size = CANDIDATE_WINDOW_SIZE,
+): { start: number; end: number } {
+  if (total <= 0) return { start: 0, end: 0 };
+  const i = clampCandidateIndex(index, total);
+  const s = Math.max(0, Math.min(i - Math.floor(size / 2), total - size));
+  const start = Math.max(0, s);
+  const end = Math.min(total, start + size);
+  return { start, end };
 }
 
 export function setQuarantineOverlayError(
@@ -241,6 +408,40 @@ export function clearOverlayError(
   return rest as QuarantineOverlayState;
 }
 
+export function buildQuarantineDraftFromCandidate(
+  overlay: QuarantineOverlayState,
+  candidate: QuarantineCandidate,
+): QuarantineDraft {
+  if (overlay.mode !== "create") {
+    throw new Error("buildQuarantineDraftFromCandidate called on a non-create overlay");
+  }
+  if (candidate.kind !== overlay.level) {
+    throw new Error("Candidate kind does not match the overlay level");
+  }
+  const reason = overlay.reasonBuffer.trim();
+  const duration =
+    overlay.durationKind === "ttl"
+      ? { kind: "ttl" as const, hours: Number(overlay.ttlHoursBuffer) }
+      : { kind: "permanent" as const };
+
+  if (candidate.kind === "provider") {
+    return {
+      level: "provider",
+      providerId: candidate.providerId,
+      reason,
+      duration,
+    };
+  }
+
+  return {
+    level: "modelProvider",
+    providerId: candidate.providerId,
+    modelId: candidate.modelId,
+    reason,
+    duration,
+  };
+}
+
 /**
  * Build a `QuarantineDraft` from the overlay state. The builder trims
  * the reason and the relevant id, but does NOT validate: callers should
@@ -253,25 +454,33 @@ export function buildQuarantineDraft(
     throw new Error("buildQuarantineDraft called on a release overlay");
   }
   const reason = overlay.reasonBuffer.trim();
+  const duration =
+    overlay.durationKind === "ttl"
+      ? { kind: "ttl" as const, hours: Number(overlay.ttlHoursBuffer) }
+      : { kind: "permanent" as const };
+
   if (overlay.level === "provider") {
     return {
       level: "provider",
       providerId: overlay.providerIdBuffer.trim(),
       reason,
-      duration:
-        overlay.durationKind === "ttl"
-          ? { kind: "ttl", hours: Number(overlay.ttlHoursBuffer) }
-          : { kind: "permanent" },
+      duration,
+    };
+  }
+  if (overlay.level === "modelProvider") {
+    return {
+      level: "modelProvider",
+      providerId: overlay.providerIdBuffer.trim(),
+      modelId: overlay.modelIdBuffer.trim(),
+      reason,
+      duration,
     };
   }
   return {
     level: "model",
     modelId: overlay.modelIdBuffer.trim(),
     reason,
-    duration:
-      overlay.durationKind === "ttl"
-        ? { kind: "ttl", hours: Number(overlay.ttlHoursBuffer) }
-        : { kind: "permanent" },
+    duration,
   };
 }
 

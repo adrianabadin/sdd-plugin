@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 
 import { PrismaModelRouteQuarantineAdapter } from "../src/infrastructure/prisma/model-route-quarantine.adapter.js";

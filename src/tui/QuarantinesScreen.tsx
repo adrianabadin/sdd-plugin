@@ -3,7 +3,14 @@ import type { JSX } from "@opentui/solid";
 import { jsx, jsxs } from "@opentui/solid/jsx-runtime";
 import type { QuarantineEntry } from "../domain/model/quarantine.js";
 import { deriveQuarantineView } from "./quarantine-view.js";
-import type { QuarantineOverlayState } from "./quarantine-overlay.js";
+import {
+  type QuarantineOverlayState,
+  type QuarantineCandidate,
+  clampCandidateIndex,
+  computeCandidateWindow,
+  formatCandidateLabel,
+  isCandidateShadowed,
+} from "./quarantine-overlay.js";
 
 export interface QuarantinesScreenProps {
   entries: QuarantineEntry[];
@@ -13,6 +20,9 @@ export interface QuarantinesScreenProps {
   notice?: string;
   api?: TuiPluginApi;
   overlay?: QuarantineOverlayState | null;
+  candidates?: readonly QuarantineCandidate[];
+  catalogStatus?: "loading" | "error" | "ready";
+  catalogErrorMessage?: string;
 }
 
 export function QuarantinesScreen(props: QuarantinesScreenProps): JSX.Element {
@@ -22,6 +32,8 @@ export function QuarantinesScreen(props: QuarantinesScreenProps): JSX.Element {
   const view = deriveQuarantineView(props.entries);
   const selectedIdx = props.selectedIndex ?? 0;
   const overlay = props.overlay ?? null;
+  const candidates = props.candidates ?? [];
+  const catalogStatus = props.catalogStatus ?? "ready";
 
   if (props.loading) {
     return jsxs("box", {
@@ -50,8 +62,9 @@ export function QuarantinesScreen(props: QuarantinesScreenProps): JSX.Element {
   // Render Overlay form when active
   if (overlay) {
     const isRelease = overlay.mode === "release";
+    const isCreate = overlay.mode === "create";
     const title =
-      overlay.mode === "create"
+      isCreate
         ? "[QUARANTINE OVERLAY: CREATE RULE]"
         : overlay.mode === "modify"
           ? "[QUARANTINE OVERLAY: MODIFY RULE]"
@@ -59,6 +72,95 @@ export function QuarantinesScreen(props: QuarantinesScreenProps): JSX.Element {
 
     const selectedItem =
       overlay.targetIndex !== undefined ? view.items[overlay.targetIndex] : undefined;
+
+    let targetContent: JSX.Element;
+    if (isCreate) {
+      if (candidates.length === 0) {
+        targetContent = jsx("box", {
+          marginTop: 1,
+          children: jsx("text", {
+            color: catalogStatus === "error" ? "red" : "yellow",
+            dimColor: catalogStatus === "loading",
+            children:
+              catalogStatus === "loading"
+                ? "Loading connected models…"
+                : catalogStatus === "error"
+                  ? `Catalog unavailable: ${props.catalogErrorMessage ?? "unknown error"}`
+                  : overlay.level === "modelProvider" && overlay.filterQueryBuffer
+                    ? `No connected model matches "${overlay.filterQueryBuffer}" — refine the filter or press Esc`
+                    : "No connected targets available — press Esc to close",
+          }),
+        });
+      } else {
+        const window = computeCandidateWindow(overlay.candidateIndex, candidates.length);
+        const candidateRows: JSX.Element[] = [];
+        if (window.start > 0) {
+          candidateRows.push(
+            jsx("text", { dimColor: true, children: `  … ${window.start} above` })
+          );
+        }
+        for (let i = window.start; i < window.end; i++) {
+          const candidate = candidates[i]!;
+          const isSelected = i === clampCandidateIndex(overlay.candidateIndex, candidates.length);
+          const prefix = isSelected ? "> " : "  ";
+          const shadowed = isCandidateShadowed(candidate, props.entries);
+          const shadowedSuffix = shadowed ? "  (shadowed by an active provider/model rule)" : "";
+          candidateRows.push(
+            jsxs("box", {
+              flexDirection: "row",
+              children: [
+                jsx("text", {
+                  bold: isSelected,
+                  color: isSelected ? "green" : shadowed ? "gray" : "white",
+                  children: `${prefix}${formatCandidateLabel(candidate)}`,
+                }),
+                shadowed
+                  ? jsx("text", { dimColor: true, children: shadowedSuffix })
+                  : null,
+              ],
+            })
+          );
+        }
+        if (window.end < candidates.length) {
+          candidateRows.push(
+            jsx("text", { dimColor: true, children: `  … ${candidates.length - window.end} more` })
+          );
+        }
+        targetContent = jsxs("box", {
+          flexDirection: "column",
+          marginTop: 1,
+          children: [
+            jsx("text", {
+              bold: overlay.focus === "id",
+              color: overlay.focus === "id" ? "green" : "white",
+              children: `${overlay.focus === "id" ? "> " : "  "}Select Target:`,
+            }),
+            ...candidateRows,
+          ],
+        });
+      }
+    } else {
+      targetContent = jsxs("box", {
+        flexDirection: "row",
+        children: [
+          jsx("text", {
+            bold: overlay.focus === "id",
+            color: overlay.focus === "id" ? "green" : "white",
+            children: `${overlay.focus === "id" ? "> " : "  "}${
+              overlay.level === "provider" ? "Provider ID" : "Model ID"
+            }: `,
+          }),
+          jsx("text", {
+            bold: overlay.focus === "id",
+            color: "white",
+            children:
+              (overlay.level === "provider"
+                ? overlay.providerIdBuffer
+                : overlay.modelIdBuffer) || "<empty>",
+          }),
+        ],
+      });
+    }
 
     return jsxs("box", {
       flexDirection: "column",
@@ -105,10 +207,17 @@ export function QuarantinesScreen(props: QuarantinesScreenProps): JSX.Element {
                       color: overlay.level === "provider" ? "cyan" : "gray",
                       children: "[ Provider ] ",
                     }),
+                    !isCreate
+                      ? jsx("text", {
+                          bold: overlay.level === "model",
+                          color: overlay.level === "model" ? "cyan" : "gray",
+                          children: "[ Model ] ",
+                        })
+                      : null,
                     jsx("text", {
-                      bold: overlay.level === "model",
-                      color: overlay.level === "model" ? "cyan" : "gray",
-                      children: "[ Model ]",
+                      bold: overlay.level === "modelProvider",
+                      color: overlay.level === "modelProvider" ? "cyan" : "gray",
+                      children: "[ Provider/Model ]",
                     }),
                     jsx("text", {
                       dimColor: true,
@@ -116,27 +225,28 @@ export function QuarantinesScreen(props: QuarantinesScreenProps): JSX.Element {
                     }),
                   ],
                 }),
-                // Identifier Row
-                jsxs("box", {
-                  flexDirection: "row",
-                  children: [
-                    jsx("text", {
-                      bold: overlay.focus === "id",
-                      color: overlay.focus === "id" ? "green" : "white",
-                      children: `${overlay.focus === "id" ? "> " : "  "}${
-                        overlay.level === "provider" ? "Provider ID" : "Model ID"
-                      }: `,
-                    }),
-                    jsx("text", {
-                      bold: overlay.focus === "id",
-                      color: "white",
-                      children:
-                        (overlay.level === "provider"
-                          ? overlay.providerIdBuffer
-                          : overlay.modelIdBuffer) || "<empty>",
-                    }),
-                  ],
-                }),
+
+                // Filter Row (Create mode + Provider/Model level only)
+                isCreate && overlay.level === "modelProvider"
+                  ? jsxs("box", {
+                      flexDirection: "row",
+                      children: [
+                        jsx("text", {
+                          bold: overlay.focus === "id",
+                          color: overlay.focus === "id" ? "green" : "white",
+                          children: "  Filter: ",
+                        }),
+                        jsx("text", {
+                          color: "white",
+                          children: overlay.filterQueryBuffer || "<type to filter>",
+                        }),
+                      ],
+                    })
+                  : null,
+
+                // Target Selection (Create mode) vs Identifier Row (Modify mode)
+                targetContent,
+
                 // Reason Row
                 jsxs("box", {
                   flexDirection: "row",
@@ -199,7 +309,9 @@ export function QuarantinesScreen(props: QuarantinesScreenProps): JSX.Element {
                 jsx("text", {
                   dimColor: true,
                   marginTop: 1,
-                  children: "Tab/Shift+Tab navigate field · Enter commit · Esc cancel",
+                  children: isCreate
+                    ? "↑/↓ select target · Tab/Shift+Tab navigate field · Enter commit · Esc cancel"
+                    : "Tab/Shift+Tab navigate field · Enter commit · Esc cancel",
                 }),
               ],
             }),

@@ -7,7 +7,7 @@
  * subscription columns (design 0695919c).
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "../../generated/prisma/client.js";
 
 import type { ModelRouteQuarantinePort } from "../../ports/model-route-quarantine.port.js";
 import type { QuarantineEntry, QuarantineLevel } from "../../domain/model/quarantine.js";

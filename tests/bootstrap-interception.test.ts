@@ -5,7 +5,7 @@ import path from 'node:path';
 import { SddPlugin } from '../src/bootstrap/index.js';
 import { getOrCreateModelConfigRegistry } from '../src/infrastructure/runtime/model-config-registry.js';
 import { getGlobalQuarantineStore } from '../src/infrastructure/runtime/quarantine-store.js';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient } from '../src/generated/prisma/client.js';
 import { PrismaLibSql } from '@prisma/adapter-libsql';
 
 import {

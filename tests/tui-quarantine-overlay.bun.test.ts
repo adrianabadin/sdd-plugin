@@ -36,6 +36,8 @@ import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 import type { QuarantineEntry } from "../src/domain/model/quarantine.js";
 import type { SetQuarantineCommand } from "../src/ports/quarantine-write.port.js";
 import type { QuarantineTarget } from "../src/domain/model/quarantine.js";
+import type { ConnectedModelInfo } from "../src/domain/model/connected-model.js";
+import type { ModelCatalogPort } from "../src/ports/model-catalog.port.js";
 
 console.log("--- PR3 Phase 3: TUI Quarantine overlay (Bun renderer) ---");
 
@@ -84,12 +86,19 @@ interface MountOptions {
   entries: QuarantineEntry[];
   setBehaviour: "accept" | "reject";
   releaseBehaviour: "accept" | "disagree";
+  models?: ConnectedModelInfo[];
 }
 
 async function mountQuarantineScreen(options: MountOptions): Promise<Harness> {
   const layers: LayerSnapshot[] = [];
   const sets: SetCall[] = [];
   const releases: ReleaseCall[] = [];
+
+  const catalog: ModelCatalogPort | undefined = options.models
+    ? ({
+        getConnectedModels: async () => options.models!,
+      } as unknown as ModelCatalogPort)
+    : undefined;
 
   const api: TuiPluginApi = {
     app: { version: "1.18.4" },
@@ -181,7 +190,7 @@ async function mountQuarantineScreen(options: MountOptions): Promise<Harness> {
     () =>
       createComponent(ModelControlCenter, {
         api,
-        catalog: undefined,
+        catalog,
         detailQuery: undefined,
         saveDetailUseCase: undefined,
         listQuarantinesUseCase,
@@ -281,10 +290,19 @@ async function testQuarantinesListWithoutOverlay(): Promise<void> {
 
 async function testCreateOverlayRegistrationAndRender(): Promise<void> {
   console.log("\n[case] create overlay — priority-300 capture layer is registered while active");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    } as unknown as ConnectedModelInfo,
+  ];
   const h = await mountQuarantineScreen({
     entries: [],
     setBehaviour: "accept",
     releaseBehaviour: "accept",
+    models,
   });
 
   await navigateToQuarantines(h);
@@ -312,7 +330,7 @@ async function testCreateOverlayRegistrationAndRender(): Promise<void> {
   // The overlay form is visible with the field labels.
   const frame = h.frame();
   assert(frame.includes("Scope"), "create overlay shows the scope field");
-  assert(frame.includes("Provider ID"), "create overlay shows the ID field");
+  assert(frame.includes("Select Target:"), "create overlay shows the select target field");
   assert(frame.includes("Reason"), "create overlay shows the reason field");
   assert(frame.includes("Duration"), "create overlay shows the duration field");
 
@@ -321,10 +339,19 @@ async function testCreateOverlayRegistrationAndRender(): Promise<void> {
 
 async function testCreateOverlayCancelDisposesCaptureLayer(): Promise<void> {
   console.log("\n[case] cancel the create overlay — capture layer is disposed");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    } as unknown as ConnectedModelInfo,
+  ];
   const h = await mountQuarantineScreen({
     entries: [],
     setBehaviour: "accept",
     releaseBehaviour: "accept",
+    models,
   });
 
   await navigateToQuarantines(h);
@@ -345,24 +372,26 @@ async function testCreateOverlayCancelDisposesCaptureLayer(): Promise<void> {
 
 async function testCreateOverlayInvalidInputBlocksWrite(): Promise<void> {
   console.log("\n[case] create overlay — blank reason blocks the write");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    } as unknown as ConnectedModelInfo,
+  ];
   const h = await mountQuarantineScreen({
     entries: [],
     setBehaviour: "accept",
     releaseBehaviour: "accept",
+    models,
   });
 
   await navigateToQuarantines(h);
   await h.runKey("c");
   await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
 
-  // Type a non-empty provider id and a blank reason, then try to commit.
-  await h.runKey("o");
-  await h.runKey("p");
-  await h.runKey("e");
-  await h.runKey("n");
-  await h.runKey("a");
-  await h.runKey("i");
-  // Tab past the reason (no reason typed) and onto the duration.
+  // Tab past the reason (no reason typed) and try to commit.
   await h.runKey("tab");
   await h.runKey("enter");
 
@@ -382,29 +411,35 @@ async function testCreateOverlayInvalidInputBlocksWrite(): Promise<void> {
 
 async function testCreateOverlayValidInputDispatchesUseCase(): Promise<void> {
   console.log("\n[case] create overlay — valid input dispatches setQuarantineUseCase exactly once");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    } as unknown as ConnectedModelInfo,
+  ];
   const h = await mountQuarantineScreen({
     entries: [],
     setBehaviour: "accept",
     releaseBehaviour: "accept",
+    models,
   });
 
   await navigateToQuarantines(h);
   await h.runKey("c");
   await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
 
-  // Type provider id, reason, then commit on the duration field.
-  for (const ch of "openai") await h.runKey(ch);
+  // Tab to reason field, type reason, then commit.
   await h.runKey("tab");
   for (const ch of "rate limit") await h.runKey(ch);
-  await h.runKey("tab");
-  // Default duration is permanent, so no TTL typing needed.
   await h.runKey("enter");
 
   await h.waitForFrame((frame) => !frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
   assert.equal(h.sets.length, 1, "submit dispatches the use case exactly once");
   const submitted = h.sets[0]?.cmd;
   assert.ok(submitted, "submitted command captured");
-  assert.equal(submitted!.providerId, "openai", "submitted command carries the typed provider id");
+  assert.equal(submitted!.providerId, "openai", "submitted command carries the selected provider id");
   assert.equal(submitted!.reason, "rate limit", "submitted command carries the trimmed reason");
   assert.equal(submitted!.type, "permanent", "submitted command carries the permanent duration");
 
@@ -416,19 +451,26 @@ async function testCreateOverlayValidInputDispatchesUseCase(): Promise<void> {
 
 async function testCreateOverlayVerifierRejectionKeepsOverlay(): Promise<void> {
   console.log("\n[case] create overlay — verifier rejection keeps the overlay open");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    } as unknown as ConnectedModelInfo,
+  ];
   const h = await mountQuarantineScreen({
     entries: [],
     setBehaviour: "reject",
     releaseBehaviour: "accept",
+    models,
   });
 
   await navigateToQuarantines(h);
   await h.runKey("c");
   await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
-  for (const ch of "openai") await h.runKey(ch);
   await h.runKey("tab");
   for (const ch of "rate limit") await h.runKey(ch);
-  await h.runKey("tab");
   await h.runKey("enter");
 
   // The overlay stays open and reports the verifier error.
@@ -508,6 +550,277 @@ async function testReleaseOverlayVerifierRejectionBlocks(): Promise<void> {
   h.destroy();
 }
 
+async function testEmptyCatalogPreventsSubmission(): Promise<void> {
+  console.log("\n[case] empty catalog keeps overlay open and dispatches no submit");
+  const h = await mountQuarantineScreen({
+    entries: [],
+    setBehaviour: "accept",
+    releaseBehaviour: "accept",
+    models: [],
+  });
+
+  await navigateToQuarantines(h);
+  await h.runKey("c");
+  await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+  await h.runKey("enter");
+
+  assert.equal(h.sets.length, 0, "no submit draft dispatched when catalog is empty");
+  const frame = h.frame();
+  assert(
+    frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"),
+    "overlay remains open",
+  );
+  assert(
+    frame.includes("No connected targets available"),
+    "empty target hint rendered",
+  );
+  h.destroy();
+}
+
+async function testZeroFilterMatchesPreventsSubmission(): Promise<void> {
+  console.log("\n[case] zero filter matches keeps overlay open and dispatches no submit");
+  const models = [
+    {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      modelName: "GPT-4o",
+      provider: { isBlocked: false },
+    } as unknown as ConnectedModelInfo,
+  ];
+  const h = await mountQuarantineScreen({
+    entries: [],
+    setBehaviour: "accept",
+    releaseBehaviour: "accept",
+    models,
+  });
+
+  await navigateToQuarantines(h);
+  await h.runKey("c");
+  await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  // Move focus to scope, switch to Provider/Model, then move focus back to id (filter)
+  await h.runKey("shift+tab");
+  await h.runKey("right");
+  await h.waitForFrame((frame) => frame.includes("[ Provider/Model ]"));
+  await h.runKey("tab");
+
+  // Type a filter that excludes all models
+  for (const ch of "ZZZZZ") await h.runKey(ch);
+  await h.waitForFrame((frame) => frame.includes("Filter: ZZZZZ"));
+
+  // Press Enter while candidates list is empty
+  await h.runKey("enter");
+
+  assert.equal(h.sets.length, 0, "no submit draft dispatched when filter yields zero candidates");
+  const frame = h.frame();
+  assert(
+    frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"),
+    "overlay remains open",
+  );
+  assert(
+    frame.includes('No connected model matches "ZZZZZ"'),
+    "zero match refine hint rendered",
+  );
+  h.destroy();
+}
+
+async function testDownMovesCandidateCursor(): Promise<void> {
+  console.log("\n[case] Down moves candidate cursor within bounds");
+  const models = [
+    { providerId: "anthropic", modelId: "claude-3-5-sonnet", modelName: "Claude 3.5 Sonnet", provider: { isBlocked: false } },
+    { providerId: "google", modelId: "gemini-1.5-pro", modelName: "Gemini 1.5 Pro", provider: { isBlocked: false } },
+    { providerId: "openai", modelId: "gpt-4o", modelName: "GPT-4o", provider: { isBlocked: false } },
+  ] as unknown as ConnectedModelInfo[];
+
+  const h = await mountQuarantineScreen({
+    entries: [],
+    setBehaviour: "accept",
+    releaseBehaviour: "accept",
+    models,
+  });
+
+  await navigateToQuarantines(h);
+  await h.runKey("c");
+  await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  // Initial candidate index is 0 ("anthropic")
+  let frame = h.frame();
+  assert(frame.includes("> anthropic"), "initial candidate index is 0 (anthropic selected)");
+
+  // Press down -> candidate index 1 ("google")
+  await h.runKey("down");
+  await h.waitForFrame((frame) => frame.includes("> google"));
+  frame = h.frame();
+  assert(frame.includes("> google"), "down key advances cursor to index 1 (google)");
+
+  // Press down -> candidate index 2 ("openai")
+  await h.runKey("down");
+  await h.waitForFrame((frame) => frame.includes("> openai"));
+  frame = h.frame();
+  assert(frame.includes("> openai"), "down key advances cursor to index 2 (openai)");
+
+  h.destroy();
+}
+
+async function testUpMovesCandidateCursor(): Promise<void> {
+  console.log("\n[case] Up moves candidate cursor within bounds");
+  const models = [
+    { providerId: "anthropic", modelId: "claude-3-5-sonnet", modelName: "Claude 3.5 Sonnet", provider: { isBlocked: false } },
+    { providerId: "google", modelId: "gemini-1.5-pro", modelName: "Gemini 1.5 Pro", provider: { isBlocked: false } },
+    { providerId: "openai", modelId: "gpt-4o", modelName: "GPT-4o", provider: { isBlocked: false } },
+  ] as unknown as ConnectedModelInfo[];
+
+  const h = await mountQuarantineScreen({
+    entries: [],
+    setBehaviour: "accept",
+    releaseBehaviour: "accept",
+    models,
+  });
+
+  await navigateToQuarantines(h);
+  await h.runKey("c");
+  await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  // Press up from index 0 -> wraps to index 2 ("openai")
+  await h.runKey("up");
+  await h.waitForFrame((frame) => frame.includes("> openai"));
+  let frame = h.frame();
+  assert(frame.includes("> openai"), "up key wraps cursor to index 2 (openai)");
+
+  // Press up from index 2 -> index 1 ("google")
+  await h.runKey("up");
+  await h.waitForFrame((frame) => frame.includes("> google"));
+  frame = h.frame();
+  assert(frame.includes("> google"), "up key retreats cursor to index 1 (google)");
+
+  h.destroy();
+}
+
+async function testUnderlyingListNavResumesAfterEsc(): Promise<void> {
+  console.log("\n[case] underlying list navigation resumes after Esc");
+  const models = [
+    { providerId: "anthropic", modelId: "claude-3-5-sonnet", modelName: "Claude 3.5 Sonnet", provider: { isBlocked: false } },
+    { providerId: "openai", modelId: "gpt-4o", modelName: "GPT-4o", provider: { isBlocked: false } },
+  ] as unknown as ConnectedModelInfo[];
+
+  const entries: QuarantineEntry[] = [
+    { level: "provider", providerId: "anthropic", type: "permanent", until: null, reason: "r1" },
+    { level: "provider", providerId: "openai", type: "permanent", until: null, reason: "r2" },
+  ];
+
+  const h = await mountQuarantineScreen({
+    entries,
+    setBehaviour: "accept",
+    releaseBehaviour: "accept",
+    models,
+  });
+
+  await navigateToQuarantines(h);
+
+  // Open create overlay
+  await h.runKey("c");
+  await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  // Press down inside overlay (moves candidate cursor to index 1)
+  await h.runKey("down");
+  await h.waitForFrame((frame) => frame.includes("> openai"));
+
+  // Cancel overlay via Esc
+  await h.runKey("esc");
+  await h.waitForFrame((frame) => !frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  // Press down on the underlying list (moves selection from item 0 to item 1)
+  await h.runKey("down");
+  await h.waitForFrame((frame) => frame.includes("> [provider] openai"));
+
+  const frame = h.frame();
+  assert(frame.includes("> [provider] openai"), "down key after Esc moves cursor on underlying list");
+  h.destroy();
+}
+
+async function testActivatingProviderCandidateDispatchesOneSubmit(): Promise<void> {
+  console.log("\n[case] activating a provider candidate dispatches one submit");
+  const models = [
+    { providerId: "anthropic", modelId: "claude-3-5-sonnet", modelName: "Claude 3.5 Sonnet", provider: { isBlocked: false } },
+    { providerId: "openai", modelId: "gpt-4o", modelName: "GPT-4o", provider: { isBlocked: false } },
+  ] as unknown as ConnectedModelInfo[];
+
+  const h = await mountQuarantineScreen({
+    entries: [],
+    setBehaviour: "accept",
+    releaseBehaviour: "accept",
+    models,
+  });
+
+  await navigateToQuarantines(h);
+  await h.runKey("c");
+  await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  // Move cursor down to index 1 ("openai")
+  await h.runKey("down");
+  await h.waitForFrame((frame) => frame.includes("> openai"));
+
+  // Tab to reason and type reason
+  await h.runKey("tab");
+  for (const ch of "vendor outage") await h.runKey(ch);
+
+  // Press Enter to submit
+  await h.runKey("enter");
+  await h.waitForFrame((frame) => !frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  assert.equal(h.sets.length, 1, "exactly one submit dispatched");
+  const cmd = h.sets[0]?.cmd;
+  assert.equal(cmd?.level, "provider");
+  assert.equal(cmd?.providerId, "openai");
+  assert.equal(cmd?.reason, "vendor outage");
+  h.destroy();
+}
+
+async function testActivatingProviderModelCandidateDispatchesOneSubmit(): Promise<void> {
+  console.log("\n[case] activating a provider-model candidate dispatches one submit");
+  const models = [
+    { providerId: "anthropic", modelId: "claude-3-5-sonnet", modelName: "Claude 3.5 Sonnet", provider: { isBlocked: false } },
+    { providerId: "openai", modelId: "gpt-4o", modelName: "GPT-4o", provider: { isBlocked: false } },
+  ] as unknown as ConnectedModelInfo[];
+
+  const h = await mountQuarantineScreen({
+    entries: [],
+    setBehaviour: "accept",
+    releaseBehaviour: "accept",
+    models,
+  });
+
+  await navigateToQuarantines(h);
+  await h.runKey("c");
+  await h.waitForFrame((frame) => frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  // Move focus to scope, switch to Provider/Model, then back to id (filter)
+  await h.runKey("shift+tab");
+  await h.runKey("right");
+  await h.waitForFrame((frame) => frame.includes("[ Provider/Model ]"));
+  await h.runKey("tab");
+
+  // Type filter "gpt" to narrow candidates to gpt-4o
+  for (const ch of "gpt") await h.runKey(ch);
+  await h.waitForFrame((frame) => frame.includes("Filter: gpt"));
+
+  // Tab to reason and type reason
+  await h.runKey("tab");
+  for (const ch of "high latency") await h.runKey(ch);
+
+  // Press Enter to submit
+  await h.runKey("enter");
+  await h.waitForFrame((frame) => !frame.includes("[QUARANTINE OVERLAY: CREATE RULE]"));
+
+  assert.equal(h.sets.length, 1, "exactly one submit dispatched for modelProvider");
+  const cmd = h.sets[0]?.cmd;
+  assert.equal(cmd?.level, "modelProvider");
+  assert.equal(cmd?.providerId, "openai");
+  assert.equal(cmd?.modelId, "gpt-4o");
+  assert.equal(cmd?.reason, "high latency");
+  h.destroy();
+}
+
 async function main(): Promise<void> {
   await testQuarantinesListWithoutOverlay();
   await testCreateOverlayRegistrationAndRender();
@@ -515,6 +828,13 @@ async function main(): Promise<void> {
   await testCreateOverlayInvalidInputBlocksWrite();
   await testCreateOverlayValidInputDispatchesUseCase();
   await testCreateOverlayVerifierRejectionKeepsOverlay();
+  await testEmptyCatalogPreventsSubmission();
+  await testZeroFilterMatchesPreventsSubmission();
+  await testDownMovesCandidateCursor();
+  await testUpMovesCandidateCursor();
+  await testUnderlyingListNavResumesAfterEsc();
+  await testActivatingProviderCandidateDispatchesOneSubmit();
+  await testActivatingProviderModelCandidateDispatchesOneSubmit();
   await testReleaseOverlayDispatchesUseCase();
   await testReleaseOverlayVerifierRejectionBlocks();
 

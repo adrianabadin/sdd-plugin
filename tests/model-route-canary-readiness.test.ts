@@ -14,6 +14,7 @@ import {
 import {
   AttestationMismatchError,
   ModelRouteReadiness,
+  REQUIRED_OPENCODE_VERSION,
 } from "../src/infrastructure/opencode/model-route-readiness.js";
 
 function sha256(value: string | Buffer): string {
@@ -53,7 +54,7 @@ function fixture(routeCount = 2): { root: string; manifest: Manifest } {
     workspaceIdentity: path.resolve(root),
     routingNamespace: "sdd-mr-v1",
     descriptorBudgetBytes: 4096,
-    requiredOpenCodeVersion: "1.18.9",
+    requiredOpenCodeVersion: REQUIRED_OPENCODE_VERSION,
     routes,
     fileHashes: routes.flatMap((route) => [route.agentFile.sha256, route.commandFile.sha256]).sort(),
   };
@@ -127,9 +128,34 @@ async function assertSessionPayload(): Promise<void> {
   );
 }
 
+async function assertCommandAckDoesNotWaitForCompletion(): Promise<void> {
+  let aborted = false;
+  const transport = new OpenCodeHttpCanaryTransport({
+    baseUrl: "http://127.0.0.1:4891/",
+    commandAckTimeoutMs: 5,
+    fetchImpl: (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new DOMException("The operation timed out", "TimeoutError"));
+      });
+    }),
+  });
+
+  const started = Date.now();
+  await transport.invokeCommand({
+    sessionId: "parent-session",
+    command: "sdd-mr-canary-v1-host",
+    arguments: "sdd-model-routing-canary:sdd-mr-v1-host",
+    parentModel: "provider/parent-model",
+  });
+  assert.equal(aborted, true, "command acknowledgement timeout aborts the HTTP wait");
+  assert.ok(Date.now() - started < 1_000, "command polling starts without waiting for conversational completion");
+}
+
 async function run(): Promise<void> {
   console.log("--- model route canary + readiness ---");
   await assertSessionPayload();
+  await assertCommandAckDoesNotWaitForCompletion();
   const { root, manifest } = fixture();
   try {
     const transport = transportFor(manifest);
@@ -144,12 +170,30 @@ async function run(): Promise<void> {
     assert.ok(evidence.every((entry) => entry.parentCanonicalId !== entry.targetCanonicalId));
     assert.ok(evidence.every((entry) => entry.childSessionId.startsWith("child-")));
 
+    let delayedMessageCalls = 0;
+    const delayedTransport = transportFor(manifest);
+    const delayedMessages = delayedTransport.listMessages.bind(delayedTransport);
+    const eventualTransport: CanaryHostTransport = {
+      ...delayedTransport,
+      async listMessages(childId) {
+        delayedMessageCalls += 1;
+        const messages = await delayedMessages(childId);
+        return delayedMessageCalls === 1 ? messages.slice(0, 1) : messages;
+      },
+    };
+    const eventualEvidence = await new ModelRouteCanary({
+      transport: eventualTransport,
+      timeoutMs: 1_000,
+      selectParentModel: async () => "provider-x/model-x",
+    }).verifyEveryRoute(manifest);
+    assert.equal(eventualEvidence.length, manifest.routes.length, "canary polls until completed metadata is observable");
+
     await assert.rejects(
-      new ModelRouteCanary({ transport, selectParentModel: async (target) => target }).verifyEveryRoute(manifest),
+      new ModelRouteCanary({ transport, timeoutMs: 1_000, selectParentModel: async (target) => target }).verifyEveryRoute(manifest),
       (error: unknown) => error instanceof CanaryBlockedError && error.code === "PARENT_MODEL_UNAVAILABLE",
     );
     await assert.rejects(
-      new ModelRouteCanary({ ...({ transport: { ...transport, listChildren: async () => [] } }), selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
+      new ModelRouteCanary({ ...({ transport: { ...transport, listChildren: async () => [] } }), timeoutMs: 1_000, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
       (error: unknown) => error instanceof CanaryBlockedError && error.code === "CHILD_SESSION_MISSING",
     );
     // Flattened legacy user message structure must be rejected under 1.18.9
@@ -161,7 +205,7 @@ async function run(): Promise<void> {
       ? [{ info: { role: "user", providerID: "fallback", modelID: "parent" } }, messages[1]]
       : messages);
     await assert.rejects(
-      new ModelRouteCanary({ transport: mismatch, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
+      new ModelRouteCanary({ transport: mismatch, timeoutMs: 1_000, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
       (error: unknown) => error instanceof CanaryBlockedError && (error.code === "CANARY_METADATA_MISMATCH" || error.code === "CANARY_METADATA_UNOBSERVABLE"),
       "flattened legacy user info is rejected under 1.18.9 (must be nested under info.model)",
     );
@@ -188,7 +232,7 @@ async function run(): Promise<void> {
     };
     const singleRouteManifest: Manifest = { ...manifest, routes: [manifest.routes[0]!] };
     await assert.rejects(
-      new ModelRouteCanary({ transport: singleChildTransport, selectParentModel: async () => "other/model" }).verifyEveryRoute(singleRouteManifest),
+      new ModelRouteCanary({ transport: singleChildTransport, timeoutMs: 1_000, selectParentModel: async () => "other/model" }).verifyEveryRoute(singleRouteManifest),
       (error: unknown) => error instanceof CanaryBlockedError && error.code === "CANARY_METADATA_UNOBSERVABLE",
       "flattened legacy user info on every child yields CANARY_METADATA_UNOBSERVABLE",
     );
@@ -198,7 +242,7 @@ async function run(): Promise<void> {
       ? [{ info: { role: "user", model: { providerID: "fallback", modelID: "parent" } } }, messages[1]]
       : messages);
     await assert.rejects(
-      new ModelRouteCanary({ transport: nestedMismatch, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
+      new ModelRouteCanary({ transport: nestedMismatch, timeoutMs: 1_000, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
       (error: unknown) => error instanceof CanaryBlockedError && error.code === "CANARY_METADATA_MISMATCH",
       "nested user info with wrong canonical ID is rejected as a mismatch",
     );
@@ -209,7 +253,7 @@ async function run(): Promise<void> {
       { info: { role: "assistant", providerID: "provider-0", modelID: "model-0", finish: "stop" } },
     ]);
     await assert.rejects(
-      new ModelRouteCanary({ transport: incomplete, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
+      new ModelRouteCanary({ transport: incomplete, timeoutMs: 1_000, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
       (error: unknown) => error instanceof CanaryBlockedError && error.code === "CANARY_METADATA_UNOBSERVABLE",
       "assistant identity without time.completed is unobservable",
     );
@@ -219,7 +263,7 @@ async function run(): Promise<void> {
       { info: { role: "assistant", model: { providerID: "provider-0", modelID: "model-0" }, finish: "stop", time: { completed: 1 } } },
     ]);
     await assert.rejects(
-      new ModelRouteCanary({ transport: flatAssistant, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
+      new ModelRouteCanary({ transport: flatAssistant, timeoutMs: 1_000, selectParentModel: async () => "other/model" }).verifyEveryRoute(manifest),
       (error: unknown) => error instanceof CanaryBlockedError && error.code === "CANARY_METADATA_UNOBSERVABLE",
       "flattened legacy assistant info is rejected under 1.18.9 (must be direct on info)",
     );
@@ -229,11 +273,11 @@ async function run(): Promise<void> {
     const attestation = readiness.issue({
       manifest,
       evidence,
-      openCodeVersion: "1.18.9",
+      openCodeVersion: REQUIRED_OPENCODE_VERSION,
       bootIdentity: "boot-a",
       ttlMs: 500,
     });
-    assert.equal(attestation.openCodeVersion, "1.18.9");
+    assert.equal(attestation.openCodeVersion, REQUIRED_OPENCODE_VERSION);
     assert.equal(attestation.workspaceIdentity, manifest.workspaceIdentity);
     assert.equal(attestation.generationEpoch, manifest.generationEpoch);
     assert.equal(attestation.manifestHash, manifest.manifestHash);
@@ -241,7 +285,7 @@ async function run(): Promise<void> {
     assert.equal(attestation.bootIdentity, "boot-a");
     assert.equal(attestation.nonce, "nonce-1");
     assert.equal(attestation.verifierVersion, "1.0.0");
-    assert.equal(readiness.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }).nonce, "nonce-1");
+    assert.equal(readiness.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }).nonce, "nonce-1");
     const stored = readFileSync(path.join(root, ".opencode", "sdd-model-routing", "attestation.json"), "utf8");
     assert.equal(JSON.parse(stored).nonce, "nonce-1", "attestation persists under owned routing directory");
 
@@ -257,40 +301,40 @@ async function run(): Promise<void> {
     stale["signature"] = createHmac("sha256", Buffer.from("explicit-key")).update(JSON.stringify(stripSignature(stale))).digest("hex");
     writeFileSync(path.join(root, ".opencode", "sdd-model-routing", "attestation.json"), JSON.stringify(stale, null, 2));
     assert.throws(
-      () => readiness.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }),
+      () => readiness.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }),
       AttestationMismatchError,
       "verify rejects an on-disk attestation still pinned to 1.18.4",
     );
     // Re-issue a valid 1.18.9 attestation for the rest of the suite.
-    const reissued = readiness.issue({ manifest, evidence, openCodeVersion: "1.18.9", bootIdentity: "boot-a", ttlMs: 500 });
-    assert.equal(reissued.openCodeVersion, "1.18.9");
+    const reissued = readiness.issue({ manifest, evidence, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a", ttlMs: 500 });
+    assert.equal(reissued.openCodeVersion, REQUIRED_OPENCODE_VERSION);
 
     for (const changed of [
       { openCodeVersion: "1.18.10", bootIdentity: "boot-a" },
-      { openCodeVersion: "1.18.9", bootIdentity: "boot-b" },
+      { openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-b" },
     ]) {
       assert.throws(() => readiness.verify({ manifest, ...changed }), AttestationMismatchError);
     }
     now = 1_501;
-    assert.throws(() => readiness.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }), /ATTESTATION_EXPIRED/);
+    assert.throws(() => readiness.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }), /ATTESTATION_EXPIRED/);
     now = 1_100;
     const lockPath = path.join(root, ".opencode", "sdd-model-routing", "generator.lock");
     writeFileSync(lockPath, "active");
-    assert.throws(() => readiness.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }), /generator lock/);
+    assert.throws(() => readiness.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }), /generator lock/);
     unlinkSync(lockPath);
     const journalPath = path.join(root, ".opencode", "sdd-model-routing", "journal");
     mkdirSync(journalPath, { recursive: true });
     writeFileSync(path.join(journalPath, "pending.bak"), "pending");
-    assert.throws(() => readiness.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }), /journal/);
+    assert.throws(() => readiness.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }), /journal/);
     rmSync(journalPath, { recursive: true, force: true });
     const changedWorkspace = { ...manifest, workspaceIdentity: path.join(root, "other") };
-    assert.throws(() => readiness.verify({ manifest: changedWorkspace, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }), AttestationMismatchError);
+    assert.throws(() => readiness.verify({ manifest: changedWorkspace, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }), AttestationMismatchError);
     const changedEpoch = { ...manifest, generationEpoch: "epoch-2" };
-    assert.throws(() => readiness.verify({ manifest: changedEpoch, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }), AttestationMismatchError);
+    assert.throws(() => readiness.verify({ manifest: changedEpoch, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }), AttestationMismatchError);
     const changedManifest = { ...manifest, manifestHash: "0".repeat(64) };
-    assert.throws(() => readiness.verify({ manifest: changedManifest, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }), AttestationMismatchError);
+    assert.throws(() => readiness.verify({ manifest: changedManifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }), AttestationMismatchError);
     writeFileSync(path.join(root, manifest.routes[0]!.agentFile.relativePath), "drift");
-    assert.throws(() => readiness.verify({ manifest, openCodeVersion: "1.18.9", bootIdentity: "boot-a" }), AttestationMismatchError);
+    assert.throws(() => readiness.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }), AttestationMismatchError);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

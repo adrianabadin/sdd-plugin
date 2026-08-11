@@ -1,3 +1,4 @@
+import nodeAssert from "node:assert/strict";
 import { testRender } from "@opentui/solid";
 import type { JSX } from "@opentui/solid";
 import { createComponent } from "solid-js/web";
@@ -91,7 +92,27 @@ async function mountDetailScreen(options: { withPersistence: boolean }): Promise
   const props: Record<string, unknown> = {
     api,
     catalog: { getConnectedModels: async () => models },
-    detailQuery: { findModelDetail: async () => null },
+     detailQuery: {
+       findModelDetail: async () => ({
+         providerId: "openai",
+         providerName: "OpenAI",
+         providerSubscription: null,
+         providerIsBlocked: false,
+         providerQuarantineType: null,
+         providerQuarantineUntil: null,
+         modelId: "gpt-4o",
+         modelName: "GPT-4o",
+         benchmarks: null,
+         modelQuarantineType: null,
+         modelQuarantineUntil: null,
+         modelProviderQuarantineType: null,
+         modelProviderQuarantineUntil: null,
+         pricing: null,
+         providerMetadata: undefined,
+         modelMetadata: undefined,
+         metadataEnvelopeHash: "baseline-envelope-hash",
+       }),
+     },
   };
   if (options.withPersistence) {
     props.saveDetailUseCase = saveDetailUseCase;
@@ -158,10 +179,46 @@ async function testValidBufferCommitsAndSaves(): Promise<void> {
   await h.waitForFrame((frame) => frame.includes("Persisted and verified"));
 
   assert(h.saves.length === 1, `Save invoked exactly once (got ${h.saves.length})`);
-  assert(
-    h.saves[0]?.benchmarks.mmlu === 88.5,
-    `Save received the committed numeric value 88.5 (got ${String(h.saves[0]?.benchmarks.mmlu)})`,
-  );
+   assert(
+     h.saves[0]?.benchmarks.mmlu === 88.5,
+     `Save received the committed numeric value 88.5 (got ${String(h.saves[0]?.benchmarks.mmlu)})`,
+   );
+   nodeAssert.deepEqual(
+     h.saves[0],
+     {
+       providerId: "openai",
+       modelId: "gpt-4o",
+       providerName: "OpenAI",
+       modelName: "GPT-4o",
+       isBlocked: false,
+       subscription: null,
+       planName: null,
+       periodicCost: null,
+       includedUsage: null,
+       overageRate: null,
+       contextWindow: null,
+       maxOutputTokens: null,
+       capabilities: [],
+       benchmarks: {
+         mmlu: 88.5,
+         humaneval: null,
+         sweBench: null,
+         gpqa: null,
+         math: null,
+         bbh: null,
+         mtBench: null,
+         multineedle: null,
+       },
+       pricing: {
+         inputPerMillion: null,
+         outputPerMillion: null,
+         cachedPerMillion: null,
+         currency: "USD",
+       },
+       expectedEnvelopeHash: "baseline-envelope-hash",
+     },
+     "Ctrl+S forwards the complete edited draft payload and expected envelope hash",
+   );
 
   const frame = h.frame();
   assert(frame.includes("NOTICE: Persisted and verified"), "verified success notice rendered");

@@ -9,7 +9,9 @@
  * and speak JSON-RPC (Option A, faithful to SS-8's "structured MCP, no CLI
  * scraping" letter but heavy: new dependency + spawned process + lifecycle),
  * this adapter opens the SAME SQLite file `agent-memory-mcp` writes to
- * (`MEMORY_DB_PATH`, a `node:sqlite` `DatabaseSync`) and reads/writes the
+ * (`MEMORY_DB_PATH`, opened through the runtime-agnostic synchronous SQLite
+ * handle in `../runtime/sqlite-sync.js` so the module also loads on Bun, which
+ * OpenCode uses to execute plugins) and reads/writes the
  * `memories` rows directly.
  *
  * TRADE-OFF acknowledged: this couples the plugin to `agent-memory-mcp`'s
@@ -32,9 +34,8 @@
  * sync automatically on INSERT/REPLACE.
  */
 
-import { DatabaseSync } from "node:sqlite";
-import path from "node:path";
 import type { McpToolClientPort } from "../../ports/mcp-tool-client.port.js";
+import { loadSqliteSyncConstructor, type SqliteSyncHandle } from "../runtime/sqlite-sync.js";
 
 const STORE_TOOL = "pmc-agent-memory_store";
 const RECALL_TOOL = "pmc-agent-memory_recall";
@@ -83,10 +84,11 @@ export interface SqliteMcpToolClientOptions {
 }
 
 export class SqliteMcpToolClient implements McpToolClientPort {
-  private readonly db: DatabaseSync;
+  private readonly db: SqliteSyncHandle;
 
   constructor(options: SqliteMcpToolClientOptions = {}) {
     const dbPath = options.dbPath ?? resolveMemoryDbPath();
+    const DatabaseSync = loadSqliteSyncConstructor();
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA busy_timeout = 5000;");
     // Ensure the table exists (idempotent). On the real agent-memory-mcp DB

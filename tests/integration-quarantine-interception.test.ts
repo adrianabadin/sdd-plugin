@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 
 import { SddPlugin } from "../src/bootstrap/index.js";
@@ -188,6 +188,38 @@ async function run() {
   );
   assertOk(!modelQuarantinedTaskInvoked, "model quarantine prevents the task invocation");
 
+  // === Set model-provider quarantine too: interception must still honor the
+  // provider > model > modelProvider precedence order when all scopes overlap.
+  await setModelUseCase.execute({
+    level: "modelProvider",
+    type: "permanent",
+    providerId: "openai",
+    modelId: "gpt-4o",
+    reason: "connection-specific incident",
+  });
+  assertOk(
+    store.snapshot().some(
+      (entry) => entry.level === "modelProvider" && entry.providerId === "openai" && entry.modelId === "gpt-4o",
+    ),
+    "overlapping modelProvider quarantine is active in the interception store",
+  );
+  assertOk(
+    store.snapshot().some((entry) => entry.level === "provider" && entry.providerId === "openai") &&
+      store.snapshot().some((entry) => entry.level === "model" && entry.modelId === "gpt-4o"),
+    "overlapping provider and model quarantines remain active alongside the connection rule",
+  );
+
+  await assert.rejects(
+    async () => {
+      await hook(
+        { tool: "task" },
+        { args: { subagent_type: "task-q-overlap", model: "openai/gpt-4o" } },
+      );
+    },
+    /quarantined/i,
+    "interception blocks routing when provider, model, and modelProvider quarantines overlap",
+  );
+
   // === Verifier mismatch / null / throw prevents runtime projection mutation ===
   class DisagreeingVerifier implements QuarantineQueryPort {
     async findQuarantine(): Promise<PersistedQuarantine | null> {
@@ -243,6 +275,11 @@ async function run() {
 
   // === Release model-level quarantine; everything clean ===
   await releaseUseCase.execute({ level: "model", modelId: "gpt-4o" });
+  await releaseUseCase.execute({
+    level: "modelProvider",
+    providerId: "openai",
+    modelId: "gpt-4o",
+  });
   const releasedModel = await prisma.model.findUnique({ where: { id: "gpt-4o" } });
   assertOk(releasedModel?.quarantineType === null, "release clears model quarantine in DB");
   assertOk(releasedModel?.quarantineUntil === null, "release clears model quarantineUntil in DB");

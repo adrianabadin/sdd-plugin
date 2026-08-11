@@ -3,7 +3,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -13,6 +13,7 @@ import { initConfigKey } from "../src/domain/sdd/sdd-keys.js";
 import type { WorktreeFingerprint } from "../src/domain/sdd/worktree-fingerprint.js";
 import { PmcSddArtifactStoreAdapter } from "../src/infrastructure/pmc/pmc-sdd-artifact-store.adapter.js";
 import { SqliteMcpToolClient } from "../src/infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
+import { createSkillRegistryResolver } from "../src/infrastructure/skills/skill-registry-resolver.adapter.js";
 import type { McpToolClientPort } from "../src/ports/mcp-tool-client.port.js";
 import type {
   CheckpointRecord,
@@ -186,7 +187,7 @@ async function runTests(): Promise<void> {
     store,
     changeStateStore: store,
     captureFingerprint: async (_root) => fingerprints.shift() ?? baseline,
-    skillResolver: (skill) => `/skills/${skill}`,
+    createSkillResolver: () => (skill) => `/skills/${skill}`,
   };
   const tools = buildSddTools(deps) as unknown as Record<string, unknown>;
 
@@ -459,7 +460,7 @@ async function runTests(): Promise<void> {
       store: faultStore,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     for (const [change, fault] of [["write-failure", "write"], ["readback-failure", "readback"]] as const) {
       await invoke(faultTools, "sdd_compose_phase_prompt", {
@@ -498,8 +499,8 @@ async function runTests(): Promise<void> {
     const raceStoreA = new PmcSddArtifactStoreAdapter(new BarrierMcpClient(raceClientA, barrier));
     const raceStoreB = new PmcSddArtifactStoreAdapter(new BarrierMcpClient(raceClientB, barrier));
     try {
-      const raceToolsA = buildSddTools({ store: raceStoreA, changeStateStore: raceStoreA, captureFingerprint: async () => baseline, skillResolver: (skill) => `/skills/${skill}` }) as unknown as Record<string, unknown>;
-      const raceToolsB = buildSddTools({ store: raceStoreB, changeStateStore: raceStoreB, captureFingerprint: async () => baseline, skillResolver: (skill) => `/skills/${skill}` }) as unknown as Record<string, unknown>;
+      const raceToolsA = buildSddTools({ store: raceStoreA, changeStateStore: raceStoreA, captureFingerprint: async () => baseline, createSkillResolver: () => (skill) => `/skills/${skill}` }) as unknown as Record<string, unknown>;
+      const raceToolsB = buildSddTools({ store: raceStoreB, changeStateStore: raceStoreB, captureFingerprint: async () => baseline, createSkillResolver: () => (skill) => `/skills/${skill}` }) as unknown as Record<string, unknown>;
       const raceResults = await Promise.allSettled([
         invoke<{ inFlightPhase: string | null; lockReclaimed?: boolean }>(raceToolsA, "sdd_compose_phase_prompt", { projectRoot, changeName: "compose-race", phase: "sdd-explore", modelReference: "test/model" }),
         invoke<{ inFlightPhase: string | null; lockReclaimed?: boolean }>(raceToolsB, "sdd_compose_phase_prompt", { projectRoot, changeName: "compose-race", phase: "sdd-explore", modelReference: "test/model" }),
@@ -596,7 +597,7 @@ async function runTests(): Promise<void> {
       store: configFaultStore,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(configFaultTools, "sdd_compose_phase_prompt", {
       projectRoot: initReadbackRoot,
@@ -626,7 +627,7 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => initFingerprints.shift() ?? changed,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(initFingerprintTools, "sdd_compose_phase_prompt", {
       projectRoot: initFingerprintRoot,
@@ -732,13 +733,13 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     const projectInitToolsB = buildSddTools({
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(projectInitToolsA, "sdd_compose_phase_prompt", {
       projectRoot: initProjectLockRoot,
@@ -830,7 +831,7 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     const firstCompose = await invoke<{ inFlightPhase: string | null }>(firstSurfaceTools, "sdd_compose_phase_prompt", {
       projectRoot: reclaimRoot,
@@ -848,7 +849,7 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     const secondCompose = await invoke<{ inFlightPhase: string | null }>(secondSurfaceTools, "sdd_compose_phase_prompt", {
       projectRoot: reclaimRoot,
@@ -874,7 +875,7 @@ async function runTests(): Promise<void> {
       store: initWriteFaultStore,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(initWriteFaultTools, "sdd_compose_phase_prompt", {
       projectRoot: initWriteFailureRoot,
@@ -912,7 +913,7 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(staleInitTools, "sdd_compose_phase_prompt", {
       projectRoot: sentinelRoot,
@@ -931,7 +932,7 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     const freshInitCompose = await invoke<{ inFlightPhase: string | null; lockReclaimed?: boolean }>(
       freshInitTools,
@@ -1019,7 +1020,7 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(originalSurfaceTools, "sdd_compose_phase_prompt", {
       projectRoot: staleRoot,
@@ -1034,7 +1035,7 @@ async function runTests(): Promise<void> {
       store,
       changeStateStore: store,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     const replacementCompose = await invoke<{ lockReclaimed?: boolean }>(
       replacementSurfaceTools,
@@ -1109,7 +1110,7 @@ async function runTests(): Promise<void> {
       store: injectionOriginalStore,
       changeStateStore: injectionOriginalStore,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(injectionOriginalTools, "sdd_compose_phase_prompt", {
       projectRoot: injectionRoot,
@@ -1125,7 +1126,7 @@ async function runTests(): Promise<void> {
       store: injectionReplacementStore,
       changeStateStore: injectionReplacementStore,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     await invoke(injectionReplacementTools, "sdd_compose_phase_prompt", {
       projectRoot: injectionRoot,
@@ -1204,7 +1205,7 @@ async function runTests(): Promise<void> {
       store: noResolverStore,
       changeStateStore: noResolverStore,
       captureFingerprint: async () => baseline,
-      skillResolver: (skill) => `/skills/${skill}`,
+      createSkillResolver: () => (skill) => `/skills/${skill}`,
     }) as unknown as Record<string, unknown>;
     const recoveredCompose = await invoke<{ subagentType: string }>(recoveryTools, "sdd_compose_phase_prompt", {
       projectRoot: noResolverRoot,
@@ -1217,6 +1218,124 @@ async function runTests(): Promise<void> {
       "a different phase composes successfully after the leaked lock was released, with no recovery tool needed",
     );
     noResolverClient.close();
+
+    // C-R1 (Option B) + W-N6 — happy path through the REAL filesystem-backed
+    // resolver at the registered tool boundary: sdd-tasks has two mandatory
+    // skills (work-unit-commits, chained-pr); a project with a readable
+    // .atl/skill-registry.md must compose successfully and bake the resolved
+    // absolute paths into the prompt.
+    const happyRoot = path.join(tempDir, "happy-path-registry");
+    mkdirSync(path.join(happyRoot, ".atl"), { recursive: true });
+    writeFileSync(
+      path.join(happyRoot, ".atl", "skill-registry.md"),
+      [
+        "# Skill Registry — happy path fixture",
+        "",
+        "| Skill | Trigger / description | Scope | Path |",
+        "| --- | --- | --- | --- |",
+        "| `work-unit-commits` | x | user | `C:\\fixture\\work-unit-commits\\SKILL.md` |",
+        "| `chained-pr` | x | user | `C:\\fixture\\chained-pr\\SKILL.md` |",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const happyClient = new SqliteMcpToolClient({ dbPath });
+    const happyStore = new PmcSddArtifactStoreAdapter(happyClient);
+    const happyTools = buildSddTools({
+      store: happyStore,
+      changeStateStore: happyStore,
+      captureFingerprint: async () => baseline,
+      createSkillResolver: (root) =>
+        createSkillRegistryResolver(root, { defaultRegistryPath: path.join(tempDir, "no-default.md") }),
+    }) as unknown as Record<string, unknown>;
+    const happyCompose = await invoke<{ prompt: string; inFlightPhase: string }>(happyTools, "sdd_compose_phase_prompt", {
+      projectRoot: happyRoot,
+      changeName: "happy-path-target",
+      phase: "sdd-tasks",
+      modelReference: "test/model",
+    });
+    assert.ok(
+      happyCompose.prompt.includes("C:\\fixture\\work-unit-commits\\SKILL.md"),
+      "the composed prompt bakes in the resolved work-unit-commits path",
+    );
+    assert.ok(
+      happyCompose.prompt.includes("C:\\fixture\\chained-pr\\SKILL.md"),
+      "the composed prompt bakes in the resolved chained-pr path",
+    );
+    console.log("  pass: W-N6 happy path — mandatory skills resolve through the real resolver at the tool boundary");
+
+    // W-N1 — the resolver is bound to the PER-CALL projectRoot, never a
+    // startup capture: one tool surface, two project roots with distinct
+    // registries, each compose must resolve against its own root.
+    const perCallRootB = path.join(tempDir, "per-call-root-b");
+    mkdirSync(path.join(perCallRootB, ".atl"), { recursive: true });
+    writeFileSync(
+      path.join(perCallRootB, ".atl", "skill-registry.md"),
+      [
+        "# Skill Registry — root B fixture",
+        "",
+        "| Skill | Trigger / description | Scope | Path |",
+        "| --- | --- | --- | --- |",
+        "| `work-unit-commits` | x | user | `C:\\fixture-b\\work-unit-commits\\SKILL.md` |",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const perCallCompose = await invoke<{ prompt: string }>(happyTools, "sdd_compose_phase_prompt", {
+      projectRoot: perCallRootB,
+      changeName: "per-call-target",
+      phase: "sdd-apply",
+      modelReference: "test/model",
+    });
+    assert.ok(
+      perCallCompose.prompt.includes("C:\\fixture-b\\work-unit-commits\\SKILL.md"),
+      "the same tool surface resolves against the per-call projectRoot, not the first root used",
+    );
+    assert.ok(
+      !perCallCompose.prompt.includes("C:\\fixture\\chained-pr\\SKILL.md"),
+      "no state from the earlier root leaks into a later call",
+    );
+    console.log("  pass: W-N1 — resolver binding follows the per-call projectRoot");
+    happyClient.close();
+
+    // C-R1 diagnosability — no readable registry anywhere: the tool fails
+    // with SKILL_REGISTRY_UNAVAILABLE naming the searched paths, and the
+    // durable lock it acquired does not survive the throw.
+    const noRegistryRoot = path.join(tempDir, "no-registry-anywhere");
+    mkdirSync(noRegistryRoot);
+    const noRegistryClient = new SqliteMcpToolClient({ dbPath });
+    const noRegistryStore = new PmcSddArtifactStoreAdapter(noRegistryClient);
+    const noRegistryDefault = path.join(tempDir, "absent-default.md");
+    const noRegistryTools = buildSddTools({
+      store: noRegistryStore,
+      changeStateStore: noRegistryStore,
+      captureFingerprint: async () => baseline,
+      createSkillResolver: (root) => createSkillRegistryResolver(root, { defaultRegistryPath: noRegistryDefault }),
+    }) as unknown as Record<string, unknown>;
+    await assert.rejects(
+      () =>
+        invoke(noRegistryTools, "sdd_compose_phase_prompt", {
+          projectRoot: noRegistryRoot,
+          changeName: "no-registry-target",
+          phase: "sdd-tasks",
+          modelReference: "test/model",
+        }),
+      (err: unknown) => {
+        assert.match((err as Error).message, /SKILL_REGISTRY_UNAVAILABLE/, "names the failure code");
+        assert.match((err as Error).message, /no-registry-anywhere/, "names the searched .atl path");
+        assert.match((err as Error).message, /absent-default\.md/, "names the searched default path");
+        return true;
+      },
+      "compose with no readable registry fails diagnosably",
+    );
+    const stateAfterNoRegistry = await noRegistryStore.readChangeState(noRegistryRoot, "no-registry-target");
+    assert.equal(
+      stateAfterNoRegistry?.lock,
+      undefined,
+      "the durable lock acquired by the registry-failing compose does not survive the throw",
+    );
+    console.log("  pass: no readable registry fails diagnosably and releases the lock");
+    noRegistryClient.close();
 
     console.log("All sdd-tools integration tests passed.");
   } finally {

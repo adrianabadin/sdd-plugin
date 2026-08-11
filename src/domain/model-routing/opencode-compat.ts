@@ -7,7 +7,7 @@
  * Config or effective Agent shapes.
  */
 
-export const OPENCODE_COMPAT_VERSION = "1.18.9";
+export const OPENCODE_COMPAT_VERSION = "1.18.16";
 
 export class OpenCodeCompatError extends Error {
   readonly runtimeVersion: string;

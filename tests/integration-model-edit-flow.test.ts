@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 
 import { SddPlugin } from "../src/bootstrap/index.js";

@@ -34,10 +34,10 @@ async function runTests() {
     type: "permanent",
   };
 
-  console.assert(isQuarantineActive(ttlActive, baseDate) === true, "TTL future must be active");
-  console.assert(isQuarantineActive(ttlExpired, baseDate) === false, "TTL past must be inactive");
-  console.assert(isQuarantineActive(ttlExpired, pastDate) === false, "TTL exact boundary must be inactive");
-  console.assert(isQuarantineActive(permanent, baseDate) === true, "Permanent must be active");
+  assert(isQuarantineActive(ttlActive, baseDate) === true, "TTL future must be active");
+  assert(isQuarantineActive(ttlExpired, baseDate) === false, "TTL past must be inactive");
+  assert(isQuarantineActive(ttlExpired, pastDate) === false, "TTL exact boundary must be inactive");
+  assert(isQuarantineActive(permanent, baseDate) === true, "Permanent must be active");
 
   // Test 2: Precedence resolution: provider > model > modelProvider
   const entries: QuarantineEntry[] = [
@@ -62,8 +62,8 @@ async function runTests() {
   ];
 
   const resolved = resolveQuarantinePrecedence(entries, "openai", "gpt-4o", baseDate);
-  console.assert(resolved !== null, "Must resolve an entry");
-  console.assert(resolved?.level === "provider", "Provider level must override model and connection");
+  assert(resolved !== null, "Must resolve an entry");
+  assert(resolved?.level === "provider", "Provider level must override model and connection");
 
   // Test 3: Model overrides modelProvider if provider is inactive
   const entriesNoProvider: QuarantineEntry[] = [
@@ -81,7 +81,7 @@ async function runTests() {
     },
   ];
   const resolvedModel = resolveQuarantinePrecedence(entriesNoProvider, "openai", "gpt-4o", baseDate);
-  console.assert(resolvedModel?.level === "model", "Model level must override connection");
+  assert(resolvedModel?.level === "model", "Model level must override connection");
 
   // Test 5: Draft validation is pure and accepts trimmed non-empty reasons
   const validProviderDraft: QuarantineDraft = {

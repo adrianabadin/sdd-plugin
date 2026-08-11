@@ -16,7 +16,7 @@ import {
 } from '../src/application/save-model-detail/save-model-detail.use-case.js';
 import type { PersistedModelDetail } from '../src/ports/model-detail-query.port.js';
 import type { ModelConfigRegistry, EffectiveModelConfig } from '../src/infrastructure/runtime/model-config-registry.js';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient } from '../src/generated/prisma/client.js';
 import { PrismaLibSql } from '@prisma/adapter-libsql';
 
 import { PrismaModelRepositoryAdapter } from '../src/infrastructure/prisma/prisma-model-repository.adapter.js';

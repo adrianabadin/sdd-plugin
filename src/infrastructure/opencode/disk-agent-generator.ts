@@ -10,12 +10,13 @@
  *
  * Hard guarantees enforced here:
  *
- *   - Fleet default cap 8, hard max 24 (a committed `sizeException.reason`
- *     is required for 9..24 entries; >24 is rejected outright). The hard
+ *   - Fleet default cap 8, hard max 32 (a committed `sizeException.reason`
+ *     is required for 9..32 entries; >32 is rejected outright). The hard
  *     max is derived from ~20 connected models, one host per model (the
  *     permission-tier design was abandoned after a spike showed OpenCode's
  *     `permission` deny is bypassable via direct `pty_spawn`/`pty_write`),
- *     plus slack -> 24.
+ *     plus slack -> 24. Raised to 32 in 2026-08 to cover the 29-model
+ *     benchmark whitelist (31 routes) without per-entry churn.
  *   - 4 KiB descriptor budget per generated file.
  *   - Canonical containment: every generated/inspected path is realpath
  *     resolved and asserted to live under the workspace root; absolute
@@ -71,7 +72,7 @@ import { REQUIRED_OPENCODE_VERSION } from "./model-route-readiness.js";
 export const SCHEMA_VERSION = 1 as const;
 export const GENERATOR_VERSION = "1.1.0";
 export const ROUTING_NAMESPACE_VERSION = "sdd-mr-v1";
-export const HARD_MAX_ROUTES = 24;
+export const HARD_MAX_ROUTES = 32;
 export const FLEET_DEFAULT_CAP = 8;
 export const DESCRIPTOR_BUDGET_BYTES = 4 * 1024;
 export const LOCK_STALE_AFTER_MS = 30_000;
@@ -1071,6 +1072,10 @@ export class DiskAgentGenerator {
         journalDir: this.workspace.journalDir,
         budgetBytes: Number.POSITIVE_INFINITY,
       });
+
+      // The manifest is authoritative after a successful commit; recovery
+      // backups must not remain visible as an in-flight journal.
+      rmSync(this.workspace.journalDir, { recursive: true, force: true });
 
       return {
         manifest,

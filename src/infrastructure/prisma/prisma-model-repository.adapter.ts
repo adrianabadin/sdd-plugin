@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "../../generated/prisma/client.js";
 
 import type { ModelData } from "../../domain/model/model.js";
 import type { ModelProviderData, UpsertedModelProvider } from "../../domain/model/model-provider.js";

@@ -75,8 +75,8 @@ async function run(): Promise<void> {
     const prisma = getPrismaClient();
     await prisma.provider.upsert({ where: { id: "prov-cli-1" }, update: {}, create: { id: "prov-cli-1", name: "Provider 1" } });
     await prisma.provider.upsert({ where: { id: "prov-cli-2" }, update: {}, create: { id: "prov-cli-2", name: "Provider 2" } });
-    await prisma.model.upsert({ where: { id: "model-cli-1" }, update: {}, create: { id: "model-cli-1", name: "Model 1" } });
-    await prisma.model.upsert({ where: { id: "model-cli-2" }, update: {}, create: { id: "model-cli-2", name: "Model 2" } });
+    await prisma.model.upsert({ where: { id: "model-cli-1" }, update: { quarantineType: null, quarantineReason: null, quarantineUntil: null }, create: { id: "model-cli-1", name: "Model 1" } });
+    await prisma.model.upsert({ where: { id: "model-cli-2" }, update: { quarantineType: null, quarantineReason: null, quarantineUntil: null }, create: { id: "model-cli-2", name: "Model 2" } });
     await prisma.modelProvider.upsert({
       where: { modelId_providerId: { modelId: "model-cli-1", providerId: "prov-cli-1" } },
       update: {},
@@ -104,9 +104,36 @@ async function run(): Promise<void> {
         2,
       ),
     );
-    const ok = runCli(workspaceRoot, routesPath);
-    assert.equal(ok.code, 0, `CLI exits 0 on valid config (stderr=${ok.stderr})`);
-    assert.match(ok.stdout, /generated=\d+ excluded=\d+ manifest=/, "CLI prints summary with generated and excluded counts");
+    // 3. The real project `.opencode/` MUST NOT have been modified by the
+    //    isolated CLI run (owned route files must be untouched, and the
+    //    routing directory must not have been created or altered).
+    const realAgentsDir = path.join(repoRoot, ".opencode", "agents");
+    const realRoutingDir = path.join(repoRoot, ".opencode", "sdd-model-routing");
+    const snapshotReal = (): string => {
+      const parts: string[] = [];
+      for (const dir of [realAgentsDir, realRoutingDir, path.join(repoRoot, ".opencode", "commands")]) {
+        if (!existsSync(dir)) {
+          parts.push(`${dir}=<absent>`);
+          continue;
+        }
+        const entries = readdirSync(dir)
+          .filter((e) => e.startsWith("sdd-mr-"))
+          .sort()
+          .map((e) => `${e}:${readFileSync(path.join(dir, e), "utf8").length}`);
+        parts.push(`${dir}=[${entries.join(",")}]`);
+      }
+      return parts.join("|");
+    };
+    const realBefore = snapshotReal();
+    const okBefore = runCli(workspaceRoot, routesPath);
+    assert.equal(okBefore.code, 0, `CLI exits 0 on valid config (stderr=${okBefore.stderr})`);
+    assert.match(okBefore.stdout, /generated=\d+ excluded=\d+ manifest=/, "CLI prints summary with generated and excluded counts");
+    const realAfter = snapshotReal();
+    assert.equal(
+      realAfter,
+      realBefore,
+      "real project .opencode must be untouched after isolated CLI run",
+    );
 
     // Manifest, agents, and commands are all present in the isolated workspace
     const manifestPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "manifest.json");
@@ -121,25 +148,6 @@ async function run(): Promise<void> {
     for (const c of commands) {
       assert.ok(c.startsWith("sdd-mr-canary-v1-") && c.endsWith(".md"), `command ${c} matches owned prefix`);
     }
-
-    // 3. The real project `.opencode/` MUST NOT have grown any owned route
-    //    files because the CLI was given an isolated workspace.
-    const realAgentsDir = path.join(repoRoot, ".opencode", "agents");
-    if (existsSync(realAgentsDir)) {
-      const realEntries = readdirSync(realAgentsDir);
-      for (const entry of realEntries) {
-        assert.ok(
-          !entry.startsWith("sdd-mr-v1-"),
-          `real project .opencode/agents must NOT contain ${entry} after isolated CLI run`,
-        );
-      }
-    }
-    const realRoutingDir = path.join(repoRoot, ".opencode", "sdd-model-routing");
-    assert.equal(
-      existsSync(realRoutingDir),
-      false,
-      "real project .opencode/sdd-model-routing must not exist after isolated CLI run",
-    );
 
     // 4. Cap-exceeded config is rejected with a typed CLI exit code and a
     //    non-empty stderr message that names the cap class.

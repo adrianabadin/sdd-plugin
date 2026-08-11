@@ -363,6 +363,36 @@ function run(): void {
   }
 
   {
+    const paths = seedControlFiles(0);
+    const handshakePath = path.join(paths.root, ".opencode", "sdd-model-routing", "handshake.json");
+    try {
+      writeFileSync(handshakePath, JSON.stringify({
+        bootIdentity: "boot-old",
+        signingKey: "ab".repeat(32),
+        pid: 0,
+        issuedAt: 1,
+      }));
+      const removed: string[] = [];
+      const result = stopModelRouteSupervisor({
+        ...paths,
+        handshakePath,
+        currentPid: 999,
+        removeArtifact: (artifactPath) => {
+          removed.push(artifactPath);
+          rmSync(artifactPath, { force: true });
+        },
+      });
+
+      assert.deepEqual(removed, [paths.attestationPath, paths.lockPath, paths.controlPath, handshakePath]);
+      assert.deepEqual(result, { status: "cleaned", pid: null, bootIdentity: "" });
+      assert.equal(existsSync(handshakePath), false, "handshake artifact is removed");
+      console.log("  pass: handshake artifact is cleaned when handshakePath is provided");
+    } finally {
+      rmSync(paths.root, { recursive: true, force: true });
+    }
+  }
+
+  {
     const paths = seedControlFiles(44001);
     try {
       const result = stopModelRouteSupervisor({

@@ -10,7 +10,7 @@
  *  - one idempotent `dispose()` that disconnects both clients exactly once.
  */
 import { PrismaLibSql } from "@prisma/adapter-libsql";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../prisma/generated-prisma-client.js";
 
 import { SaveModelDetailUseCase } from "../../application/save-model-detail/save-model-detail.use-case.js";
 import {

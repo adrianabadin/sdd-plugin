@@ -8,8 +8,10 @@ export class UnresolvableSkillError extends Error {
   readonly code = "UNRESOLVABLE_SKILL";
   readonly skillName: string;
 
-  constructor(skillName: string) {
-    super(`UNRESOLVABLE_SKILL: mapped skill "${skillName}" could not be resolved to a readable path`);
+  constructor(skillName: string, detail?: string) {
+    super(
+      `UNRESOLVABLE_SKILL: mapped skill "${skillName}" could not be resolved to a readable path${detail !== undefined ? ` (${detail})` : ""}`,
+    );
     this.name = "UnresolvableSkillError";
     this.skillName = skillName;
   }

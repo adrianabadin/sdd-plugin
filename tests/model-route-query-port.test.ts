@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 import { PrismaModelRouteCatalogAdapter } from "../src/infrastructure/prisma/model-route-catalog.adapter.js";
 

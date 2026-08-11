@@ -21,7 +21,7 @@ import { ROUTED_HOST_NAME_PREFIX } from "../../domain/model-routing/model-route-
 import type { CanaryEvidence } from "./model-route-canary.js";
 import { applyCurrentUserAcl } from "../runtime/windows-acl.js";
 
-export const REQUIRED_OPENCODE_VERSION = "1.18.9";
+export const REQUIRED_OPENCODE_VERSION = "1.18.16";
 export const READINESS_VERIFIER_VERSION = "1.0.0";
 const ROUTING_DIR = path.join(".opencode", "sdd-model-routing");
 const ATTESTATION_FILE = "attestation.json";

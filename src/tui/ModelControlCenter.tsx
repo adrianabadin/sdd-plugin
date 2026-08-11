@@ -52,10 +52,18 @@ import {
   cycleQuarantineOverlayFocus,
   setQuarantineOverlayDuration,
   setQuarantineOverlayLevel,
+  cycleQuarantineOverlayLevel,
+  updateQuarantineOverlayFilter,
   setQuarantineOverlayError,
   buildQuarantineDraft,
+  buildQuarantineDraftFromCandidate,
+  resolveQuarantineCandidates,
+  resolveSelectedCandidate,
+  moveQuarantineCandidateCursor,
   validateQuarantineOverlayBuffers,
   buildQuarantineTarget,
+  NO_CANDIDATE_SELECTED_ERROR,
+  type QuarantineCandidate,
 } from "./quarantine-overlay.js";
 import { deriveQuarantineView } from "./quarantine-view.js";
 import { validateDraft, type ValidationResult } from "./detail-validation.js";
@@ -73,7 +81,10 @@ import type {
   SetQuarantineUseCase,
   ReleaseQuarantineUseCase,
 } from "../application/quarantine/index.js";
-import type { QuarantineEntry } from "../domain/model/quarantine.js";
+import {
+  type QuarantineEntry,
+  type QuarantineDraft,
+} from "../domain/model/quarantine.js";
 
 const NUMERIC_DIGIT_KEYS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] as const;
 
@@ -171,6 +182,9 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
   const [quarantineError, setQuarantineError] = createSignal<string | undefined>(undefined);
   const [quarantineNotice, setQuarantineNotice] = createSignal<string | undefined>(undefined);
   const [quarantineOverlay, setQuarantineOverlay] = createSignal<QuarantineOverlayState | null>(null);
+  const quarantineCandidates = createMemo<QuarantineCandidate[]>(() =>
+    resolveQuarantineCandidates(quarantineOverlay(), rawModels())
+  );
 
   // NOTE: removed `initialRouteName` (route presentation migration). The
   // Model Control Center no longer captures a host route to return to;
@@ -207,14 +221,17 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
               const ov = quarantineOverlay()!;
               if (ov.mode === "release") return;
               if (ov.focus === "scope") {
-                const nextLevel = ov.level === "provider" ? "model" : "provider";
-                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+                setQuarantineOverlay(cycleQuarantineOverlayLevel(ov, "next"));
               } else if (ov.focus === "duration") {
                 const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
                 setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
               } else if (ov.focus === "id") {
-                const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
-                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, ch));
+                if (ov.mode === "create") {
+                  setQuarantineOverlay(updateQuarantineOverlayFilter(ov, ch));
+                } else {
+                  const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
+                  setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, ch));
+                }
               } else if (ov.focus === "reason") {
                 setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "reason", ch));
               } else if (ov.focus === "ttl") {
@@ -235,14 +252,17 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
               const ov = quarantineOverlay()!;
               if (ov.mode === "release") return;
               if (ov.focus === "scope") {
-                const nextLevel = ov.level === "provider" ? "model" : "provider";
-                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+                setQuarantineOverlay(cycleQuarantineOverlayLevel(ov, "next"));
               } else if (ov.focus === "duration") {
                 const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
                 setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
               } else if (ov.focus === "id") {
-                const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
-                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, ch));
+                if (ov.mode === "create") {
+                  setQuarantineOverlay(updateQuarantineOverlayFilter(ov, ch));
+                } else {
+                  const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
+                  setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, ch));
+                }
               } else if (ov.focus === "reason") {
                 setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "reason", ch));
               } else if (ov.focus === "ttl") {
@@ -261,8 +281,12 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
               const ov = quarantineOverlay()!;
               if (ov.mode === "release") return;
               if (ov.focus === "id") {
-                const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
-                setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, "<backspace>"));
+                if (ov.mode === "create") {
+                  setQuarantineOverlay(updateQuarantineOverlayFilter(ov, "<backspace>"));
+                } else {
+                  const bufferKey = ov.level === "provider" ? "providerId" : "modelId";
+                  setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, bufferKey, "<backspace>"));
+                }
               } else if (ov.focus === "reason") {
                 setQuarantineOverlay(updateQuarantineOverlayBuffer(ov, "reason", "<backspace>"));
               } else if (ov.focus === "ttl") {
@@ -298,8 +322,7 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
             if (quarantineOverlay()) {
               const ov = quarantineOverlay()!;
               if (ov.focus === "scope") {
-                const nextLevel = ov.level === "provider" ? "model" : "provider";
-                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+                setQuarantineOverlay(cycleQuarantineOverlayLevel(ov, "prev"));
               } else if (ov.focus === "duration") {
                 const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
                 setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
@@ -314,13 +337,36 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
             if (quarantineOverlay()) {
               const ov = quarantineOverlay()!;
               if (ov.focus === "scope") {
-                const nextLevel = ov.level === "provider" ? "model" : "provider";
-                setQuarantineOverlay(setQuarantineOverlayLevel(ov, nextLevel));
+                setQuarantineOverlay(cycleQuarantineOverlayLevel(ov, "next"));
               } else if (ov.focus === "duration") {
                 const nextDur = ov.durationKind === "permanent" ? "ttl" : "permanent";
                 setQuarantineOverlay(setQuarantineOverlayDuration(ov, nextDur));
               }
             }
+          },
+        },
+        {
+          name: "mcc.capture.up",
+          title: "Capture Up Arrow",
+          run: () => {
+            const ov = quarantineOverlay();
+            if (ov && ov.mode === "create" && ov.focus === "id") {
+              setQuarantineOverlay(moveQuarantineCandidateCursor(ov, "up", quarantineCandidates().length));
+              return;
+            }
+            dispatch({ type: "up" });
+          },
+        },
+        {
+          name: "mcc.capture.down",
+          title: "Capture Down Arrow",
+          run: () => {
+            const ov = quarantineOverlay();
+            if (ov && ov.mode === "create" && ov.focus === "id") {
+              setQuarantineOverlay(moveQuarantineCandidateCursor(ov, "down", quarantineCandidates().length));
+              return;
+            }
+            dispatch({ type: "down" });
           },
         },
         {
@@ -365,7 +411,17 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
               } else {
                 // create or modify mode
                 try {
-                  const draft = buildQuarantineDraft(ov);
+                  let draft: QuarantineDraft;
+                  if (ov.mode === "create") {
+                    const candidate = resolveSelectedCandidate(ov, quarantineCandidates());
+                    if (!candidate) {
+                      setQuarantineOverlay(setQuarantineOverlayError(ov, NO_CANDIDATE_SELECTED_ERROR));
+                      return;
+                    }
+                    draft = buildQuarantineDraftFromCandidate(ov, candidate);
+                  } else {
+                    draft = buildQuarantineDraft(ov);
+                  }
                   const valRes = validateQuarantineOverlayBuffers(draft);
                   if (!valRes.ok) {
                     setQuarantineOverlay(setQuarantineOverlayError(ov, valRes.error));
@@ -432,6 +488,8 @@ export function ModelControlCenter(props: ModelControlCenterProps): JSX.Element 
         { key: "shift+tab", cmd: "mcc.capture.shift-tab" },
         { key: "left", cmd: "mcc.capture.left" },
         { key: "right", cmd: "mcc.capture.right" },
+        { key: "up", cmd: "mcc.capture.up" },
+        { key: "down", cmd: "mcc.capture.down" },
         { key: "enter", cmd: "mcc.capture.commit" },
         { key: "esc", cmd: "mcc.capture.cancel" },
       ],
@@ -1049,13 +1107,26 @@ async function handleSaveIntent(): Promise<void> {
       }
 
       case "quarantines": {
+        const catState = catalogState();
         const screenProps: Record<string, unknown> = {
           api: props.api,
           entries: quarantines(),
           selectedIndex: screen.selectedIndex,
           loading: quarantineLoading(),
           overlay: quarantineOverlay(),
+          candidates: quarantineCandidates(),
+          catalogStatus: catState.status,
+          catalogErrorMessage: catState.status === "error" ? catState.message : undefined,
         };
+        // A failed persistence boot leaves every quarantine dependency
+        // undefined, which would otherwise render as a legitimate-looking
+        // empty list. Report the boot failure instead of implying the
+        // database holds no quarantines.
+        if (!props.listQuarantinesUseCase && !props.quarantinePort) {
+          screenProps.error =
+            props.persistenceUnavailableReason ??
+            "Quarantine persistence is not wired; the list cannot be loaded.";
+        }
         if (quarantineError() !== undefined) screenProps.error = quarantineError();
         if (quarantineNotice() !== undefined) screenProps.notice = quarantineNotice();
         return createComponent(QuarantinesScreen, screenProps as never);

@@ -47,6 +47,7 @@ import { QuarantineStoreImpl } from "../src/infrastructure/runtime/quarantine-st
 import { hashHostName } from "../src/domain/model-routing/model-route-host-naming.js";
 import { parseModelRouteGrammar } from "../src/domain/model-routing/model-route-grammar.js";
 import type { ModelRouteCatalogPort, RouteCandidate } from "../src/ports/model-route-catalog.port.js";
+import { REQUIRED_OPENCODE_VERSION } from "../src/infrastructure/opencode/model-route-readiness.js";
 
 async function sleep(ms: number): Promise<void> { await new Promise<void>((r) => setTimeout(r, ms)); }
 async function cleanupDir(dir: string): Promise<void> {
@@ -86,7 +87,7 @@ function seedManifestWithOwnedFiles(root: string, providerId: string, modelId: s
     workspaceIdentity: path.resolve(root),
     routingNamespace: "sdd-mr-v1",
     descriptorBudgetBytes: 4096,
-    requiredOpenCodeVersion: "1.18.9",
+    requiredOpenCodeVersion: REQUIRED_OPENCODE_VERSION,
     routes: [{
       baseTemplate: "sdd-mr-base",
       providerId, modelId, hostName,
@@ -101,7 +102,7 @@ function seedManifestWithOwnedFiles(root: string, providerId: string, modelId: s
   const attestationBody = {
     schemaVersion: 1,
     verifierVersion: "1.0.0",
-    openCodeVersion: "1.18.9",
+    openCodeVersion: REQUIRED_OPENCODE_VERSION,
     workspaceIdentity: path.resolve(root),
     generationEpoch: "epoch-natural",
     manifestHash: manifest.manifestHash,
@@ -334,7 +335,7 @@ async function run(): Promise<void> {
       const restored = {
         schemaVersion: 1,
         verifierVersion: "1.0.0",
-        openCodeVersion: "1.18.9",
+        openCodeVersion: REQUIRED_OPENCODE_VERSION,
         workspaceIdentity: path.resolve(workspaceRoot),
         generationEpoch: "epoch-natural",
         manifestHash: reloaded.manifestHash,

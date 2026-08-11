@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '../src/generated/prisma/client.js';
 
 import { createPersistenceContext } from '../src/infrastructure/runtime/persistence-context.js';
 import {

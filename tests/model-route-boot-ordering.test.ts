@@ -4,7 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { WindowsModelRouteBootManager } from "../src/infrastructure/runtime/windows-model-route-boot-manager.js";
+import {
+  WindowsModelRouteBootManager,
+  ROUTING_BOOT_ID_ENV,
+  ROUTING_SIGNING_KEY_ENV,
+  type BootChildProcess,
+  type BootProcessSupervisor,
+} from "../src/infrastructure/runtime/windows-model-route-boot-manager.js";
 import { ModelRouteAuditLogger } from "../src/infrastructure/logging/model-route-audit.logger.js";
 import { RegenerateFleetAgentsUseCase } from "../src/application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
 import type { ModelRouteCatalogPort, RouteCandidate } from "../src/ports/model-route-catalog.port.js";
@@ -144,4 +150,122 @@ test("regeneration failure transitions to failed, no secrets exposed, no lifecyc
 
   const attestationPath = path.join(TEST_DIR, ".opencode", "sdd-model-routing", "attestation.json");
   assert.equal(existsSync(attestationPath), false);
+});
+
+test("supervised boot exposes routing secrets to the dispatching OpenCode process", async () => {
+  setupTestEnv();
+  delete process.env[ROUTING_BOOT_ID_ENV];
+  delete process.env[ROUTING_SIGNING_KEY_ENV];
+
+  const catalog = new MockCatalog();
+  const quarantine = new MockQuarantine();
+  const auditLogger = new ModelRouteAuditLogger({
+    path: path.join(TEST_DIR, ".opencode", "sdd-model-routing", "routing.audit.jsonl"),
+  });
+  const child: BootChildProcess = {
+    kill: () => true,
+    once: () => child,
+  };
+  const supervisor: BootProcessSupervisor = {
+    spawnServe: () => child,
+    waitForHealthy: async () => undefined,
+    spawnAttach: () => child,
+  };
+  const catalogSync = { execute: async () => undefined };
+
+  const manager = new WindowsModelRouteBootManager({
+    workspaceRoot: TEST_DIR,
+    manifestPath: path.join(TEST_DIR, ".opencode", "sdd-model-routing", "manifest.json"),
+    catalog,
+    canary: new CustomCanary(),
+    catalogSync,
+    processSupervisor: supervisor,
+    selectParentModel: async () => "google/antigravity-gemini-3.6-flash-tiered",
+    fleetRegeneration: new RegenerateFleetAgentsUseCase(catalog, quarantine, auditLogger),
+    routesConfigPath: path.join(TEST_DIR, "config", "model-routing", "routes.json"),
+  });
+
+  await manager.start();
+  assert.equal(process.env[ROUTING_BOOT_ID_ENV], manager.getBootIdentity());
+  assert.equal(process.env[ROUTING_SIGNING_KEY_ENV], manager.getSigningKey().toString("hex"));
+  await manager.stop();
+  await auditLogger.close();
+});
+
+/** Build the standard supervised manager used by the preflight ordering tests. */
+function buildPreflightHarness(supervisorOverrides: Partial<BootProcessSupervisor>) {
+  const catalog = new MockCatalog();
+  const quarantine = new MockQuarantine();
+  const auditLogger = new ModelRouteAuditLogger({
+    path: path.join(TEST_DIR, ".opencode", "sdd-model-routing", "routing.audit.jsonl"),
+  });
+  const child: BootChildProcess = { kill: () => true, once: () => child };
+  const calls: string[] = [];
+
+  const supervisor: BootProcessSupervisor = {
+    preflight: async () => { calls.push("preflight"); },
+    spawnServe: () => { calls.push("spawnServe"); return child; },
+    waitForHealthy: async () => { calls.push("waitForHealthy"); },
+    spawnAttach: () => { calls.push("spawnAttach"); return child; },
+    ...supervisorOverrides,
+  };
+
+  const manager = new WindowsModelRouteBootManager({
+    workspaceRoot: TEST_DIR,
+    manifestPath: path.join(TEST_DIR, ".opencode", "sdd-model-routing", "manifest.json"),
+    catalog,
+    canary: new CustomCanary(),
+    catalogSync: { execute: async () => undefined },
+    processSupervisor: supervisor,
+    selectParentModel: async () => "google/antigravity-gemini-3.6-flash-tiered",
+    fleetRegeneration: new RegenerateFleetAgentsUseCase(catalog, quarantine, auditLogger),
+    routesConfigPath: path.join(TEST_DIR, "config", "model-routing", "routes.json"),
+  });
+
+  return { manager, auditLogger, calls };
+}
+
+test("supervised boot probes the port before spawning its serve child", async () => {
+  setupTestEnv();
+  const { manager, auditLogger, calls } = buildPreflightHarness({});
+
+  await manager.start();
+  try {
+    assert.deepEqual(
+      calls.slice(0, 3),
+      ["preflight", "spawnServe", "waitForHealthy"],
+      "the port probe must run before the serve child is spawned",
+    );
+  } finally {
+    await manager.stop();
+    await auditLogger.close();
+  }
+});
+
+test("a failed port preflight aborts the boot without spawning serve or publishing readiness", async () => {
+  setupTestEnv();
+  const { manager, auditLogger, calls } = buildPreflightHarness({
+    preflight: async () => {
+      calls.push("preflight");
+      throw new Error("OPENCODE_PORT_IN_USE: 127.0.0.1:4096 is already accepting connections");
+    },
+  });
+
+  try {
+    await assert.rejects(() => manager.start(), /OPENCODE_PORT_IN_USE/);
+    assert.equal(calls.includes("spawnServe"), false, "serve must not be spawned after a failed preflight");
+    assert.equal(calls.includes("spawnAttach"), false, "attach must not be spawned after a failed preflight");
+
+    const attestationPath = path.join(TEST_DIR, ".opencode", "sdd-model-routing", "attestation.json");
+    assert.equal(existsSync(attestationPath), false, "a failed preflight must not publish readiness");
+  } finally {
+    await auditLogger.close();
+  }
+});
+
+test("routing readiness contract matches the installed OpenCode runtime", async () => {
+  const { REQUIRED_OPENCODE_VERSION } = await import(
+    "../src/infrastructure/opencode/model-route-readiness.js"
+  );
+  assert.equal(REQUIRED_OPENCODE_VERSION, "1.18.16");
 });

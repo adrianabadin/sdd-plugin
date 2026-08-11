@@ -6,7 +6,7 @@
  * runtime context and returns a map of hook handlers.
  */
 import { PrismaLibSql } from "@prisma/adapter-libsql";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../infrastructure/prisma/generated-prisma-client.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,6 +28,7 @@ import { parseNaturalModelIntent } from "../domain/model-routing/natural-model-i
 import { naturalIntentBlockedFromParse } from "../domain/model-routing/natural-model-routing-errors.js";
 import { ModelRouteTaskHook } from "../infrastructure/opencode/model-route-task-hook.js";
 import { resolveDatabasePath, initializeDatabase } from "../infrastructure/runtime/database-path.js";
+import { readRoutingHandshake } from "../infrastructure/runtime/model-route-handshake.js";
 import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 import { SqliteMcpToolClient } from "../infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
@@ -98,6 +99,13 @@ export const BOOTSTRAP_BUSY_TIMEOUT_MS = 5000;
  * and it never reads `OPENCODE_BOOT_ID` as a fallback. A missing or
  * insecure value must block routing on the first hook invocation; the
  * plugin does not silently substitute.
+ *
+ * Interactive fallback: when the env vars are absent — the case for any
+ * OpenCode started outside the supervisor, which cannot inherit its
+ * process env — the resolvers read the persisted handshake published by
+ * the supervisor (`readRoutingHandshake`). The handshake is bound to the
+ * live attestation, so stale credentials from a dead supervisor are
+ * rejected and routing still fails closed.
  */
 export const ROUTING_BOOT_ID_ENV = "SDD_MODEL_ROUTING_BOOT_ID";
 export const ROUTING_SIGNING_KEY_ENV = "SDD_MODEL_ROUTING_SIGNING_KEY";
@@ -107,11 +115,12 @@ export const ROUTING_SIGNING_KEY_ENV = "SDD_MODEL_ROUTING_SIGNING_KEY";
  * configuration is missing or uses the legacy `boot-default` sentinel;
  * the hook caller is responsible for failing closed in that case.
  */
-export function resolveRoutingBootIdentity(): string | null {
+export function resolveRoutingBootIdentity(workspaceRoot?: string): string | null {
   const value = process.env[ROUTING_BOOT_ID_ENV];
-  if (typeof value !== "string" || value.length === 0) return null;
   if (value === "boot-default") return null;
-  return value;
+  if (typeof value === "string" && value.length > 0) return value;
+  if (workspaceRoot === undefined) return null;
+  return readRoutingHandshake(workspaceRoot)?.bootIdentity ?? null;
 }
 
 /**
@@ -119,11 +128,12 @@ export function resolveRoutingBootIdentity(): string | null {
  * the configuration is missing or uses the legacy `deterministic-key`
  * sentinel; the hook caller is responsible for failing closed.
  */
-export function resolveRoutingSigningKey(): string | null {
+export function resolveRoutingSigningKey(workspaceRoot?: string): string | null {
   const value = process.env[ROUTING_SIGNING_KEY_ENV];
-  if (typeof value !== "string" || value.length === 0) return null;
   if (value === "deterministic-key") return null;
-  return value;
+  if (typeof value === "string" && value.length > 0) return value;
+  if (workspaceRoot === undefined) return null;
+  return readRoutingHandshake(workspaceRoot)?.signingKey ?? null;
 }
 
 /**
@@ -161,8 +171,26 @@ const traceLogger = new ModelRefreshTraceLogger();
  * The function is intentionally permissive about the runtime shape
  * (`ctx: any`): OpenCode does not publish a plugin type contract.
  */
+/**
+ * Render a stable, human-readable label for the host project.
+ *
+ * OpenCode passes `project` as a Project OBJECT (`{ id, worktree, ... }`), not
+ * a string; interpolating it directly renders "[object Object]" in every log
+ * line and destroys the only identifier those lines carry. Tests and internal
+ * callers still pass a plain string, so both shapes are supported.
+ */
+function resolveProjectLabel(project: SddPluginContext["project"]): string {
+  if (typeof project === "string" && project.length > 0) return project;
+  if (project && typeof project === "object") {
+    const { id, worktree } = project as { id?: unknown; worktree?: unknown };
+    if (typeof id === "string" && id.length > 0) return id;
+    if (typeof worktree === "string" && worktree.length > 0) return worktree;
+  }
+  return "opencode";
+}
+
 export const SddPlugin = async (ctx: SddPluginContext) => {
-  const project = ctx?.project ?? "opencode";
+  const project = resolveProjectLabel(ctx?.project);
   const directory = ctx?.directory ?? "";
   const client = ctx?.client;
 
@@ -239,17 +267,28 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
   try {
     const sddMcpClient = new SqliteMcpToolClient();
     const sddStore = new PmcSddArtifactStoreAdapter(sddMcpClient);
-    // C-N1 remediation (part A2) — without a real skillResolver here, the
-    // default resolver in `composePhasePrompt` always returns null (PC-6),
-    // so `sdd-tasks` and `sdd-apply` (the only phases with mandatory
-    // skills) could never successfully compose in production. The resolver
-    // reads `<directory>/.atl/skill-registry.md` — see
-    // `src/infrastructure/skills/skill-registry-resolver.adapter.ts` for
-    // the design-ambiguity note on the registry file location/format.
+    // C-N1 remediation (part A2) + C-R1 resolution (Option B) — without a
+    // real skillResolver here, the default resolver in `composePhasePrompt`
+    // always returns null (PC-6), so `sdd-tasks` and `sdd-apply` (the only
+    // phases with mandatory skills) could never successfully compose in
+    // production. The FACTORY is passed unbound: `buildSddTools` invokes it
+    // with the per-call `args.projectRoot` on every invocation (W-N1 — the
+    // module's documented invariant forbids a startup-time `directory`
+    // capture). Resolution order per call: the machine-local
+    // `<projectRoot>/.atl/skill-registry.md` (written by the external
+    // `gentle-ai` binary) wins when present; otherwise the committed default
+    // `config/sdd/default-skill-registry.md` shipped with the plugin — so a
+    // fresh clone or CI runner has a declared registry contract instead of
+    // an opaque null (C-R1). See
+    // `src/infrastructure/skills/skill-registry-resolver.adapter.ts`.
     sddTools = buildSddTools({
       store: sddStore,
       changeStateStore: sddStore,
-      skillResolver: createSkillRegistryResolver(directory || process.cwd()),
+      createSkillResolver: createSkillRegistryResolver,
+      // W-N2 — best-effort lock releases on compose failure must not fail
+      // silently; the original compose error is still the one rethrown.
+      onLockReleaseError: (releaseError) =>
+        logger.error("SDD compose lock release failed (best-effort; original compose error preserved).", releaseError),
     });
     // The eight-tool shape is a deliberate versioned-contract change vs
     // the pre-recovery seven-tool design (design §2). The companion
@@ -301,8 +340,8 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
         // operator-supplied stable host nonce and shared secret env vars.
         // callID, the legacy `OPENCODE_BOOT_ID` env var, and the
         // `boot-default` / `deterministic-key` sentinels are rejected.
-        const bootIdentity = resolveRoutingBootIdentity();
-        const signingKey = resolveRoutingSigningKey();
+        const bootIdentity = resolveRoutingBootIdentity(directory || process.cwd());
+        const signingKey = resolveRoutingSigningKey(directory || process.cwd());
         if (!bootIdentity || !signingKey) {
           const reason = !bootIdentity && !signingKey
             ? `${ROUTING_BOOT_ID_ENV} and ${ROUTING_SIGNING_KEY_ENV} are both required`
@@ -370,8 +409,8 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
           throw blocked;
         }
         if (naturalIntent !== null) {
-          const bootIdentity = resolveRoutingBootIdentity();
-          const signingKey = resolveRoutingSigningKey();
+          const bootIdentity = resolveRoutingBootIdentity(directory || process.cwd());
+          const signingKey = resolveRoutingSigningKey(directory || process.cwd());
           if (!bootIdentity || !signingKey) {
             const reason = !bootIdentity && !signingKey
               ? `${ROUTING_BOOT_ID_ENV} and ${ROUTING_SIGNING_KEY_ENV} are both required`
@@ -478,7 +517,11 @@ export default SddPlugin;
  * fields below.
  */
 export interface SddPluginContext {
-  project?: string;
+  /**
+   * The real host supplies a Project object; tests and internal callers use a
+   * plain string. Both are accepted and normalised by `resolveProjectLabel`.
+   */
+  project?: string | { id?: string; worktree?: string };
   client?: unknown;
   directory?: string;
   worktree?: string;

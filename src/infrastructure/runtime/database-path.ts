@@ -1,44 +1,26 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { createRequire } from 'node:module';
 import {
   SCHEMA_DDL,
   REQUIRED_SCHEMA_COLUMNS,
   REQUIRED_SCHEMA_INDEXES,
   REQUIRED_SCHEMA_FKS,
 } from './schema-ddl.js';
-const nodeRequire = createRequire(import.meta.url);
+import { loadSqliteSyncConstructor } from './sqlite-sync.js';
 
 type SqliteDatabaseConstructor = new (filePath: string, options?: { readOnly?: boolean; readonly?: boolean }) => SqliteWriteHandle;
 
+/**
+ * Resolve the synchronous SQLite driver for the current runtime.
+ *
+ * Driver selection lives in `./sqlite-sync.js` so Node (`node:sqlite`) and Bun
+ * (`bun:sqlite`) stay in exactly one place; this wrapper only maps a missing
+ * runtime onto this module's persistence error contract.
+ */
 function loadSqliteDatabaseConstructor(): SqliteDatabaseConstructor {
   try {
-    if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined' || Boolean(process.versions.bun)) {
-      const module = require('bun:sqlite') as { Database?: SqliteDatabaseConstructor };
-      if (!module.Database) throw new Error('bun:sqlite did not expose Database');
-      const BunDatabase = module.Database as unknown as new (filePath: string, options?: { readonly?: boolean }) => {
-        query(sql: string): { all(...args: unknown[]): unknown; get(...args: unknown[]): unknown };
-        exec(sql: string): void;
-        close(): void;
-      };
-      return class BunSqliteAdapter {
-        private readonly db: InstanceType<typeof BunDatabase>;
-        constructor(filePath: string, options?: { readOnly?: boolean; readonly?: boolean }) {
-          const readonly = options?.readOnly ?? options?.readonly;
-          this.db = readonly === undefined ? new BunDatabase(filePath) : new BunDatabase(filePath, { readonly });
-        }
-        prepare(sql: string) {
-          const query = this.db.query(sql);
-          return { all: (...args: unknown[]) => query.all(...args), get: (...args: unknown[]) => query.get(...args) };
-        }
-        exec(sql: string) { this.db.exec(sql); }
-        close() { this.db.close(); }
-      } as unknown as SqliteDatabaseConstructor;
-    }
-    const module = nodeRequire('node:sqlite') as { DatabaseSync?: SqliteDatabaseConstructor };
-    if (!module.DatabaseSync) throw new Error('node:sqlite did not expose DatabaseSync');
-    return module.DatabaseSync;
+    return loadSqliteSyncConstructor() as unknown as SqliteDatabaseConstructor;
   } catch (cause) {
     throw new PersistenceReadinessError('SQLite runtime is unavailable. Install a runtime with node:sqlite or bun:sqlite support.', { cause });
   }
@@ -141,6 +123,76 @@ function closeQuietly(db: { close(): void }): void {
   }
 }
 
+/**
+ * Per-connection lock wait applied to every synchronous handle opened here.
+ *
+ * Startup is inherently concurrent: the plugin entry point, the TUI entry
+ * point, and the model-route boot supervisor each call `initializeDatabase`
+ * against the SAME destination file. `configurePragmas` takes a write lock
+ * (`PRAGMA journal_mode = WAL`), so a sibling initializer's readiness probe
+ * observes `SQLITE_BUSY` ("database is locked") unless it is willing to wait.
+ * Without this timeout SQLite fails the statement immediately, the probe
+ * reports the schema as unreadable, and the whole persistence stack is
+ * declared unavailable for the rest of the process lifetime.
+ */
+const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+
+/** Bounded retry budget for statements that still lose the lock race. */
+const LOCK_RETRY_ATTEMPTS = 5;
+
+/** Base backoff between lock retries; grows linearly per attempt. */
+const LOCK_RETRY_BACKOFF_MS = 25;
+
+/**
+ * True when `err` reports transient lock contention rather than a durable
+ * defect. Contention means "retry later"; every other failure is a real
+ * readiness problem and must keep failing closed.
+ */
+function isTransientLockError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /database is locked|database table is locked|SQLITE_BUSY/i.test(message);
+}
+
+/**
+ * Open a synchronous SQLite handle with the shared lock-wait policy applied.
+ *
+ * Every connection this module creates MUST come from here so no code path
+ * can reintroduce a zero-timeout handle that turns contention into a fatal
+ * readiness error.
+ */
+function openSqliteHandle(filePath: string, options?: { readOnly?: boolean }): SqliteWriteHandle {
+  const Database = loadSqliteDatabaseConstructor();
+  const db = (options?.readOnly
+    ? new Database(filePath, { readOnly: true })
+    : new Database(filePath)) as SqliteWriteHandle;
+  try {
+    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
+  } catch {
+    // A driver that rejects the pragma still works; the retry wrapper below
+    // remains the backstop. Never fail an open over a best-effort setting.
+  }
+  return db;
+}
+
+/**
+ * Run `operation`, retrying only while it fails with transient lock
+ * contention. Non-lock failures propagate on the first attempt so genuine
+ * schema defects are never masked by retries.
+ */
+function withLockRetry<T>(operation: () => T): T {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < LOCK_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return operation();
+    } catch (err) {
+      if (!isTransientLockError(err)) throw err;
+      lastError = err;
+      sleepSync(LOCK_RETRY_BACKOFF_MS * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
 /** Raised when the persistence layer cannot establish its durability contract. */
 export class PersistenceReadinessError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -208,8 +260,11 @@ const RUNTIME_ADDITIVE_MIGRATIONS: ReadonlyArray<{
  * upgraded the DB) are a no-op.
  */
 export function applyAdditiveMigrations(filePath: string): void {
-  const Database = loadSqliteDatabaseConstructor();
-  const db = new Database(filePath) as SqliteWriteHandle;
+  withLockRetry(() => applyAdditiveMigrationsOnce(filePath));
+}
+
+function applyAdditiveMigrationsOnce(filePath: string): void {
+  const db = openSqliteHandle(filePath);
   try {
     db.exec('PRAGMA foreign_keys = ON;');
     for (const migration of RUNTIME_ADDITIVE_MIGRATIONS) {
@@ -258,8 +313,8 @@ function assertValidSqliteDatabase(filePath: string): void {
     throw new PersistenceReadinessError(`Database file is not SQLite: ${filePath}`);
   }
   try {
-    const Database = loadSqliteDatabaseConstructor();
-    const db = new Database(filePath, { readOnly: true });
+    withLockRetry(() => {
+    const db = openSqliteHandle(filePath, { readOnly: true });
     try {
       const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((r) => r.name));
       for (const table of REQUIRED_SCHEMA_TABLES) {
@@ -301,11 +356,16 @@ function assertValidSqliteDatabase(filePath: string): void {
       }
 
     } finally { closeQuietly(db); }
+    });
   } catch (cause) {
     if (cause instanceof PersistenceReadinessError) throw cause;
     throw new PersistenceReadinessError(`SQLite readiness inspection failed for ${filePath}.`, { cause });
   }
-  if (!isSchemaCompatible(filePath)) throw new PersistenceReadinessError(`Database schema is incompatible: ${filePath}`);
+  // The structural probe above already covers tables, columns, indexes and
+  // foreign keys — exactly the set `isSchemaCompatible` re-checks. Re-running
+  // it here opened a SECOND connection and doubled the window in which
+  // startup contention could be misreported as an incompatible schema, so the
+  // redundant pass is intentionally omitted.
 }
 
 /**
@@ -317,14 +377,17 @@ function assertValidSqliteDatabase(filePath: string): void {
  */
 export function isSchemaCompatible(filePath: string): boolean {
   if (!fs.existsSync(filePath)) return false;
-  let Database: SqliteDatabaseConstructor;
-  try { Database = loadSqliteDatabaseConstructor(); } catch { return false; }
-  let db: SqliteReadHandle;
   try {
-    db = new Database(filePath, { readOnly: true }) as SqliteReadHandle;
+    // Lock contention is NOT an incompatibility verdict: retry it before
+    // falling back to the fail-closed contract below.
+    return withLockRetry(() => inspectSchemaCompatibility(filePath));
   } catch {
     return false;
   }
+}
+
+function inspectSchemaCompatibility(filePath: string): boolean {
+  const db = openSqliteHandle(filePath, { readOnly: true }) as SqliteReadHandle;
   try {
     const rows = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
     const tables = new Set(rows.map((r) => r.name));
@@ -354,7 +417,10 @@ export function isSchemaCompatible(filePath: string): boolean {
     }
 
     return true;
-  } catch {
+  } catch (err) {
+    // Contention must reach `withLockRetry`; anything else is a real defect
+    // and keeps the historical fail-closed verdict.
+    if (isTransientLockError(err)) throw err;
     return false;
   } finally {
     closeQuietly(db);
@@ -459,11 +525,15 @@ function sleepSync(ms: number): void {
  * Configure durability and referential-integrity PRAGMAs. See header docs.
  */
 export function configurePragmas(filePath: string): PragmaState {
-  const Database = loadSqliteDatabaseConstructor();
+  return withLockRetry(() => configurePragmasOnce(filePath));
+}
+
+function configurePragmasOnce(filePath: string): PragmaState {
   let db: SqliteWriteHandle;
   try {
-    db = new Database(filePath) as SqliteWriteHandle;
+    db = openSqliteHandle(filePath);
   } catch (err) {
+    if (isTransientLockError(err)) throw err;
     throw new PersistenceReadinessError(
       `Persistence PRAGMA configuration failed for ${filePath}.`,
       { cause: err },
@@ -503,6 +573,9 @@ export function configurePragmas(filePath: string): PragmaState {
     return state;
   } catch (err) {
     if (err instanceof PersistenceReadinessError) throw err;
+    // Surface contention unwrapped so `withLockRetry` can recognise and
+    // retry it instead of treating a busy sibling as a durability failure.
+    if (isTransientLockError(err)) throw err;
     throw new PersistenceReadinessError(
       `Persistence PRAGMA configuration failed for ${filePath}.`,
       { cause: err },

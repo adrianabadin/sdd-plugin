@@ -1,3 +1,5 @@
+import assert from "node:assert/strict";
+
 import {
   SetQuarantineUseCase,
   ReleaseQuarantineUseCase,
@@ -115,9 +117,9 @@ async function runTests() {
   } catch (err) {
     blankThrew = true;
   }
-  console.assert(blankThrew, "blank reason must throw before any write");
-  console.assert(port.entries.length === 0, "blank reason must not write to persistence");
-  console.assert(store.snapshot().length === 0, "blank reason must not publish to runtime store");
+  assert(blankThrew, "blank reason must throw before any write");
+  assert(port.entries.length === 0, "blank reason must not write to persistence");
+  assert(store.snapshot().length === 0, "blank reason must not publish to runtime store");
 
   // 2. Invalid TTL rejected with no write, no readback, no publish
   const invalidTtlDraft: QuarantineDraft = {
@@ -132,9 +134,9 @@ async function runTests() {
   } catch (err) {
     ttlThrew = true;
   }
-  console.assert(ttlThrew, "zero TTL must throw before any write");
-  console.assert(port.entries.length === 0, "zero TTL must not write to persistence");
-  console.assert(store.snapshot().length === 0, "zero TTL must not publish to runtime store");
+  assert(ttlThrew, "zero TTL must throw before any write");
+  assert(port.entries.length === 0, "zero TTL must not write to persistence");
+  assert(store.snapshot().length === 0, "zero TTL must not publish to runtime store");
 
   // 3. Set Quarantine Valid -> write -> verifier matches -> store publish
   const future = new Date(Date.now() + 60000);
@@ -145,10 +147,10 @@ async function runTests() {
     until: future,
     reason: "  rate limit  ",
   });
-  console.assert(entry.level === "provider", "Entry level set correctly");
-  console.assert(entry.reason === "rate limit", "Entry reason trimmed");
-  console.assert(store.snapshot().length === 1, "Entry published to runtime store after verified readback");
-  console.assert(
+  assert(entry.level === "provider", "Entry level set correctly");
+  assert(entry.reason === "rate limit", "Entry reason trimmed");
+  assert(store.snapshot().length === 1, "Entry published to runtime store after verified readback");
+  assert(
     store.snapshot()[0]?.reason === "rate limit",
     "Published entry carries the trimmed reason",
   );
@@ -162,9 +164,9 @@ async function runTests() {
     });
   } catch (err: any) {
     threw = true;
-    console.assert(err.message.includes("providerId"), "Error message mentions missing providerId");
+    assert(err.message.includes("providerId"), "Error message mentions missing providerId");
   }
-  console.assert(threw, "Must throw on missing providerId for provider level");
+  assert(threw, "Must throw on missing providerId for provider level");
 
   // 5. Set Quarantine DB Failure -> no publish
   port.shouldFail = true;
@@ -179,8 +181,8 @@ async function runTests() {
   } catch (err) {
     dbThrew = true;
   }
-  console.assert(dbThrew, "DB failure must throw");
-  console.assert(store.snapshot().length === 1, "Runtime store unchanged on DB failure");
+  assert(dbThrew, "DB failure must throw");
+  assert(store.snapshot().length === 1, "Runtime store unchanged on DB failure");
   port.shouldFail = false;
 
   // 6. Verifier disagrees -> no publish, prior projection intact
@@ -198,19 +200,19 @@ async function runTests() {
   } catch (err) {
     disagreeThrew = true;
   }
-  console.assert(disagreeThrew, "verifier mismatch must surface as an error");
-  console.assert(
+  assert(disagreeThrew, "verifier mismatch must surface as an error");
+  assert(
     store.snapshot().length === priorStoreCount,
     "Runtime store unchanged when verifier disagrees",
   );
   const storedButNotPublished = port.entries.find(
     (e) => e.level === "modelProvider" && e.providerId === "openai" && e.modelId === "gpt-4o",
   );
-  console.assert(
+  assert(
     storedButNotPublished !== undefined,
     "Durable write remains even when verifier disagrees (committed-unverified)",
   );
-  console.assert(
+  assert(
     !store.snapshot().some(
       (e) => e.level === "modelProvider" && e.providerId === "openai" && e.modelId === "gpt-4o",
     ),
@@ -231,8 +233,8 @@ async function runTests() {
   } catch (err) {
     nullThrew = true;
   }
-  console.assert(nullThrew, "null readback must surface as an error");
-  console.assert(
+  assert(nullThrew, "null readback must surface as an error");
+  assert(
     store.snapshot().length === countBeforeNull,
     "Runtime store unchanged when verifier returns null",
   );
@@ -245,20 +247,20 @@ async function runTests() {
     until: new Date(Date.now() + 120000),
     reason: "extended",
   });
-  console.assert(extended.reason === "extended", "idempotent update returns the new reason");
+  assert(extended.reason === "extended", "idempotent update returns the new reason");
   const providerEntries = port.entries.filter(
     (e) => e.level === "provider" && e.providerId === "openai",
   );
-  console.assert(
+  assert(
     providerEntries.length === 1,
     "Idempotent set keeps exactly one row per target",
   );
-  console.assert(providerEntries[0]?.reason === "extended", "Idempotent set overwrites the prior reason");
+  assert(providerEntries[0]?.reason === "extended", "Idempotent set overwrites the prior reason");
 
   // 9. Release: write -> verifier confirms cleared state -> store release
   const releaseCountBefore = store.snapshot().length;
   await releaseUseCase.execute({ level: "provider", providerId: "openai" });
-  console.assert(
+  assert(
     store.snapshot().length === releaseCountBefore - 1,
     "Release removes the entry from the runtime store after readback confirms",
   );
@@ -266,7 +268,7 @@ async function runTests() {
     level: "provider",
     providerId: "openai",
   });
-  console.assert(readbackAfterRelease === null, "Readback returns null after release");
+  assert(readbackAfterRelease === null, "Readback returns null after release");
 
   // 10. Release: readback failure leaves prior runtime projection intact
   // Seed a new quarantine and try to release it through a verifier that throws.
@@ -284,20 +286,20 @@ async function runTests() {
   } catch (err) {
     failedReleaseThrew = true;
   }
-  console.assert(failedReleaseThrew, "verifier failure must surface as an error");
-  console.assert(
+  assert(failedReleaseThrew, "verifier failure must surface as an error");
+  assert(
     store.snapshot().length === snapshotBeforeFailedRelease,
     "Runtime store unchanged when verifier throws during release",
   );
   const stillPresent = store.snapshot().some(
     (e) => e.level === "model" && e.modelId === "gpt-4o",
   );
-  console.assert(stillPresent, "Quarantine still present in runtime store after failed release");
+  assert(stillPresent, "Quarantine still present in runtime store after failed release");
 
   // 11. List Quarantines Use Case (legacy path: no verifier)
   const list = await listUseCase.execute();
-  console.assert(list.length >= 1, "List use case returns entries");
-  console.assert(store.snapshot().length >= 1, "List use case hydrates runtime store");
+  assert(list.length >= 1, "List use case returns entries");
+  assert(store.snapshot().length >= 1, "List use case hydrates runtime store");
 
   console.log("✅ All Quarantine Use Cases unit tests passed.");
 }
