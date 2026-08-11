@@ -67,6 +67,10 @@ export interface CanaryReport {
   readonly blocked: ReadonlyArray<CanaryFailure>;
 }
 
+interface BlockedEntry extends CanaryFailure {
+  readonly error: CanaryBlockedError;
+}
+
 export interface ModelRouteCanaryOptions {
   readonly transport: CanaryHostTransport;
   readonly selectParentModel: (targetCanonicalId: string) => Promise<string | null>;
@@ -270,15 +274,26 @@ export class ModelRouteCanary {
   }
 
   async verifyRoutes(manifest: Manifest): Promise<CanaryReport> {
+    const report = await this.collectReport(manifest);
+    return { proven: report.proven, blocked: report.blocked };
+  }
+
+  async verifyEveryRoute(manifest: Manifest): Promise<ReadonlyArray<CanaryEvidence>> {
+    const report = await this.collectReport(manifest);
+    if (report.blocked.length > 0) {
+      throw report.blocked[0]!.error;
+    }
+    return report.proven;
+  }
+
+  private async collectReport(manifest: Manifest): Promise<{ proven: CanaryEvidence[]; blocked: BlockedEntry[] }> {
     const proven: CanaryEvidence[] = [];
-    const blocked: CanaryFailure[] = [];
+    const blocked: BlockedEntry[] = [];
     for (const route of manifest.routes) {
       const targetCanonicalId = `${route.providerId}/${route.modelId}`;
       const maxAttempts = 1 + this.canaryRetries;
       let lastError: CanaryBlockedError | null = null;
-      let attempts = 0;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        attempts = attempt;
         try {
           proven.push(await this.verifyRoute(route));
           lastError = null;
@@ -297,20 +312,12 @@ export class ModelRouteCanary {
           targetCanonicalId,
           code: lastError.code,
           message: lastError.message,
-          attempts,
+          attempts: maxAttempts,
+          error: lastError,
         });
       }
     }
     return { proven, blocked };
-  }
-
-  async verifyEveryRoute(manifest: Manifest): Promise<ReadonlyArray<CanaryEvidence>> {
-    const report = await this.verifyRoutes(manifest);
-    if (report.blocked.length > 0) {
-      const first = report.blocked[0]!;
-      throw new CanaryBlockedError(first.code, first.message);
-    }
-    return report.proven;
   }
 
   private async verifyRoute(route: ManifestRouteEntry): Promise<CanaryEvidence> {

@@ -245,18 +245,26 @@ async function scenario5VerifyEveryRouteStillThrows(): Promise<void> {
   const route1 = buildRoute(1, "sdd-mr-v1-host-r1", "openai", "gpt-4o");
   const manifest = buildManifest("/tmp/sdd-mr-iso-5", [route0, route1]);
   const transport = new FakeCanaryTransport();
+  const originalError = new CanaryBlockedError("PARENT_MODEL_UNAVAILABLE", "no distinct parent model for openai/gpt-4o");
   const canary = new ModelRouteCanary({
     transport,
     timeoutMs: 1_000,
-    selectParentModel: async (target) => target === "google/antigravity-gemini-3.6-flash-tiered" ? "anthropic/claude-haiku-4-5" : null,
+    selectParentModel: async (target) => {
+      if (target === "google/antigravity-gemini-3.6-flash-tiered") return "anthropic/claude-haiku-4-5";
+      throw originalError;
+    },
   });
 
   await assert.rejects(
     canary.verifyEveryRoute(manifest),
-    (error: unknown) => error instanceof CanaryBlockedError && error.code === "PARENT_MODEL_UNAVAILABLE",
-    "verifyEveryRoute still throws the original CanaryBlockedError when any route is blocked",
+    (error: unknown) =>
+      error === originalError &&
+      error instanceof CanaryBlockedError &&
+      error.code === "PARENT_MODEL_UNAVAILABLE" &&
+      error.message === "PARENT_MODEL_UNAVAILABLE: no distinct parent model for openai/gpt-4o",
+    "verifyEveryRoute re-throws the ORIGINAL CanaryBlockedError (identity, code, message, stack preserved)",
   );
-  console.log("  pass: verifyEveryRoute still throws when any route is blocked (backwards compatibility)");
+  console.log("  pass: verifyEveryRoute re-throws the original CanaryBlockedError (no double prefix, stack intact)");
 }
 
 async function scenario6NonCanaryBlockedErrorPropagates(): Promise<void> {
