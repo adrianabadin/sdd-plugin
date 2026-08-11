@@ -151,3 +151,55 @@ test("audit append failure aborts before disk mutation", async () => {
   const manifestPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "manifest.json");
   assert.equal(existsSync(manifestPath), false);
 });
+
+test("excludeCanonicalIds forwards to filter and sweeps removed host files", async () => {
+  const { workspaceRoot } = setupWorkspace();
+  const logPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "routing.audit.jsonl");
+
+  // All three routes connected, no quarantines: full fleet on first pass
+  const catalog = new MockCatalogPort(
+    new Set(["openai:gpt-4o", "anthropic:claude-3-5-sonnet", "google:gemini-pro"]),
+  );
+  const quarantine = new MockQuarantinePort([]);
+  const auditLogger = new ModelRouteAuditLogger({ path: logPath });
+
+  const useCase = new RegenerateFleetAgentsUseCase(catalog, quarantine, auditLogger);
+
+  // Pass 1: generate the full fleet (no exclusions)
+  const first = await useCase.execute({ workspaceRoot });
+  assert.equal(first.generated.length, 3);
+  const geminiAgentRelative = first.generated.find((g) => g.modelId === "gemini-pro")!.agentRelative;
+  assert.equal(existsSync(path.join(workspaceRoot, geminiAgentRelative)), true);
+
+  // Pass 2: exclude the gemini route via canary-blocked canonical id
+  const second = await useCase.execute({
+    workspaceRoot,
+    excludeCanonicalIds: new Set(["google/gemini-pro"]),
+  });
+  await auditLogger.close();
+
+  // Exclusion reached the filter: emitted fleet excludes the route
+  assert.equal(second.generated.length, 2);
+  assert.equal(second.generated.some((g) => g.modelId === "gemini-pro"), false);
+  assert.equal(second.excluded.length, 1);
+  assert.equal(second.excluded[0].route.modelId, "gemini-pro");
+  assert.equal(second.excluded[0].reason, "CANARY_BLOCKED");
+
+  // Exclusion reached the sweep: gemini host files removed, others regenerated
+  assert.equal(existsSync(path.join(workspaceRoot, geminiAgentRelative)), false);
+  assert.ok(second.sweptRelativePaths.includes(geminiAgentRelative));
+
+  const agentsDir = path.join(workspaceRoot, ".opencode", "agents");
+  assert.equal(readdirSync(agentsDir).length, 2);
+
+  const manifestPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.equal(manifest.routes.length, 2);
+  assert.equal(manifest.routes.some((r: { modelId: string }) => r.modelId === "gemini-pro"), false);
+
+  // Single exclusion event with the canary reason
+  const auditLines = readFileSync(logPath, "utf8").trim().split("\n");
+  assert.equal(auditLines.length, 1);
+  assert.equal(JSON.parse(auditLines[0]).stage, "generation.route.excluded");
+  assert.equal(JSON.parse(auditLines[0]).reason, "CANARY_BLOCKED");
+});

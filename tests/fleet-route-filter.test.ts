@@ -160,3 +160,60 @@ test("connectivity checked before quarantine", async () => {
   assert.equal(res.excluded.length, 1);
   assert.equal(res.excluded[0].reason, "NOT_CONNECTED");
 });
+
+test("excludedCanonicalIds route excluded as CANARY_BLOCKED", async () => {
+  const catalog = new MockCatalogPort(new Set(["openai:gpt-4o"]));
+  const quarantine = new MockQuarantinePort([]);
+  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
+
+  const route: RouteEntry = { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" };
+
+  const res = await filter.execute({
+    routes: [route],
+    excludedCanonicalIds: new Set(["openai/gpt-4o"]),
+  });
+  assert.equal(res.included.length, 0);
+  assert.equal(res.excluded.length, 1);
+  assert.equal(res.excluded[0].reason, "CANARY_BLOCKED");
+  assert.equal(res.excluded[0].route.providerId, "openai");
+});
+
+test("NOT_CONNECTED takes precedence over CANARY_BLOCKED", async () => {
+  const catalog = new MockCatalogPort(new Set()); // disconnected
+  const quarantine = new MockQuarantinePort([]);
+  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
+
+  const route: RouteEntry = { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" };
+
+  const res = await filter.execute({
+    routes: [route],
+    excludedCanonicalIds: new Set(["openai/gpt-4o"]),
+  });
+  assert.equal(res.included.length, 0);
+  assert.equal(res.excluded.length, 1);
+  assert.equal(res.excluded[0].reason, "NOT_CONNECTED");
+});
+
+test("TTL-only quarantine remains included when exclusion set does not contain the route", async () => {
+  const catalog = new MockCatalogPort(new Set(["openai:gpt-4o"]));
+  const quarantines: QuarantineEntry[] = [
+    {
+      level: "model",
+      modelId: "gpt-4o",
+      type: "ttl",
+      until: new Date(Date.now() + 3600000),
+      reason: "temp outage",
+    },
+  ];
+  const quarantine = new MockQuarantinePort(quarantines);
+  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
+
+  const route: RouteEntry = { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" };
+  const res = await filter.execute({
+    routes: [route],
+    excludedCanonicalIds: new Set(["google/gemini-pro"]),
+  });
+  assert.equal(res.included.length, 1);
+  assert.equal(res.excluded.length, 0);
+  assert.deepEqual(res.included[0], route);
+});

@@ -42,7 +42,10 @@ export class RegenerateFleetAgentsUseCase {
     const config = decodeRoutesConfig(configJson);
 
     const filterUseCase = new FilterFleetRoutesUseCase(this.catalogPort, this.quarantinePort);
-    const filterResult = await filterUseCase.execute({ routes: config.routes });
+    const filterResult = await filterUseCase.execute({
+      routes: config.routes,
+      excludedCanonicalIds: input.excludeCanonicalIds,
+    });
 
     const correlationId = input.correlationId ?? randomBytes(16).toString("hex");
     const startTime = Date.now();

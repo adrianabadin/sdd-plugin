@@ -51,6 +51,16 @@ export class FilterFleetRoutesUseCase {
         continue;
       }
 
+      const canonicalId = `${route.providerId}/${route.modelId}`;
+      if (input.excludedCanonicalIds?.has(canonicalId)) {
+        excluded.push({
+          route,
+          reason: "CANARY_BLOCKED",
+          detail: "Blocked by model canary",
+        });
+        continue;
+      }
+
       included.push(route);
     }
 
