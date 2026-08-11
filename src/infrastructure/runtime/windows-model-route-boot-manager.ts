@@ -65,6 +65,7 @@ import type { Manifest } from "../opencode/disk-agent-generator.js";
 import {
   ModelRouteCanary,
   CanaryBlockedError,
+  type CanaryFailure,
   type CanaryHostTransport,
 } from "../opencode/model-route-canary.js";
 import {
@@ -75,8 +76,10 @@ import {
   AttestationMismatchError,
 } from "../opencode/model-route-readiness.js";
 import { applyCurrentUserAcl } from "./windows-acl.js";
+import { ROUTING_HANDSHAKE_FILENAME } from "./model-route-handshake.js";
 import type { ModelRouteCatalogPort } from "../../ports/model-route-catalog.port.js";
 import type { RegenerateFleetAgentsUseCase } from "../../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
+import type { QuarantineWritePort } from "../../ports/quarantine-write.port.js";
 
 /**
  * Pluggable catalog sync use case. The default production wiring
@@ -97,6 +100,12 @@ export interface BootChildProcess {
 
 /** Process boundary used by production CLI and hermetic supervisor tests. */
 export interface BootProcessSupervisor {
+  /**
+   * Optional pre-spawn guard. Implementations reject when the supervisor
+   * cannot legitimately own the serve process (for example when its port is
+   * already held). Optional so hermetic fakes stay valid without it.
+   */
+  preflight?(): Promise<void>;
   spawnServe(env: NodeJS.ProcessEnv): BootChildProcess;
   waitForHealthy(process: BootChildProcess): Promise<void>;
   spawnAttach(env: NodeJS.ProcessEnv): BootChildProcess;
@@ -159,6 +168,59 @@ const STALE_LOCK_MAX_AGE_MS = 30_000;
 /** Default attestation TTL. Long-lived supervisors reissue before expiry. */
 const DEFAULT_TTL_MS = 60_000;
 
+/**
+ * TTL (ms) applied to the quarantine a boot manager writes for a
+ * canary-blocked route. 15 minutes mirrors the operator-facing
+ * "temporary outage" granularity; a later boot re-canaries the route
+ * once the quarantine lapses.
+ */
+export const CANARY_QUARANTINE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Thrown when a partial-fleet boot proves NO route. The supervisor
+ * cannot issue readiness from zero evidence, so the boot fails closed.
+ * (A single-route fleet that fails canary rethrows the original
+ * `CanaryBlockedError` instead, preserving the pre-partial-fleet
+ * contract for lone-route manifests.)
+ */
+export class CanaryFleetEmptyError extends Error {
+  readonly code = "CANARY_FLEET_EMPTY";
+  constructor(readonly blockedCount: number) {
+    super(
+      `CANARY_FLEET_EMPTY: every configured route failed canary (blocked=${blockedCount}); boot refuses to publish readiness`,
+    );
+    this.name = "CanaryFleetEmptyError";
+  }
+}
+
+/**
+ * Thrown when the manifest produced by the exclusion regeneration does
+ * not cover the exact host set the canary proved. Indicates the
+ * generator and the canary disagree about the fleet; readiness would
+ * lie, so the boot fails closed.
+ */
+export class CanaryManifestMismatchError extends Error {
+  readonly code = "CANARY_MANIFEST_MISMATCH";
+  constructor(
+    readonly manifestHosts: ReadonlyArray<string>,
+    readonly attestedHosts: ReadonlyArray<string>,
+  ) {
+    super(
+      `CANARY_MANIFEST_MISMATCH: regenerated manifest host set (${manifestHosts.join(",")}) differs from proven canary host set (${attestedHosts.join(",")})`,
+    );
+    this.name = "CanaryManifestMismatchError";
+  }
+}
+
+/**
+ * Minimal structural audit sink used by the partial-fleet sequence.
+ * The production `ModelRouteAuditLogger` satisfies it (method
+ * parameter bivariance); tests inject a recorder.
+ */
+export interface BootAuditPort {
+  append(entry: Record<string, unknown>): Promise<void>;
+}
+
 /** Process env keys used by the in-process bootstrap to read the boot secrets. */
 export const ROUTING_BOOT_ID_ENV = "SDD_MODEL_ROUTING_BOOT_ID";
 export const ROUTING_SIGNING_KEY_ENV = "SDD_MODEL_ROUTING_SIGNING_KEY";
@@ -208,10 +270,24 @@ export interface WindowsModelRouteBootManagerOptions {
   readonly processSupervisor?: BootProcessSupervisor;
   /** Optional persisted cross-process control record. */
   readonly controlPath?: string;
+  /** Optional override for the persisted handshake artifact path. */
+  readonly handshakePath?: string;
   /** Renewal cadence; defaults to one third of the attestation TTL. */
   readonly renewalIntervalMs?: number;
   readonly fleetRegeneration?: RegenerateFleetAgentsUseCase;
   readonly routesConfigPath?: string;
+  /**
+   * Optional quarantine write port. When present, canary-blocked
+   * routes are quarantined (modelProvider, TTL
+   * `CANARY_QUARANTINE_TTL_MS`, reason `canary <CODE>`) before the
+   * exclusion regeneration. Production wiring lands in WU5.
+   */
+  readonly quarantine?: QuarantineWritePort;
+  /**
+   * Optional audit sink for the partial-fleet sequence
+   * (`boot.route.canary_blocked` per blocked route).
+   */
+  readonly audit?: BootAuditPort;
 }
 
 export class WindowsModelRouteBootManager {
@@ -237,9 +313,12 @@ export class WindowsModelRouteBootManager {
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly processSupervisor: BootProcessSupervisor | undefined;
   private readonly controlPath: string;
+  private readonly handshakePath: string;
   private readonly renewalIntervalMs: number;
   private readonly fleetRegeneration: RegenerateFleetAgentsUseCase | undefined;
   private readonly routesConfigPath: string | undefined;
+  private readonly quarantine: QuarantineWritePort | undefined;
+  private readonly audit: BootAuditPort | undefined;
   private serveProcess: BootChildProcess | null = null;
   private attachProcess: BootChildProcess | null = null;
   private renewalTimer: ReturnType<typeof setInterval> | null = null;
@@ -264,13 +343,16 @@ export class WindowsModelRouteBootManager {
     this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
     this.now = options.now ?? Date.now;
     if (options.onStateChange !== undefined) this.onStateChange = options.onStateChange;
-    this.canaryTimeoutMs = options.canaryTimeoutMs ?? 120_000;
+    this.canaryTimeoutMs = options.canaryTimeoutMs ?? 300_000;
     this.isProcessAlive = options.isProcessAlive ?? ((pid: number) => isAliveDefault(pid));
     this.processSupervisor = options.processSupervisor;
     this.controlPath = options.controlPath ?? path.join(this.routingDir, "boot-control.json");
+    this.handshakePath = options.handshakePath ?? path.join(this.routingDir, ROUTING_HANDSHAKE_FILENAME);
     this.renewalIntervalMs = options.renewalIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3));
     this.fleetRegeneration = options.fleetRegeneration;
     this.routesConfigPath = options.routesConfigPath;
+    this.quarantine = options.quarantine;
+    this.audit = options.audit;
   }
 
   getState(): BootLifecycleState {
@@ -341,6 +423,7 @@ export class WindowsModelRouteBootManager {
     this.attachProcess = null;
     this.serveProcess = null;
     this.removeAttestationFromDisk();
+    this.removeHandshakeFromDisk();
     this.releaseLock();
     try { rmSync(this.controlPath, { force: true }); } catch { /* best effort */ }
     this.restoreEnv();
@@ -354,16 +437,20 @@ export class WindowsModelRouteBootManager {
     this.transitionTo("starting");
 
     try {
-      if (this.fleetRegeneration) {
-        const resolvedConfigPath = this.routesConfigPath
-          ? (path.isAbsolute(this.routesConfigPath)
-              ? path.resolve(this.routesConfigPath)
-              : path.resolve(this.workspaceRoot, this.routesConfigPath))
-          : path.resolve(this.workspaceRoot, "config/model-routing/routes.json");
+      // (0) Environmental precondition, checked before ANY side effect.
+      // A supervised boot is only meaningful when this supervisor owns the
+      // serve process; otherwise the routing secrets never reach the process
+      // that actually serves requests. Probing first means a port collision
+      // costs nothing: no manifest rewrite, no lock acquisition, no secrets
+      // in the environment to roll back.
+      if (this.processSupervisor?.preflight) {
+        await this.processSupervisor.preflight();
+      }
 
+      if (this.fleetRegeneration) {
         await this.fleetRegeneration.execute({
           workspaceRoot: this.workspaceRoot,
-          routesConfigPath: resolvedConfigPath,
+          routesConfigPath: this.resolveRoutesConfigPath(),
         });
       }
 
@@ -373,16 +460,17 @@ export class WindowsModelRouteBootManager {
       this.bootIdentity = generateUuidV4();
       randomBytes(HMAC_KEY_BYTES).copy(this.signingKey);
 
-      // The child supervisor receives secrets in a private env object. The
-      // legacy in-process plugin path is retained only when no child exists.
-      if (!this.processSupervisor) {
-        this.setEnv(ROUTING_BOOT_ID_ENV, this.bootIdentity);
-        this.setEnv(ROUTING_SIGNING_KEY_ENV, this.signingKey.toString("hex"));
-      }
+      // The dispatching OpenCode process and any supervised serve child both
+      // need the same boot credentials. `childEnv()` copies these values into
+      // the child; this process must also receive them because the routing hook
+      // runs here when the host dispatches an SDD subagent.
+      this.setEnv(ROUTING_BOOT_ID_ENV, this.bootIdentity);
+      this.setEnv(ROUTING_SIGNING_KEY_ENV, this.signingKey.toString("hex"));
 
       // (3) Acquire the generator lock and reclaim only safe stale state.
       this.acquireOrReclaimLock();
       this.removeAttestationFromDisk();
+      this.removeHandshakeFromDisk();
       const manifest = this.readManifest();
 
       if (this.processSupervisor) {
@@ -415,14 +503,75 @@ export class WindowsModelRouteBootManager {
     // (8) Canary every route with a distinct parent session model.
     // The canary now enforces a parent read-back (PARENT_MODEL_MISMATCH
     // fail-closed) in addition to the existing distinct-parent
-    // contract.
+    // contract. verifyRoutes() reports proven + blocked per route
+    // instead of failing on the first blocked route, so a partial
+    // fleet can still boot on its proven evidence.
     this.transitionTo("canarying");
     const canary = new ModelRouteCanary({
       transport: this.canary,
       selectParentModel: this.selectParentModel,
       timeoutMs: this.canaryTimeoutMs,
     });
-    const evidence = await canary.verifyEveryRoute(manifest);
+    const report = await canary.verifyRoutes(manifest);
+    const proven = [...report.proven];
+    const blocked = [...report.blocked];
+
+    // (8a) Whole-fleet failure fails closed BEFORE any side effect.
+    // A lone blocked route in a single-route fleet rethrows the
+    // original canary error so the pre-partial-fleet contract
+    // (CanaryBlockedError) stays intact for single-route manifests.
+    if (proven.length === 0) {
+      if (manifest.routes.length === 1 && blocked.length === 1) {
+        const failure = blocked[0]!;
+        throw new CanaryBlockedError(
+          failure.code,
+          canaryMessageWithoutCodePrefix(failure.code, failure.message),
+        );
+      }
+      throw new CanaryFleetEmptyError(blocked.length);
+    }
+
+    // (8b) Partial fleet: audit + quarantine each blocked route, then
+    // regenerate the fleet EXCLUDING the blocked canonicals. The boot
+    // lock is released first because the regeneration writes the
+    // manifest (its own lock domain); it is re-acquired after issue().
+    let issueManifest = manifest;
+    if (blocked.length > 0) {
+      if (!this.fleetRegeneration) {
+        throw new Error(
+          "FLEET_REGENERATION_NOT_CONFIGURED: partial-fleet readiness requires a regeneration use case",
+        );
+      }
+      for (const failure of blocked) {
+        if (this.audit) {
+          await this.audit.append({
+            stage: "boot.route.canary_blocked",
+            hostName: failure.hostName,
+            targetCanonicalId: failure.targetCanonicalId,
+            code: failure.code,
+            message: failure.message,
+            attempts: failure.attempts,
+            ts: this.now(),
+          });
+        }
+        if (this.quarantine) {
+          await this.quarantineBlockedRoute(failure);
+        }
+      }
+      this.releaseLock();
+      const excludeCanonicalIds = new Set(blocked.map((f) => f.targetCanonicalId));
+      await this.fleetRegeneration.execute({
+        workspaceRoot: this.workspaceRoot,
+        routesConfigPath: this.resolveRoutesConfigPath(),
+        excludeCanonicalIds,
+      });
+      issueManifest = this.readManifest();
+      const manifestHosts = issueManifest.routes.map((route) => route.hostName);
+      const attestedHosts = proven.map((evidence) => evidence.hostName);
+      if (!sameHostList(manifestHosts, attestedHosts)) {
+        throw new CanaryManifestMismatchError(manifestHosts, attestedHosts);
+      }
+    }
 
     // (9) Publish a signed attestation via ModelRouteReadiness.issue().
     // The attestation carries nonce + openCodeVersion + verifierVersion
@@ -430,34 +579,37 @@ export class WindowsModelRouteBootManager {
     // fields. The signature is HMAC-SHA256 over the body; the file
     // never contains the key bytes.
     //
-    // issue()'s assertCurrentState() refuses to publish when the
-    // generator.lock file is present, because the lock signals an
-    // in-flight manifest write. The boot manager is NOT a generator
-    // (the generator ran pre-start and committed the manifest), so we
-    // release the boot lock around the issue() call and re-acquire
-    // it once the attestation is on disk. The window is small and
-    // does not race with the generator (which writes under its own
-    // distinct lock acquisition).
+    // issue()'s assertCurrentState() accepts the generator lock ONLY
+    // when it belongs to this boot (bootIdentity match). The full
+    // fleet keeps the lock held end-to-end; a partial fleet releases
+    // it around the exclusion regeneration (8b) and re-acquires it
+    // here, so the generator lock is always present (or provably
+    // owned) while the attestation is on disk.
       const readiness = new ModelRouteReadiness({
         workspaceRoot: this.workspaceRoot,
         now: this.now,
         signingKey: this.signingKey,
       });
       const issued = readiness.issue({
-        manifest,
-        evidence: [...evidence],
+        manifest: issueManifest,
+        evidence: proven,
         openCodeVersion: this.openCodeVersion,
         bootIdentity: this.bootIdentity,
         ttlMs: this.ttlMs,
       });
       this.attestation = issued;
+      if (blocked.length > 0) this.writeLock();
       if (this.processSupervisor) {
         this.attachProcess = this.processSupervisor.spawnAttach(this.scrubbedEnv());
         this.attachProcess.once("exit", () => { if (this.state === "ready") void this.stop(); });
         this.attachProcess.once("error", () => { if (this.state === "ready") void this.stop(); });
       }
       this.writeControlRecord();
+      this.writeHandshake();
       this.transitionTo("ready");
+      console.log(
+        `boot: state=ready bootIdentity=${this.bootIdentity} routes=${proven.length}/${manifest.routes.length} blocked=${blocked.length}`,
+      );
       this.renewalTimer = setInterval(() => { void this.renewAttestation(); }, this.renewalIntervalMs);
       this.renewalTimer.unref?.();
     } catch (error) {
@@ -468,6 +620,7 @@ export class WindowsModelRouteBootManager {
       if (this.renewalTimer !== null) clearInterval(this.renewalTimer);
       this.renewalTimer = null;
       this.removeAttestationFromDisk();
+      this.removeHandshakeFromDisk();
       this.releaseLock();
       try { rmSync(this.controlPath, { force: true }); } catch { /* best effort */ }
       this.restoreEnv();
@@ -510,6 +663,31 @@ export class WindowsModelRouteBootManager {
     applyCurrentUserAcl(this.controlPath);
   }
 
+  /**
+   * Publish the boot credentials for OpenCode processes started
+   * OUTSIDE the supervisor (interactive sessions are not children of
+   * the supervised serve, so they never inherit the env vars). The
+   * consumer read path (`readRoutingHandshake`) binds this file to
+   * the live attestation, so a stale handshake from a dead supervisor
+   * can never sign. Same protection as the control record: mode
+   * 0o600 plus a current-user ACL.
+   */
+  private writeHandshake(): void {
+    mkdirSync(path.dirname(this.handshakePath), { recursive: true });
+    writeFileSync(this.handshakePath, JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      bootIdentity: this.bootIdentity,
+      signingKey: this.signingKey.toString("hex"),
+      issuedAt: this.now(),
+    }), { encoding: "utf8", mode: 0o600 });
+    applyCurrentUserAcl(this.handshakePath);
+  }
+
+  private removeHandshakeFromDisk(): void {
+    try { rmSync(this.handshakePath, { force: true }); } catch { /* best-effort */ }
+  }
+
   private async renewAttestation(): Promise<void> {
     if (this.state !== "ready" || !this.attestation || !this.bootIdentity) return;
     try {
@@ -526,6 +704,40 @@ export class WindowsModelRouteBootManager {
       throw new Error(`MANIFEST_MISSING: ${this.manifestPath}`);
     }
     return JSON.parse(readFileSync(this.manifestPath, "utf8")) as Manifest;
+  }
+
+  /**
+   * Absolute routes config path consumed by the fleet regeneration
+   * (`routesConfigPath` when set, otherwise the canonical
+   * `config/model-routing/routes.json` under the workspace root).
+   */
+  private resolveRoutesConfigPath(): string {
+    return this.routesConfigPath
+      ? (path.isAbsolute(this.routesConfigPath)
+          ? path.resolve(this.routesConfigPath)
+          : path.resolve(this.workspaceRoot, this.routesConfigPath))
+      : path.resolve(this.workspaceRoot, "config/model-routing/routes.json");
+  }
+
+  /**
+   * Quarantine a canary-blocked route at the modelProvider level with
+   * a TTL of `CANARY_QUARANTINE_TTL_MS` and reason `canary <CODE>`.
+   * The canonical id is split on the FIRST slash only, so provider
+   * ids that contain slashes never break the provider/model split.
+   */
+  private async quarantineBlockedRoute(failure: CanaryFailure): Promise<void> {
+    if (!this.quarantine) return;
+    const slash = failure.targetCanonicalId.indexOf("/");
+    const providerId = slash === -1 ? failure.targetCanonicalId : failure.targetCanonicalId.slice(0, slash);
+    const modelId = slash === -1 ? undefined : failure.targetCanonicalId.slice(slash + 1);
+    await this.quarantine.setQuarantine({
+      level: "modelProvider",
+      providerId,
+      modelId,
+      type: "ttl",
+      until: new Date(this.now() + CANARY_QUARANTINE_TTL_MS),
+      reason: `canary ${failure.code}`,
+    });
   }
 
   private transitionTo(next: BootLifecycleState): void {
@@ -647,6 +859,24 @@ function generateUuidV4(): string {
     throw new Error(`BOOT_IDENTITY_INVALID: crypto.randomUUID produced non-v4 token ${candidate}`);
   }
   return candidate;
+}
+
+/**
+ * `CanaryFailure.message` already carries the `${code}: ` prefix
+ * (CanaryBlockedError prefixes its message). Strip it before the
+ * single-route rethrow so the reconstructed error does not double it.
+ */
+function canaryMessageWithoutCodePrefix(code: string, message: string): string {
+  const prefix = `${code}: `;
+  return message.startsWith(prefix) ? message.slice(prefix.length) : message;
+}
+
+/** Order-insensitive host-list equality for the manifest/evidence set check. */
+function sameHostList(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean {
+  if (a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((host, index) => host === sortedB[index]);
 }
 
 // Re-export for ergonomic imports in the CLI/test layer.
