@@ -54,10 +54,24 @@ export interface CanaryEvidence {
   readonly observedAssistantCanonicalId: string;
 }
 
+export interface CanaryFailure {
+  readonly hostName: string;
+  readonly targetCanonicalId: string;
+  readonly code: CanaryErrorCode;
+  readonly message: string;
+  readonly attempts: number;
+}
+
+export interface CanaryReport {
+  readonly proven: ReadonlyArray<CanaryEvidence>;
+  readonly blocked: ReadonlyArray<CanaryFailure>;
+}
+
 export interface ModelRouteCanaryOptions {
   readonly transport: CanaryHostTransport;
   readonly selectParentModel: (targetCanonicalId: string) => Promise<string | null>;
   readonly timeoutMs?: number;
+  readonly canaryRetries?: number;
 }
 
 interface MessageIdentity {
@@ -126,10 +140,17 @@ async function bounded<T>(operation: Promise<T>, timeoutMs: number): Promise<T> 
   }
 }
 
+async function waitForEvidenceInterval(timeoutMs: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, Math.min(100, timeoutMs)));
+}
+
 export interface OpenCodeHttpCanaryTransportOptions {
   readonly baseUrl: string;
   readonly fetchImpl?: typeof fetch;
+  readonly commandAckTimeoutMs?: number;
 }
+
+const DEFAULT_COMMAND_ACK_TIMEOUT_MS = 15_000;
 
 function responseData(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
@@ -140,10 +161,12 @@ function responseData(value: unknown): unknown {
 export class OpenCodeHttpCanaryTransport implements CanaryHostTransport {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly commandAckTimeoutMs: number;
 
   constructor(options: OpenCodeHttpCanaryTransportOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.commandAckTimeoutMs = options.commandAckTimeoutMs ?? DEFAULT_COMMAND_ACK_TIMEOUT_MS;
   }
 
   async createSession(input: { parentModel: string }): Promise<CanarySession> {
@@ -163,10 +186,19 @@ export class OpenCodeHttpCanaryTransport implements CanaryHostTransport {
   }
 
   async invokeCommand(input: { sessionId: string; command: string; arguments: string; parentModel: string }): Promise<void> {
-    await this.request(`/session/${encodeURIComponent(input.sessionId)}/command`, {
-      method: "POST",
-      body: JSON.stringify({ command: input.command, arguments: input.arguments }),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.commandAckTimeoutMs);
+    try {
+      await this.request(`/session/${encodeURIComponent(input.sessionId)}/command`, {
+        method: "POST",
+        body: JSON.stringify({ command: input.command, arguments: input.arguments }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async listChildren(parentSessionId: string): Promise<ReadonlyArray<CanarySession>> {
@@ -230,18 +262,55 @@ export class OpenCodeHttpCanaryTransport implements CanaryHostTransport {
 
 export class ModelRouteCanary {
   private readonly timeoutMs: number;
+  private readonly canaryRetries: number;
 
   constructor(private readonly options: ModelRouteCanaryOptions) {
     this.timeoutMs = options.timeoutMs ?? 120_000;
+    this.canaryRetries = Math.max(0, options.canaryRetries ?? 1);
+  }
+
+  async verifyRoutes(manifest: Manifest): Promise<CanaryReport> {
+    const proven: CanaryEvidence[] = [];
+    const blocked: CanaryFailure[] = [];
+    for (const route of manifest.routes) {
+      const targetCanonicalId = `${route.providerId}/${route.modelId}`;
+      const maxAttempts = 1 + this.canaryRetries;
+      let lastError: CanaryBlockedError | null = null;
+      let attempts = 0;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        attempts = attempt;
+        try {
+          proven.push(await this.verifyRoute(route));
+          lastError = null;
+          break;
+        } catch (error) {
+          if (error instanceof CanaryBlockedError) {
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (lastError) {
+        blocked.push({
+          hostName: route.hostName,
+          targetCanonicalId,
+          code: lastError.code,
+          message: lastError.message,
+          attempts,
+        });
+      }
+    }
+    return { proven, blocked };
   }
 
   async verifyEveryRoute(manifest: Manifest): Promise<ReadonlyArray<CanaryEvidence>> {
-    const results: CanaryEvidence[] = [];
-    for (const route of manifest.routes) results.push(await this.verifyRoute(route));
-    if (results.length !== manifest.routes.length) {
-      throw new CanaryBlockedError("CANARY_FAILED", "not every manifest route produced evidence");
+    const report = await this.verifyRoutes(manifest);
+    if (report.blocked.length > 0) {
+      const first = report.blocked[0]!;
+      throw new CanaryBlockedError(first.code, first.message);
     }
-    return results;
+    return report.proven;
   }
 
   private async verifyRoute(route: ManifestRouteEntry): Promise<CanaryEvidence> {
@@ -282,26 +351,52 @@ export class ModelRouteCanary {
     if (observable.length === 0) throw new CanaryBlockedError("CHILD_SESSION_MISSING", `no new child created for ${route.hostName}`);
 
     let sawObservableMetadata = false;
-    for (const child of observable) {
-      const identities = (await bounded(this.options.transport.listMessages(child.id), this.timeoutMs))
-        .map(identityOf)
-        .filter((item): item is MessageIdentity => item !== null);
-      const user = identities.find((item) => item.role === "user");
-      const assistant = identities.find((item) => item.role === "assistant" && item.completed);
-      if (!user || !assistant) continue;
-      sawObservableMetadata = true;
-      if (user.canonicalId === targetCanonicalId && assistant.canonicalId === targetCanonicalId) {
-        return {
-          hostName: route.hostName,
-          command,
-          targetCanonicalId,
-          parentCanonicalId,
-          parentSessionId: parent.id,
-          childSessionId: child.id,
-          observedUserCanonicalId: user.canonicalId,
-          observedAssistantCanonicalId: assistant.canonicalId,
-        };
+    const deadline = Date.now() + this.timeoutMs;
+    while (Date.now() < deadline) {
+      let pendingMetadata = false;
+      let sawMismatch = false;
+      let sawMalformedMetadata = false;
+      for (const child of observable) {
+        const remaining = Math.max(1, deadline - Date.now());
+        const identities = (await bounded(this.options.transport.listMessages(child.id), remaining))
+          .map(identityOf)
+          .filter((item): item is MessageIdentity => item !== null);
+        const user = identities.find((item) => item.role === "user");
+        const assistant = identities.find((item) => item.role === "assistant" && item.completed);
+        if (!user || !assistant) {
+          if (user && !assistant) pendingMetadata = true;
+          else sawMalformedMetadata = true;
+          continue;
+        }
+        sawObservableMetadata = true;
+        if (user.canonicalId === targetCanonicalId && assistant.canonicalId === targetCanonicalId) {
+          return {
+            hostName: route.hostName,
+            command,
+            targetCanonicalId,
+            parentCanonicalId,
+            parentSessionId: parent.id,
+            childSessionId: child.id,
+            observedUserCanonicalId: user.canonicalId,
+            observedAssistantCanonicalId: assistant.canonicalId,
+          };
+        }
+        sawMismatch = true;
       }
+      if (sawMismatch && !pendingMetadata) {
+        throw new CanaryBlockedError(
+          "CANARY_METADATA_MISMATCH",
+          `authoritative child user/completed-assistant metadata did not prove ${targetCanonicalId}`,
+        );
+      }
+      if (sawMalformedMetadata && !pendingMetadata && !sawMismatch) {
+        throw new CanaryBlockedError(
+          "CANARY_METADATA_UNOBSERVABLE",
+          `authoritative child metadata did not expose a user/completed-assistant pair for ${targetCanonicalId}`,
+        );
+      }
+      const remaining = deadline - Date.now();
+      if (remaining > 0) await waitForEvidenceInterval(remaining);
     }
     throw new CanaryBlockedError(
       sawObservableMetadata ? "CANARY_METADATA_MISMATCH" : "CANARY_METADATA_UNOBSERVABLE",

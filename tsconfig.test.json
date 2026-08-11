@@ -29,6 +29,7 @@
     "tests/model-route-disk-generator.test.ts",
     "tests/model-route-cli.test.ts",
     "tests/model-route-canary-readiness.test.ts",
+    "tests/model-route-canary-isolation.test.ts",
     "tests/model-route-real-host-canary.integration.ts",
     "tests/model-route-quarantine.test.ts",
     "tests/model-route-audit.test.ts",
