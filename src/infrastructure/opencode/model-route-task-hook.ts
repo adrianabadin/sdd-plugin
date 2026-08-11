@@ -66,6 +66,7 @@ import {
   NaturalIntentBlockedError,
 } from "../../domain/model-routing/natural-model-routing-errors.js";
 import type { QuarantineEntry } from "../../domain/model/quarantine.js";
+import { resolveQuarantinePrecedence } from "../../domain/model/quarantine.js";
 import type { QuarantineStore } from "../../infrastructure/runtime/quarantine-store.js";
 import {
   AttestationExpiredError,
@@ -289,7 +290,10 @@ export class ModelRouteTaskHook {
     }
 
     if (this.quarantineStore.isActive(canonical.providerId, canonical.modelId)) {
-      const error = new QuarantinedModelError(`${canonical.providerId}/${canonical.modelId} is quarantined; refusing to route`);
+      const reason = this.activeQuarantineReason(canonical.providerId, canonical.modelId);
+      const error = new QuarantinedModelError(
+        `${canonical.providerId}/${canonical.modelId} is quarantined${reason !== null ? ` (${reason})` : ""}; refusing to route`,
+      );
       await this.block(correlationId, requestedAlias, canonical.providerId, canonical.modelId, "", error.name);
       throw error;
     }
@@ -401,7 +405,10 @@ export class ModelRouteTaskHook {
     }
 
     if (this.quarantineStore.isActive(canonical.providerId, canonical.modelId)) {
-      const error = new QuarantinedModelError(`${canonical.providerId}/${canonical.modelId} is quarantined; refusing to route`);
+      const reason = this.activeQuarantineReason(canonical.providerId, canonical.modelId);
+      const error = new QuarantinedModelError(
+        `${canonical.providerId}/${canonical.modelId} is quarantined${reason !== null ? ` (${reason})` : ""}; refusing to route`,
+      );
       await this.blockNatural(
         correlationId,
         error.name,
@@ -484,6 +491,16 @@ export class ModelRouteTaskHook {
     const callId = input.callID;
     if (typeof callId === "string" && callId.length > 0) return callId;
     return `audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  private activeQuarantineReason(providerId: string, modelId: string): string | null {
+    const active = resolveQuarantinePrecedence(
+      [...this.quarantineStore.snapshot()],
+      providerId,
+      modelId,
+      new Date(this.now()),
+    );
+    return typeof active?.reason === "string" && active.reason.length > 0 ? active.reason : null;
   }
 
   private readManifest(): Manifest {

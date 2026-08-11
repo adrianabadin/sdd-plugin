@@ -41,6 +41,7 @@ import { createHash, createHmac } from "node:crypto";
 
 import { ModelRouteTaskHook } from "../src/infrastructure/opencode/model-route-task-hook.js";
 import {
+  QuarantinedModelError,
   TaskHookBootIdentityMissingError,
   TaskHookSigningKeyMissingError,
 } from "../src/infrastructure/opencode/model-route-task-hook.js";
@@ -387,6 +388,51 @@ async function run(): Promise<void> {
       "empty bootIdentity is rejected",
     );
     console.log("  pass: explicit boot identity and HMAC signing key are required (no default/random/callID fallbacks)");
+
+    // 10. WU4: dispatching a canary-blocked route raises QuarantinedModelError
+    // whose reason carries the canary code — and the quarantine gate fires
+    // BEFORE readiness (attestation is removed, so a readiness-first order
+    // would raise ATTESTATION_UNAVAILABLE instead).
+    const canaryQuarantineStore = new QuarantineStoreImpl();
+    canaryQuarantineStore.publish({
+      level: "modelProvider",
+      providerId: "google",
+      modelId: "antigravity-gemini-3.6-flash-tiered",
+      type: "ttl",
+      until: new Date(Date.now() + 15 * 60 * 1000),
+      reason: "canary CHILD_SESSION_MISSING",
+    });
+    const canaryAuditPath = path.join(tmp, "audit-canary.jsonl");
+    const hookCanary = makeHook({
+      workspaceRoot,
+      resolver: new ModelRouteResolver(stubResolverPort("google", "antigravity-gemini-3.6-flash-tiered"), new Map()),
+      quarantineStore: canaryQuarantineStore,
+      auditPath: canaryAuditPath,
+    });
+    rmSync(attestationPath, { force: true });
+    const canaryOutput = { args: { subagent_type: "model-route:v1|sdd-mr-base|google/antigravity-gemini-3.6-flash-tiered" } };
+    await assert.rejects(
+      async () => hookCanary.execute({ tool: "task" }, canaryOutput),
+      (err: unknown) => {
+        assert.ok(err instanceof QuarantinedModelError, "canary-blocked dispatch raises QuarantinedModelError (not an attestation error)");
+        assert.match((err as Error).message, /canary CHILD_SESSION_MISSING/, "quarantine reason surfaces the canary code");
+        assert.doesNotMatch((err as Error).message, /ATTESTATION_/, "readiness was never consulted for the blocked route");
+        return true;
+      },
+      "canary-blocked route is blocked with QuarantinedModelError carrying the canary code",
+    );
+    assert.equal(
+      canaryOutput.args.subagent_type,
+      "model-route:v1|sdd-mr-base|google/antigravity-gemini-3.6-flash-tiered",
+      "subagent_type is NOT rewritten when the canary quarantine blocks",
+    );
+    const canaryAudit = readFileSync(canaryAuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(canaryAudit.length, 1, "exactly one audit entry for the blocked dispatch");
+    assert.equal(canaryAudit[0]?.["stage"], "routing.blocked");
+    assert.equal(canaryAudit[0]?.["errorClass"], "QuarantinedModelError");
+    assert.equal(canaryAudit[0]?.["resolvedProviderId"], "google");
+    assert.equal(canaryAudit[0]?.["resolvedModelId"], "antigravity-gemini-3.6-flash-tiered");
+    console.log("  pass: canary-blocked route raises QuarantinedModelError with the canary code as reason, before readiness");
 
     console.log("All task hook assertions passed.");
   } finally {
