@@ -3,20 +3,15 @@
   "generatorVersion": "1.1.0",
   "cap": 32,
   "sizeException": {
-    "reason": "Fleet SDD restringida a modelos disponibles sin Kimi y con Anthropic limitado a Opus 5",
+    "reason": "Actualizacion 2026-08-13: se remueven duplicados Gemini 3.1/3.6 (antigravity-gemini-pro-agent, antigravity-gemini-3.6-flash/-high/-low/-medium, gemini-3.6-flash, gemini-3.1-pro, gemini-3.1-pro-preview, gemini-3-flash-preview) y opencode-go/deepseek-v4-flash + opencode-go/minimax-m3. Se incorporan DeepSeek V4 Pro (opencode-go), Kimi K3-256K (kimicode) y Claude Sonnet 5 (anthropic). La restriccion previa 'sin Kimi / Anthropic limitado a Opus 5' (2026-08-08) fue puntual, no permanente; queda sin efecto.",
     "approvedBy": "aabad",
-    "approvedAt": "2026-08-08T00:00:00.000Z"
+    "approvedAt": "2026-08-13T00:00:00.000Z"
   },
   "routes": [
     {
       "baseTemplate": "sdd-mr-base",
       "providerId": "google",
       "modelId": "antigravity-gemini-3.6-flash-tiered"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "antigravity-gemini-pro-agent"
     },
     {
       "baseTemplate": "sdd-mr-base",
@@ -55,16 +50,6 @@
     },
     {
       "baseTemplate": "sdd-mr-base",
-      "providerId": "opencode-go",
-      "modelId": "deepseek-v4-flash"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "gemini-3-flash-preview"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
       "providerId": "opencode",
       "modelId": "laguna-s-2.1-free"
     },
@@ -85,11 +70,6 @@
     },
     {
       "baseTemplate": "sdd-mr-base",
-      "providerId": "opencode-go",
-      "modelId": "minimax-m3"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
       "providerId": "opencode",
       "modelId": "deepseek-v4-flash-free"
     },
@@ -105,38 +85,18 @@
     },
     {
       "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "gemini-3.1-pro"
+      "providerId": "opencode-go",
+      "modelId": "deepseek-v4-pro"
     },
     {
       "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "gemini-3.1-pro-preview"
+      "providerId": "kimi-for-coding",
+      "modelId": "k3-256k"
     },
     {
       "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "antigravity-gemini-3.6-flash"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "antigravity-gemini-3.6-flash-high"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "antigravity-gemini-3.6-flash-low"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "antigravity-gemini-3.6-flash-medium"
-    },
-    {
-      "baseTemplate": "sdd-mr-base",
-      "providerId": "google",
-      "modelId": "gemini-3.6-flash"
+      "providerId": "anthropic",
+      "modelId": "claude-sonnet-5"
     }
   ]
 }

@@ -305,9 +305,38 @@ async function run(): Promise<void> {
       AttestationMismatchError,
       "verify rejects an on-disk attestation still pinned to 1.18.4",
     );
-    // Re-issue a valid 1.18.9 attestation for the rest of the suite.
+// Re-issue a valid 1.18.9 attestation for the rest of the suite.
     const reissued = readiness.issue({ manifest, evidence, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a", ttlMs: 500 });
     assert.equal(reissued.openCodeVersion, REQUIRED_OPENCODE_VERSION);
+
+    // Semver gate: patch/minor updates within the same major are transparent
+    // (a routine runtime update must not force a supervisor re-boot).
+    const patched = readiness.issue({ manifest, evidence, openCodeVersion: "1.18.18", bootIdentity: "boot-a", ttlMs: 500 });
+    assert.equal(patched.openCodeVersion, "1.18.18", "attestation records the real emitting version");
+    assert.equal(
+      readiness.verify({ manifest, openCodeVersion: "1.18.18", bootIdentity: "boot-a" }).nonce,
+      "nonce-1",
+      "patch update verifies against the same minor without regeneration",
+    );
+    const minorBump = readiness.issue({ manifest, evidence, openCodeVersion: "1.19.0", bootIdentity: "boot-a", ttlMs: 500 });
+    assert.equal(
+      readiness.verify({ manifest, openCodeVersion: "1.19.0", bootIdentity: "boot-a" }).nonce,
+      "nonce-1",
+      "minor update within the same major verifies",
+    );
+    const newerPatch = readiness.issue({ manifest, evidence, openCodeVersion: "1.19.1", bootIdentity: "boot-a", ttlMs: 500 });
+    assert.throws(
+      () => readiness.verify({ manifest, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a" }),
+      /drifted beyond patch/,
+      "minor drift between the issuing and verifying runtimes requires a re-issue",
+    );
+    assert.throws(
+      () => readiness.issue({ manifest, evidence, openCodeVersion: "2.0.0", bootIdentity: "boot-a", ttlMs: 500 }),
+      /unsupported OpenCode version 2\.0\.0/,
+      "a newer major is never silently accepted: the SDK surface is only audited inside one major",
+    );
+    // Restore the REQUIRED-version attestation for the rest of the suite.
+    readiness.issue({ manifest, evidence, openCodeVersion: REQUIRED_OPENCODE_VERSION, bootIdentity: "boot-a", ttlMs: 500 });
 
     for (const changed of [
       { openCodeVersion: "1.18.10", bootIdentity: "boot-a" },

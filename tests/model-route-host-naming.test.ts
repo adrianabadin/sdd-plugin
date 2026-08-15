@@ -75,17 +75,40 @@ function run(): void {
   assert.throws(
     () => assertOpenCodeCompatible("1.18.4"),
     OpenCodeCompatError,
-    "exact compatibility gate refuses the legacy 1.18.4 runtime",
+    "compatibility gate refuses the legacy 1.18.4 runtime",
   );
   assert.throws(
     () => assertOpenCodeCompatible("1.18.5"),
     OpenCodeCompatError,
-    "exact compatibility gate refuses anything other than 1.18.9",
+    "compatibility gate refuses runtimes below the minimum",
   );
   assert.throws(
     () => assertOpenCodeCompatible("1.18.10"),
     OpenCodeCompatError,
-    "exact compatibility gate refuses newer-than-1.18.9 runtime",
+    "compatibility gate refuses 1.18.10 below the 1.18.17 minimum",
+  );
+  assert.throws(
+    () => assertOpenCodeCompatible("1.18.16"),
+    OpenCodeCompatError,
+    "patch downgrade below the minimum fails closed",
+  );
+  assert.doesNotThrow(
+    () => assertOpenCodeCompatible("1.18.18"),
+    "patch update within the same minor is transparent",
+  );
+  assert.doesNotThrow(
+    () => assertOpenCodeCompatible("1.19.0"),
+    "minor update within the same major is transparent",
+  );
+  assert.throws(
+    () => assertOpenCodeCompatible("2.0.0"),
+    OpenCodeCompatError,
+    "major bump fails closed: the SDK surface is only audited inside one major",
+  );
+  assert.throws(
+    () => assertOpenCodeCompatible("latest"),
+    OpenCodeCompatError,
+    "unparsable version fails closed",
   );
 
   console.log("All pure host naming assertions passed.");

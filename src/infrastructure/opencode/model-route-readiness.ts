@@ -19,9 +19,20 @@ import { resolveForeignAgentSources } from "./foreign-agent-sources.js";
 import { assertNoForeignAgentDefinitions } from "./foreign-agent-scan.js";
 import { ROUTED_HOST_NAME_PREFIX } from "../../domain/model-routing/model-route-host-naming.js";
 import type { CanaryEvidence } from "./model-route-canary.js";
+import {
+  isOpenCodeVersionSupported,
+  OPENCODE_COMPAT_VERSION,
+  parseOpenCodeVersion,
+} from "../../domain/model-routing/opencode-compat.js";
 import { applyCurrentUserAcl } from "../runtime/windows-acl.js";
 
-export const REQUIRED_OPENCODE_VERSION = "1.18.16";
+/**
+ * Minimum OpenCode runtime the attestation contract is audited against.
+ * NOT an exact pin: newer patch/minor versions within the same major are
+ * supported (see `isOpenCodeVersionSupported`), so routine runtime updates
+ * do not invalidate the supervisor state.
+ */
+export const REQUIRED_OPENCODE_VERSION = OPENCODE_COMPAT_VERSION;
 export const READINESS_VERIFIER_VERSION = "1.0.0";
 const ROUTING_DIR = path.join(".opencode", "sdd-model-routing");
 const ATTESTATION_FILE = "attestation.json";
@@ -48,7 +59,7 @@ export class AttestationMismatchError extends Error {
 export interface ReadinessAttestation {
   readonly schemaVersion: 1;
   readonly verifierVersion: typeof READINESS_VERIFIER_VERSION;
-  readonly openCodeVersion: typeof REQUIRED_OPENCODE_VERSION;
+  readonly openCodeVersion: string;
   readonly workspaceIdentity: string;
   readonly generationEpoch: string;
   readonly manifestHash: string;
@@ -122,8 +133,10 @@ export class ModelRouteReadiness {
     bootIdentity: string;
     ttlMs: number;
   }): ReadinessAttestation {
-    if (input.openCodeVersion !== REQUIRED_OPENCODE_VERSION) {
-      throw new AttestationMismatchError(`unsupported OpenCode version ${input.openCodeVersion}`);
+    if (!isOpenCodeVersionSupported(input.openCodeVersion)) {
+      throw new AttestationMismatchError(
+        `unsupported OpenCode version ${input.openCodeVersion} (minimum ${REQUIRED_OPENCODE_VERSION} within major ${parseOpenCodeVersion(REQUIRED_OPENCODE_VERSION)?.major ?? "?"})`,
+      );
     }
     if (input.ttlMs <= 0 || !Number.isSafeInteger(input.ttlMs)) {
       throw new AttestationMismatchError("ttlMs must be a positive safe integer");
@@ -146,7 +159,7 @@ export class ModelRouteReadiness {
     const body: Omit<ReadinessAttestation, "signature"> = {
       schemaVersion: 1,
       verifierVersion: READINESS_VERIFIER_VERSION,
-      openCodeVersion: REQUIRED_OPENCODE_VERSION,
+      openCodeVersion: input.openCodeVersion,
       workspaceIdentity: input.manifest.workspaceIdentity,
       generationEpoch: input.manifest.generationEpoch,
       manifestHash: input.manifest.manifestHash,
@@ -171,8 +184,22 @@ export class ModelRouteReadiness {
     }
     const attestation = this.read();
     if (this.now() > attestation.expiresAt) throw new AttestationExpiredError();
-    if (input.openCodeVersion !== REQUIRED_OPENCODE_VERSION || attestation.openCodeVersion !== input.openCodeVersion) {
-      throw new AttestationMismatchError("OpenCode version changed");
+    // Runtime contract is a MINIMUM, not an exact pin: the attestation stays
+    // valid across patch/minor updates within the same major. A major drift
+    // between the emitting runtime and the verifying runtime is still fail
+    // closed (the plugin's SDK surface is only audited inside one major).
+    if (!isOpenCodeVersionSupported(input.openCodeVersion)) {
+      throw new AttestationMismatchError(`OpenCode version not supported: ${input.openCodeVersion}`);
+    }
+    if (!isOpenCodeVersionSupported(attestation.openCodeVersion)) {
+      throw new AttestationMismatchError(`attestation was issued for an unsupported OpenCode version ${attestation.openCodeVersion}`);
+    }
+    const attested = parseOpenCodeVersion(attestation.openCodeVersion);
+    const runtime = parseOpenCodeVersion(input.openCodeVersion);
+    if (attested !== null && runtime !== null && (attested.major !== runtime.major || attested.minor !== runtime.minor)) {
+      throw new AttestationMismatchError(
+        `OpenCode version drifted beyond patch: attestation ${attestation.openCodeVersion}, runtime ${input.openCodeVersion}`,
+      );
     }
     if (attestation.bootIdentity !== input.bootIdentity) throw new AttestationMismatchError("boot identity changed");
     if (attestation.workspaceIdentity !== input.manifest.workspaceIdentity) throw new AttestationMismatchError("workspace identity changed");

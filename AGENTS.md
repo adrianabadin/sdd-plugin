@@ -51,6 +51,29 @@ O usá el supervisor de ruteo para mantener los agentes y la atestación sincron
 npx tsx src/cli/model-route-boot.ts start .
 ```
 
+### Convención de dispatch — determinismo por prompt (OBLIGATORIO)
+
+El modelo de un subagente lo decide **el plugin**, nunca el default del agente
+pelado. Dos vías, usadas en combo:
+
+1. **Path A — grammar como `subagent_type`** (obligatorio al despachar fases
+   SDD): `model-route:v1|sdd-mr-base|<modelReference>`. Es exactamente el
+   `subagentType` que devuelve `sdd_compose_phase_prompt`; despachar con él y
+   NO con el nombre del agente pelado (`sdd-explore`, `sdd-apply`, ...). El
+   resolver elige el host ruteado; nunca hace falta conocer los hashes.
+2. **Path B — trigger natural en el prompt** (red de seguridad para dispatches
+   ad-hoc): `usando <modelo>`, `con el modelo <modelo>`, `using model <modelo>`
+   o `@model <modelo>`. El hook lo captura aunque el `subagent_type` sea el
+   agente pelado.
+
+Sin grammar y sin trigger → legacy passthrough: el agente corre con su modelo
+configurado (NO determinista). Con el supervisor activo, verificar siempre en
+`.opencode/sdd-model-routing/routing.audit.jsonl` qué modelo se ruteó.
+
+Referencias: `src/infrastructure/opencode/model-route-task-hook.ts` (Path A: L187,
+Path B: L196), `src/domain/model-routing/natural-model-intent.ts` (triggers),
+`src/application/sdd/entry-flow.ts` (grammar default).
+
 ## Context Retrieval Rules
 
 | Situation | Command | Depth |

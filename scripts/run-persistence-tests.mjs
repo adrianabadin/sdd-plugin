@@ -48,6 +48,7 @@ const SUITE = [
   { file: "tests/runtime-additive-migration.test.ts" },
   { file: "tests/persistence-unavailable-state.test.ts", runner: "bun" },
   { file: "tests/bun-readiness.test.ts", runner: "bun" },
+  { file: "tests/bun-plugin-entry.test.ts", runner: "bun", needsDist: true },
   { file: "tests/built-tui-persistence.test.ts", needsDist: true },
   { file: "tests/dist-firstrun-probe.test.ts", needsDist: true },
   { file: "tests/c9-ctrls-save.bun.test.ts", runner: "bun" },

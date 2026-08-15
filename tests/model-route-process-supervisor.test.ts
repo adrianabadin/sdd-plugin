@@ -89,7 +89,7 @@ test("health check rejects when its own serve child exits", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
     exitListener?.();
-    return new Response(JSON.stringify({ version: "1.18.16" }), { status: 200 });
+    return new Response(JSON.stringify({ version: "1.18.17" }), { status: 200 });
   };
   try {
     await assert.rejects(

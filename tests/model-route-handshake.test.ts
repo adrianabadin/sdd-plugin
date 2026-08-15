@@ -244,7 +244,7 @@ async function run(): Promise<void> {
       console.log("  pass: failed start clears the stale handshake and publishes nothing");
     }
 
-    // ---------- 4. restart replaces the handshake with the fresh boot secrets ----------
+    // ---------- 4. restart reuses the STABLE persisted secrets ----------
     {
       const fixture = seedBootFixture(path.join(tmp, "case4"));
       const first = buildManager(fixture);
@@ -254,10 +254,10 @@ async function run(): Promise<void> {
       const second = buildManager(fixture);
       await second.start();
       const parsed = JSON.parse(readFileSync(fixture.handshakePath, "utf8")) as Record<string, unknown>;
-      assert.notEqual(second.getBootIdentity(), firstIdentity, "restart rotates the bootIdentity");
-      assert.equal(parsed["bootIdentity"], second.getBootIdentity(), "handshake reflects the fresh boot, not the previous one");
+      assert.equal(second.getBootIdentity(), firstIdentity, "restart reuses the persisted bootIdentity (no per-boot rotation)");
+      assert.equal(parsed["bootIdentity"], second.getBootIdentity(), "handshake reflects the stable boot");
       await second.stop();
-      console.log("  pass: restart rotates the handshake secrets");
+      console.log("  pass: restart reuses the stable persisted secrets");
     }
 
     // ---------- 5. readRoutingHandshake resolves a consistent pair ----------

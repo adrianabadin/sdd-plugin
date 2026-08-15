@@ -28,7 +28,8 @@ import { parseNaturalModelIntent } from "../domain/model-routing/natural-model-i
 import { naturalIntentBlockedFromParse } from "../domain/model-routing/natural-model-routing-errors.js";
 import { ModelRouteTaskHook } from "../infrastructure/opencode/model-route-task-hook.js";
 import { resolveDatabasePath, initializeDatabase } from "../infrastructure/runtime/database-path.js";
-import { readRoutingHandshake } from "../infrastructure/runtime/model-route-handshake.js";
+import { loadOrCreateRoutingSecrets } from "../infrastructure/runtime/model-route-secrets.js";
+import { renewRoutingLease, LEASE_RENEWAL_MS } from "../infrastructure/runtime/model-route-lease.js";
 import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 import { SqliteMcpToolClient } from "../infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
@@ -100,12 +101,13 @@ export const BOOTSTRAP_BUSY_TIMEOUT_MS = 5000;
  * insecure value must block routing on the first hook invocation; the
  * plugin does not silently substitute.
  *
- * Interactive fallback: when the env vars are absent — the case for any
+ * Persistent fallback: when the env vars are absent — the case for any
  * OpenCode started outside the supervisor, which cannot inherit its
- * process env — the resolvers read the persisted handshake published by
- * the supervisor (`readRoutingHandshake`). The handshake is bound to the
- * live attestation, so stale credentials from a dead supervisor are
- * rejected and routing still fails closed.
+ * process env — the resolvers read the STABLE workspace secrets
+ * (`secrets.json`) via `loadOrCreateRoutingSecrets`. Because the secrets
+ * are persisted and reused across boots, an interactive session always
+ * resolves the same key the supervisor signs its attestation with, so
+ * deterministic routing no longer races on boot ordering.
  */
 export const ROUTING_BOOT_ID_ENV = "SDD_MODEL_ROUTING_BOOT_ID";
 export const ROUTING_SIGNING_KEY_ENV = "SDD_MODEL_ROUTING_SIGNING_KEY";
@@ -120,7 +122,7 @@ export function resolveRoutingBootIdentity(workspaceRoot?: string): string | nul
   if (value === "boot-default") return null;
   if (typeof value === "string" && value.length > 0) return value;
   if (workspaceRoot === undefined) return null;
-  return readRoutingHandshake(workspaceRoot)?.bootIdentity ?? null;
+  return loadOrCreateRoutingSecrets(workspaceRoot).bootIdentity;
 }
 
 /**
@@ -133,7 +135,7 @@ export function resolveRoutingSigningKey(workspaceRoot?: string): string | null 
   if (value === "deterministic-key") return null;
   if (typeof value === "string" && value.length > 0) return value;
   if (workspaceRoot === undefined) return null;
-  return readRoutingHandshake(workspaceRoot)?.signingKey ?? null;
+  return loadOrCreateRoutingSecrets(workspaceRoot).signingKey;
 }
 
 /**
@@ -193,6 +195,13 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
   const project = resolveProjectLabel(ctx?.project);
   const directory = ctx?.directory ?? "";
   const client = ctx?.client;
+
+  // Bind the supervisor's lifetime to this session: renew the workspace
+  // lease on a fixed cadence. The timer dies with this process, so when
+  // the session closes the lease expires and the supervisor stops itself.
+  const leaseRoot = directory || process.cwd();
+  const leaseRenewal = setInterval(() => renewRoutingLease(leaseRoot), LEASE_RENEWAL_MS);
+  leaseRenewal.unref?.();
 
   const logger = {
     info: (message: string) => console.log(`[${project}] INFO: ${message}`),

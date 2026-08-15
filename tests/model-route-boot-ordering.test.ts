@@ -263,9 +263,9 @@ test("a failed port preflight aborts the boot without spawning serve or publishi
   }
 });
 
-test("routing readiness contract matches the installed OpenCode runtime", async () => {
+test("readiness contract minimum matches the expected OpenCode runtime", async () => {
   const { REQUIRED_OPENCODE_VERSION } = await import(
     "../src/infrastructure/opencode/model-route-readiness.js"
   );
-  assert.equal(REQUIRED_OPENCODE_VERSION, "1.18.16");
+  assert.equal(REQUIRED_OPENCODE_VERSION, "1.18.17");
 });

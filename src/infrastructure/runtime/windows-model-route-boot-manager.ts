@@ -10,9 +10,12 @@
  *
  * Per the spec, the boot manager:
  *
- *   1. Generates a fresh cryptographic UUIDv4 `bootIdentity` and a
- *      256-bit HMAC `signingKey` on every `start()`. Both live in
- *      process memory; the key buffer is zeroed on `stop()`.
+ *   1. Loads (or creates on first boot) the STABLE workspace secrets
+ *      — a UUIDv4 `bootIdentity` and a 256-bit HMAC `signingKey`
+ *      persisted to `.opencode/sdd-model-routing/secrets.json` (mode
+ *      0o600, current-user ACL). They are reused across restarts;
+ *      rotation is explicit only (`rotate-secrets`). The key buffer is
+ *      zeroed on `stop()`.
  *   2. Distributes BOTH values into the process env so the in-process
  *      `bootstrap` (consumed by `ModelRouteTaskHook`) can read them
  *      via `SDD_MODEL_ROUTING_BOOT_ID` / `SDD_MODEL_ROUTING_SIGNING_KEY`.
@@ -42,10 +45,16 @@
  *      the body; the file never contains the key bytes.
  *   9. Is single-flight: concurrent `start()` calls await the same
  *      lifecycle, not parallel ones.
- *  10. Rotates secrets on every restart: a fresh `bootIdentity` and a
- *      fresh HMAC key on each `start()` after `stop()`.
- *  11. On `stop()`: removes the attestation, releases the lock,
- *      unsets the env vars, and zeros the key buffer.
+ *  10. Reuses the persisted secrets across restarts: the same
+ *      `bootIdentity` and HMAC key on each `start()`, so interactive
+ *      sessions reading the same `secrets.json` always verify the
+ *      attestation.
+ *  11. Binds its lifetime to the session via a lease: it seeds a lease
+ *      on ready and stops itself once the lease expires (no OpenCode
+ *      session has renewed it within `LEASE_TTL_MS`).
+ *  12. On `stop()`: removes the attestation, releases the lock, unsets
+ *      the env vars, and zeros the key buffer. The persisted secrets
+ *      are intentionally left intact.
  *
  * Reference proposal: aa40c70b-f635-4246-b94b-e065b0db688e.
  * Reference spec:     dcf1d668-3349-4ac1-8d06-ce27a40174ef.
@@ -59,7 +68,6 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { randomBytes, randomUUID, createHash } from "node:crypto";
 
 import type { Manifest } from "../opencode/disk-agent-generator.js";
 import {
@@ -77,6 +85,8 @@ import {
 } from "../opencode/model-route-readiness.js";
 import { applyCurrentUserAcl } from "./windows-acl.js";
 import { ROUTING_HANDSHAKE_FILENAME } from "./model-route-handshake.js";
+import { loadOrCreateRoutingSecrets } from "./model-route-secrets.js";
+import { renewRoutingLease, readRoutingLease, LEASE_MONITOR_MS, LEASE_TTL_MS } from "./model-route-lease.js";
 import type { ModelRouteCatalogPort } from "../../ports/model-route-catalog.port.js";
 import type { RegenerateFleetAgentsUseCase } from "../../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
 import type { QuarantineWritePort } from "../../ports/quarantine-write.port.js";
@@ -159,7 +169,6 @@ export class StaleLockUnrecoverableError extends Error {
   }
 }
 
-const BOOT_IDENTITY_UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HMAC_KEY_BYTES = 32; // 256-bit
 
 /** Maximum age (ms) for a stale lock to be reclaimable. */
@@ -322,6 +331,7 @@ export class WindowsModelRouteBootManager {
   private serveProcess: BootChildProcess | null = null;
   private attachProcess: BootChildProcess | null = null;
   private renewalTimer: ReturnType<typeof setInterval> | null = null;
+  private leaseMonitorTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Snapshot of the env keys the manager touched during start, so
    * `stop()` restores (or unsets) exactly the keys it owned and never
@@ -418,6 +428,7 @@ export class WindowsModelRouteBootManager {
     }
     if (this.renewalTimer !== null) clearInterval(this.renewalTimer);
     this.renewalTimer = null;
+    this.clearLeaseMonitor();
     this.killChild(this.attachProcess);
     this.killChild(this.serveProcess);
     this.attachProcess = null;
@@ -454,11 +465,13 @@ export class WindowsModelRouteBootManager {
         });
       }
 
-      // (1) Fresh secrets in process memory. UUIDv4 for the boot
-      // identity; 32 random bytes for the HMAC key. Both must be
-      // regenerated on every start so restarts rotate the material.
-      this.bootIdentity = generateUuidV4();
-      randomBytes(HMAC_KEY_BYTES).copy(this.signingKey);
+      // (1) Stable workspace secrets. Load the persisted pair (or create it
+      // on first boot) instead of rotating per start, so interactive OpenCode
+      // sessions that read the same secrets.json always verify the
+      // supervisor's attestation. Rotation is explicit only (rotate-secrets).
+      const secrets = loadOrCreateRoutingSecrets(this.workspaceRoot);
+      this.bootIdentity = secrets.bootIdentity;
+      Buffer.from(secrets.signingKey, "hex").copy(this.signingKey);
 
       // The dispatching OpenCode process and any supervised serve child both
       // need the same boot credentials. `childEnv()` copies these values into
@@ -612,6 +625,7 @@ export class WindowsModelRouteBootManager {
       );
       this.renewalTimer = setInterval(() => { void this.renewAttestation(); }, this.renewalIntervalMs);
       this.renewalTimer.unref?.();
+      this.startLeaseMonitor();
     } catch (error) {
       this.killChild(this.attachProcess);
       this.killChild(this.serveProcess);
@@ -619,6 +633,7 @@ export class WindowsModelRouteBootManager {
       this.serveProcess = null;
       if (this.renewalTimer !== null) clearInterval(this.renewalTimer);
       this.renewalTimer = null;
+      this.clearLeaseMonitor();
       this.removeAttestationFromDisk();
       this.removeHandshakeFromDisk();
       this.releaseLock();
@@ -686,6 +701,33 @@ export class WindowsModelRouteBootManager {
 
   private removeHandshakeFromDisk(): void {
     try { rmSync(this.handshakePath, { force: true }); } catch { /* best-effort */ }
+  }
+
+  /**
+   * Arm the session-lease monitor. The supervisor seeds the lease once
+   * (giving a grace window for an interactive session to attach), then
+   * polls it: if the lease expires — no OpenCode session has renewed it
+   * for `LEASE_TTL_MS` — the supervisor stops itself. This binds the
+   * supervisor's lifetime to the session(s) that use it.
+   */
+  private startLeaseMonitor(): void {
+    renewRoutingLease(this.workspaceRoot);
+    this.leaseMonitorTimer = setInterval(() => { this.monitorLease(); }, LEASE_MONITOR_MS);
+    this.leaseMonitorTimer.unref?.();
+  }
+
+  private clearLeaseMonitor(): void {
+    if (this.leaseMonitorTimer !== null) clearInterval(this.leaseMonitorTimer);
+    this.leaseMonitorTimer = null;
+  }
+
+  private monitorLease(): void {
+    if (this.state !== "ready") return;
+    const lease = readRoutingLease(this.workspaceRoot);
+    if (lease === null) return;
+    if (this.now() - lease.lastSeen > LEASE_TTL_MS) {
+      void this.stop();
+    }
   }
 
   private async renewAttestation(): Promise<void> {
@@ -848,21 +890,6 @@ function isAliveDefault(pid: number): boolean {
 }
 
 /**
- * Generate a fresh UUIDv4 in the standard hyphenated form, with the
- * RFC 4122 version 4 and variant 1 bits set. Uses
- * `crypto.randomUUID()` (Node 14.17+) and re-validates the format
- * before returning so the boot manager never publishes an
- * unformatted identity.
- */
-function generateUuidV4(): string {
-  const candidate = randomUUID();
-  if (!BOOT_IDENTITY_UUID_V4_REGEX.test(candidate)) {
-    throw new Error(`BOOT_IDENTITY_INVALID: crypto.randomUUID produced non-v4 token ${candidate}`);
-  }
-  return candidate;
-}
-
-/**
  * `CanaryFailure.message` already carries the `${code}: ` prefix
  * (CanaryBlockedError prefixes its message). Strip it before the
  * single-route rethrow so the reconstructed error does not double it.
@@ -887,7 +914,3 @@ export {
   READINESS_VERIFIER_VERSION,
 };
 export type { ReadinessAttestation };
-
-// Suppress unused-import warning for createHash; reserved for future
-// attestation hash chain work tracked in WU4.
-void createHash;

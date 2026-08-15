@@ -47,13 +47,15 @@ import { OpenCodeModelCatalogAdapter } from "../infrastructure/opencode/opencode
 import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
 import { SyncConnectedModelsUseCase } from "../application/sync-connected-models/sync-connected-models.use-case.js";
 import { REQUIRED_OPENCODE_VERSION } from "../infrastructure/opencode/model-route-readiness.js";
+import { isOpenCodeVersionSupported, parseOpenCodeVersion } from "../domain/model-routing/opencode-compat.js";
 import { stopModelRouteSupervisor } from "../infrastructure/runtime/model-route-boot-control.js";
 import { ROUTING_HANDSHAKE_FILENAME } from "../infrastructure/runtime/model-route-handshake.js";
+import { loadOrCreateRoutingSecrets, rotateRoutingSecrets, secretsPathFor } from "../infrastructure/runtime/model-route-secrets.js";
 import { mapModelRouteStopResult } from "./model-route-boot-stop-output.js";
 import { ModelRouteAuditLogger } from "../infrastructure/logging/model-route-audit.logger.js";
 import { RegenerateFleetAgentsUseCase } from "../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
 
-type Subcommand = "start" | "stop" | "status";
+type Subcommand = "start" | "stop" | "status" | "init-secrets" | "rotate-secrets";
 
 interface CliArgs {
   readonly subcommand: Subcommand;
@@ -64,13 +66,13 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
   const userArgs = argv.slice(2);
   if (userArgs.length < 2) {
     throw new CliArgumentError(
-      "usage: model-route-boot <start|stop|status> <workspaceRoot>",
+      "usage: model-route-boot <start|stop|status|init-secrets|rotate-secrets> <workspaceRoot>",
     );
   }
   const sub = userArgs[0]!;
   const workspaceRoot = userArgs[1]!;
-  if (sub !== "start" && sub !== "stop" && sub !== "status") {
-    throw new CliArgumentError(`unknown subcommand "${sub}" (expected start|stop|status)`);
+  if (sub !== "start" && sub !== "stop" && sub !== "status" && sub !== "init-secrets" && sub !== "rotate-secrets") {
+    throw new CliArgumentError(`unknown subcommand "${sub}" (expected start|stop|status|init-secrets|rotate-secrets)`);
   }
   if (workspaceRoot.length === 0) {
     throw new CliArgumentError("workspaceRoot must be non-empty");
@@ -155,7 +157,9 @@ export class OpenCodeProcessSupervisor implements BootProcessSupervisor {
           if (childExited) throw new Error("OPENCODE_SERVE_EXITED: supervised serve process exited before health became authoritative");
           const body = await response.json() as { version?: unknown; data?: { version?: unknown } };
           const version = body.version ?? body.data?.version;
-          if (version !== REQUIRED_OPENCODE_VERSION) throw new Error(`expected OpenCode ${REQUIRED_OPENCODE_VERSION}, got ${String(version)}`);
+          if (!isOpenCodeVersionSupported(version)) {
+            throw new Error(`expected OpenCode >= ${REQUIRED_OPENCODE_VERSION} within major ${parseOpenCodeVersion(REQUIRED_OPENCODE_VERSION)?.major ?? "?"}, got ${String(version)}`);
+          }
           return;
         }
         lastError = `health returned ${response.status}`;
@@ -339,6 +343,18 @@ async function main(): Promise<number> {
 
   if (args.subcommand === "status") {
     return reportStatus(attestationPath, lockPath, path.join(routingDir, "routing.audit.jsonl"));
+  }
+
+  if (args.subcommand === "init-secrets") {
+    const secrets = loadOrCreateRoutingSecrets(workspaceRoot);
+    process.stdout.write(`boot: secrets ready bootIdentity=${secrets.bootIdentity} path=${secretsPathFor(workspaceRoot)}\n`);
+    return 0;
+  }
+
+  if (args.subcommand === "rotate-secrets") {
+    const secrets = rotateRoutingSecrets(workspaceRoot);
+    process.stdout.write(`boot: secrets rotated bootIdentity=${secrets.bootIdentity} path=${secretsPathFor(workspaceRoot)}\n`);
+    return 0;
   }
 
   if (args.subcommand === "stop") {

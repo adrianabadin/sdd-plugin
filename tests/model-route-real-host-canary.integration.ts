@@ -3,7 +3,9 @@ import path from "node:path";
 
 import type { Manifest } from "../src/infrastructure/opencode/disk-agent-generator.js";
 import { ModelRouteCanary, OpenCodeHttpCanaryTransport } from "../src/infrastructure/opencode/model-route-canary.js";
-import { ModelRouteReadiness, REQUIRED_OPENCODE_VERSION } from "../src/infrastructure/opencode/model-route-readiness.js";
+import { ModelRouteReadiness, REQUIRED_OPENCODE_VERSION } from 
+"../src/infrastructure/opencode/model-route-readiness.js";
+import { isOpenCodeVersionSupported, parseOpenCodeVersion } from "../src/domain/model-routing/opencode-compat.js";
 
 const REQUIRED_COMMAND = "set OPENCODE_CANARY_REAL=1 && set OPENCODE_CANARY_URL=http://127.0.0.1:4096 && set OPENCODE_CANARY_BOOT_ID=<stable-boot-nonce> && set OPENCODE_CANARY_SIGNING_KEY=<shared-hmac-secret> && set OPENCODE_CANARY_PARENT_MODELS={<target>:<distinct-parent>} && npx tsx tests/model-route-real-host-canary.integration.ts";
 
@@ -34,7 +36,9 @@ async function main(): Promise<void> {
   if (!healthResponse.ok) throw new Error(`BLOCKED: GET /global/health returned ${healthResponse.status}`);
   const health = await healthResponse.json() as { version?: string; data?: { version?: string } };
   const version = health.version ?? health.data?.version;
-  if (version !== REQUIRED_OPENCODE_VERSION) throw new Error(`BLOCKED: exact OpenCode ${REQUIRED_OPENCODE_VERSION} required; observed ${version ?? "unobservable"}`);
+  if (typeof version !== "string" || !isOpenCodeVersionSupported(version)) {
+    throw new Error(`BLOCKED: OpenCode >= ${REQUIRED_OPENCODE_VERSION} within major ${parseOpenCodeVersion(REQUIRED_OPENCODE_VERSION)?.major ?? "?"} required; observed ${version ?? "unobservable"}`);
+  }
   const canary = new ModelRouteCanary({
     transport: new OpenCodeHttpCanaryTransport({ baseUrl }),
     selectParentModel: async (target) => parentModels[target] ?? null,

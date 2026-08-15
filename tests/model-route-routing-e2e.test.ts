@@ -25,6 +25,7 @@ import { ModelRouteResolver } from "../src/domain/model-routing/model-route-reso
 import { PrismaModelRouteCatalogAdapter } from "../src/infrastructure/prisma/model-route-catalog.adapter.js";
 import { PrismaModelRouteQuarantineAdapter } from "../src/infrastructure/prisma/model-route-quarantine.adapter.js";
 import { REQUIRED_OPENCODE_VERSION } from "../src/infrastructure/opencode/model-route-readiness.js";
+import { isOpenCodeVersionSupported, parseOpenCodeVersion } from "../src/domain/model-routing/opencode-compat.js";
 import { QuarantineStoreImpl } from "../src/infrastructure/runtime/quarantine-store.js";
 
 const REQUIRED_COMMAND = "set OPENCODE_E2E_ROUTING=1 && set OPENCODE_E2E_URL=http://127.0.0.1:4096 && set OPENCODE_E2E_BOOT_ID=<stable-boot-nonce> && set OPENCODE_E2E_SIGNING_KEY=<shared-hmac-secret> && set OPENCODE_E2E_DB_PATH=<path-to-db> && set OPENCODE_E2E_WORKSPACE=<path-to-workspace> && npx tsx tests/model-route-routing-e2e.test.ts";
@@ -50,8 +51,8 @@ async function main(): Promise<void> {
   if (!healthResponse.ok) throw new Error(`BLOCKED: GET /global/health returned ${healthResponse.status}`);
   const health = await healthResponse.json() as { version?: string; data?: { version?: string } };
   const runtimeVersion = health.version ?? health.data?.version;
-  if (runtimeVersion !== REQUIRED_OPENCODE_VERSION) {
-    throw new Error(`BLOCKED: exact OpenCode ${REQUIRED_OPENCODE_VERSION} required; observed ${runtimeVersion ?? "unobservable"}`);
+  if (!isOpenCodeVersionSupported(runtimeVersion)) {
+    throw new Error(`BLOCKED: OpenCode >= ${REQUIRED_OPENCODE_VERSION} within major ${parseOpenCodeVersion(REQUIRED_OPENCODE_VERSION)?.major ?? "?"} required; observed ${runtimeVersion ?? "unobservable"}`);
   }
 
   execSync("npx prisma db push --accept-data-loss", { stdio: "ignore", env: { ...process.env, DATABASE_URL: `file:${dbPath}` } });
