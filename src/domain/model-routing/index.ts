@@ -40,3 +40,10 @@ export {
   OpenCodeCompatError,
   assertOpenCodeCompatible,
 } from "./opencode-compat.js";
+
+export {
+  RouteWhitelist,
+  loadRouteWhitelist,
+  DEFAULT_ROUTES_CONFIG_RELATIVE,
+  type WhitelistedRoute,
+} from "./route-whitelist.js";
