@@ -7,22 +7,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FilterFleetRoutesUseCase } from "../src/application/filter-fleet-routes/filter-fleet-routes.use-case.js";
-import type { QuarantineWritePort, SetQuarantineCommand } from "../src/ports/quarantine-write.port.js";
-import type { QuarantineEntry, QuarantineTarget } from "../src/domain/model/quarantine.js";
+import type { ModelRouteQuarantinePort } from "../src/ports/model-route-quarantine.port.js";
+import type { QuarantineEntry } from "../src/domain/model/quarantine.js";
 import type { RouteEntry } from "../src/infrastructure/opencode/disk-agent-generator.js";
 
-class MockQuarantinePort implements QuarantineWritePort {
+class MockQuarantinePort implements ModelRouteQuarantinePort {
   constructor(private entries: QuarantineEntry[]) {}
 
-  async setQuarantine(_cmd: SetQuarantineCommand): Promise<QuarantineEntry> {
-    throw new Error("Not implemented");
-  }
-
-  async releaseQuarantine(_target: QuarantineTarget): Promise<void> {
-    throw new Error("Not implemented");
-  }
-
-  async listQuarantines(): Promise<QuarantineEntry[]> {
+  async listActive(): Promise<ReadonlyArray<QuarantineEntry>> {
     return this.entries;
   }
 }

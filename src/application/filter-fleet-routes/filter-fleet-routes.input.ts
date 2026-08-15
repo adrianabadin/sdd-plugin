@@ -2,13 +2,9 @@ import type { RouteEntry } from "../../infrastructure/opencode/disk-agent-genera
 
 export interface FilterFleetRoutesInput {
   readonly routes: ReadonlyArray<RouteEntry>;
-  readonly excludedCanonicalIds?: ReadonlySet<string>;
 }
 
-export type RouteExclusionReason =
-  | "NOT_CONNECTED"
-  | "PERMANENTLY_QUARANTINED"
-  | "CANARY_BLOCKED";
+export type RouteExclusionReason = "PERMANENTLY_QUARANTINED";
 
 export interface ExcludedRoute {
   readonly route: RouteEntry;

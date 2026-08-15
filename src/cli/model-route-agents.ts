@@ -30,8 +30,7 @@ import process from "node:process";
 import path from "node:path";
 
 import { getPrismaClient, disposeBootstrapPersistence } from "../bootstrap/index.js";
-import { PrismaModelRouteCatalogAdapter } from "../infrastructure/prisma/model-route-catalog.adapter.js";
-import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
+import { PrismaModelRouteQuarantineAdapter } from "../infrastructure/prisma/model-route-quarantine.adapter.js";
 import { ModelRouteAuditLogger } from "../infrastructure/logging/model-route-audit.logger.js";
 import { RegenerateFleetAgentsUseCase } from "../application/regenerate-fleet-agents/regenerate-fleet-agents.use-case.js";
 import {
@@ -125,8 +124,7 @@ async function main(): Promise<number> {
   let auditLogger: ModelRouteAuditLogger | null = null;
   try {
     const prisma = getPrismaClient();
-    const catalogPort = new PrismaModelRouteCatalogAdapter(prisma);
-    const quarantinePort = new PrismaModelRepositoryAdapter(prisma);
+    const quarantinePort = new PrismaModelRouteQuarantineAdapter(prisma);
     const auditPath = path.resolve(
       args.workspaceRoot,
       ".opencode",
@@ -135,7 +133,7 @@ async function main(): Promise<number> {
     );
     auditLogger = new ModelRouteAuditLogger({ path: auditPath });
 
-    const useCase = new RegenerateFleetAgentsUseCase(catalogPort, quarantinePort, auditLogger);
+    const useCase = new RegenerateFleetAgentsUseCase(quarantinePort, auditLogger);
     const result = await useCase.execute({
       workspaceRoot: args.workspaceRoot,
       routesConfigPath: args.routesConfigPath,

@@ -1,9 +1,23 @@
+/**
+ * Rev 2: pre-start fleet regeneration use case.
+ *
+ *  - `routes.json` is the only inclusion authority. No catalog port is
+ *    consulted at generation time; routes whose provider is currently
+ *    disconnected are still generated (they fail loudly on use).
+ *  - Quarantine is the only subtractive force: `permanent` quarantines
+ *    remove the route before generation; `ttl` quarantines are still
+ *    included (the dispatcher enforces them at hook time).
+ *  - Before generation we re-collect the SDK variant snapshot
+ *    (best-effort). On success we persist it; on failure we keep the
+ *    on-disk `variants.json` (or treat as empty if absent) so the
+ *    dispatch never breaks.
+ */
+
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import type { ModelRouteCatalogPort } from "../../ports/model-route-catalog.port.js";
-import type { QuarantineWritePort } from "../../ports/quarantine-write.port.js";
+import type { ModelRouteQuarantinePort } from "../../ports/model-route-quarantine.port.js";
 import type { ModelRouteAuditLogger } from "../../infrastructure/logging/model-route-audit.logger.js";
 import {
   decodeRoutesConfig,
@@ -11,6 +25,13 @@ import {
   PathTraversalDetectedError,
   type RoutesConfig,
 } from "../../infrastructure/opencode/disk-agent-generator.js";
+import {
+  buildVariantSnapshots,
+  collectVariantsFromSdk,
+  readVariantSnapshot,
+  writeVariantSnapshot,
+  type OpenCodeClient,
+} from "../../infrastructure/opencode/variant-snapshot.js";
 import { FilterFleetRoutesUseCase } from "../filter-fleet-routes/filter-fleet-routes.use-case.js";
 import type {
   RegenerateFleetAgentsInput,
@@ -19,9 +40,9 @@ import type {
 
 export class RegenerateFleetAgentsUseCase {
   constructor(
-    private readonly catalogPort: ModelRouteCatalogPort,
-    private readonly quarantinePort: QuarantineWritePort,
+    private readonly quarantinePort: ModelRouteQuarantinePort,
     private readonly auditLogger: ModelRouteAuditLogger,
+    private readonly openCodeClient?: OpenCodeClient,
   ) {}
 
   async execute(input: RegenerateFleetAgentsInput): Promise<RegenerateFleetAgentsOutput> {
@@ -41,12 +62,8 @@ export class RegenerateFleetAgentsUseCase {
     const configJson = readFileSync(resolvedConfigPath, "utf8");
     const config = decodeRoutesConfig(configJson);
 
-    const filterUseCase = new FilterFleetRoutesUseCase(this.catalogPort, this.quarantinePort);
-    const filterResult = await filterUseCase.execute(
-      input.excludeCanonicalIds === undefined
-        ? { routes: config.routes }
-        : { routes: config.routes, excludedCanonicalIds: input.excludeCanonicalIds },
-    );
+    const filterUseCase = new FilterFleetRoutesUseCase(this.quarantinePort);
+    const filterResult = await filterUseCase.execute({ routes: config.routes });
 
     const correlationId = input.correlationId ?? randomBytes(16).toString("hex");
     const startTime = Date.now();
@@ -75,6 +92,21 @@ export class RegenerateFleetAgentsUseCase {
       });
     }
 
+    // Variant snapshot: best-effort SDK collection; on failure, keep the
+    // on-disk snapshot (or empty if absent) so dispatch never breaks.
+    const existingSnapshot = readVariantSnapshot(rootAbs);
+    let snapshot = existingSnapshot;
+    if (this.openCodeClient !== undefined) {
+      try {
+        const raw = await collectVariantsFromSdk(this.openCodeClient);
+        const collected = buildVariantSnapshots(raw);
+        writeVariantSnapshot(rootAbs, collected);
+        snapshot = collected;
+      } catch {
+        // Keep `existingSnapshot` as the fallback. Dispatch still works.
+      }
+    }
+
     const filteredConfig: RoutesConfig = {
       schemaVersion: config.schemaVersion,
       generatorVersion: config.generatorVersion,
@@ -86,6 +118,7 @@ export class RegenerateFleetAgentsUseCase {
     const generator = new DiskAgentGenerator({
       workspaceRoot: rootAbs,
       routesConfig: filteredConfig,
+      variantSnapshot: snapshot,
     });
 
     const genResult = await generator.generate();

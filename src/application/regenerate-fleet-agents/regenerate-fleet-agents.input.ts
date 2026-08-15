@@ -5,7 +5,6 @@ export interface RegenerateFleetAgentsInput {
   readonly workspaceRoot: string;
   readonly routesConfigPath?: string;
   readonly correlationId?: string;
-  readonly excludeCanonicalIds?: ReadonlySet<string>;
 }
 
 export interface RegenerateFleetAgentsOutput {

@@ -59,11 +59,13 @@ import {
 import path from "node:path";
 
 import { hashHostName, ROUTED_HOST_NAME_PREFIX } from "../../domain/model-routing/model-route-host-naming.js";
-import { renderCanonicalRoutedAgentMarkdown } from "./routed-agent-definition.js";
-import { resolveForeignAgentSources } from "./foreign-agent-sources.js";
-import { scanForForeignAgentDefinitions, assertNoForeignAgentDefinitions } from "./foreign-agent-scan.js";
-import { ForeignAgentDefinitionError } from "./foreign-agent-errors.js";
-import { REQUIRED_OPENCODE_VERSION } from "./model-route-readiness.js";
+import {
+  renderCanonicalRoutedAgentMarkdown,
+  type RoutedAgentRoute,
+  type RoutedAgentVariant,
+} from "./routed-agent-definition.js";
+import type { VariantSnapshot } from "./variant-snapshot.js";
+import { readVariantSnapshot } from "./variant-snapshot.js";
 
 // ============================================================================
 // Constants
@@ -554,7 +556,6 @@ export interface Manifest {
   readonly workspaceIdentity: string;
   readonly routingNamespace: string;
   readonly descriptorBudgetBytes: number;
-  readonly requiredOpenCodeVersion: string;
   readonly routes: ReadonlyArray<ManifestRouteEntry>;
   readonly fileHashes: ReadonlyArray<string>;
   readonly manifestHash: string;
@@ -584,7 +585,6 @@ function buildManifest(opts: {
     workspaceIdentity: opts.workspaceIdentity,
     routingNamespace: ROUTING_NAMESPACE_VERSION,
     descriptorBudgetBytes: DESCRIPTOR_BUDGET_BYTES,
-    requiredOpenCodeVersion: REQUIRED_OPENCODE_VERSION,
     routes: opts.routes,
     fileHashes,
   };
@@ -882,6 +882,7 @@ export type DiskAgentGeneratorOptions =
       readonly routesConfig?: never;
       readonly lockStaleAfterMs?: number;
       readonly additionalConfigRoots?: readonly string[];
+      readonly variantSnapshot?: ReadonlyMap<string, VariantSnapshot>;
     }
   | {
       readonly workspaceRoot: string;
@@ -889,6 +890,7 @@ export type DiskAgentGeneratorOptions =
       readonly routesConfig: RoutesConfig;
       readonly lockStaleAfterMs?: number;
       readonly additionalConfigRoots?: readonly string[];
+      readonly variantSnapshot?: ReadonlyMap<string, VariantSnapshot>;
     };
 
 export interface GeneratedRoute {
@@ -912,6 +914,7 @@ export class DiskAgentGenerator {
   private readonly routesConfig: RoutesConfig | null;
   private readonly lockStaleAfterMs: number;
   private readonly additionalConfigRoots: readonly string[];
+  private readonly variantSnapshot: ReadonlyMap<string, VariantSnapshot>;
 
   constructor(options: DiskAgentGeneratorOptions) {
     this.workspace = prepareWorkspace(options.workspaceRoot);
@@ -919,6 +922,12 @@ export class DiskAgentGenerator {
     this.routesConfig = options.routesConfig ?? null;
     this.lockStaleAfterMs = options.lockStaleAfterMs ?? LOCK_STALE_AFTER_MS;
     this.additionalConfigRoots = options.additionalConfigRoots ?? [];
+    this.variantSnapshot = options.variantSnapshot ?? readVariantSnapshot(options.workspaceRoot);
+  }
+
+  /** Alias for `generate()` kept for callers that prefer the verb. */
+  async run(): Promise<GenerateResult> {
+    return this.generate();
   }
 
   async generate(): Promise<GenerateResult> {
@@ -967,22 +976,8 @@ export class DiskAgentGenerator {
         }
       }
 
-      // Assert no foreign agents (Task 7)
-      const sources = resolveForeignAgentSources({
-         workspaceRoot: this.workspace.root,
-         additionalConfigRoots: this.additionalConfigRoots
-      });
-      assertNoForeignAgentDefinitions({
-         workspaceRoot: this.workspace.root,
-         sources,
-         ownedAgentFiles: previous ? previous.routes.map(r => ({
-            relativePath: r.agentFile.relativePath,
-            sha256: r.agentFile.sha256
-         })) : [],
-         reservedPrefix: ROUTED_HOST_NAME_PREFIX
-      });
-
-      // Unconditional prefix-scoped sweep (REQ-5)
+      // Unconditional prefix-scoped sweep (REQ-5) — covers base files
+      // and the per-level suffixed files (e.g. -low, -high).
       const sweepRes = sweepOwnedFleetFiles({ workspaceRoot: this.workspace.root });
 
       // Build new manifest routes. Generate deterministic host names up
@@ -1014,31 +1009,68 @@ export class DiskAgentGenerator {
 
       const manifestRoutes: ManifestRouteEntry[] = [];
       for (const route of newRoutes) {
-        const agentBody = renderCanonicalRoutedAgentMarkdown({
-          providerId: route.providerId,
-          modelId: route.modelId,
-          hostName: route.hostName,
-          baseTemplate: route.baseTemplate,
-        });
         const commandBody = buildCommandDescriptor({
           hostName: route.hostName,
           providerId: route.providerId,
           modelId: route.modelId,
         });
-        const agentAbsolute = path.join(this.workspace.root, route.agentRelative);
         const commandAbsolute = path.join(this.workspace.root, route.commandRelative);
-        const agentWrite = atomicWriteDescriptor({
-          finalPath: agentAbsolute,
-          body: agentBody,
-          journalDir: this.workspace.journalDir,
-          budgetBytes: DESCRIPTOR_BUDGET_BYTES,
-        });
         const commandWrite = atomicWriteDescriptor({
           finalPath: commandAbsolute,
           body: commandBody,
           journalDir: this.workspace.journalDir,
           budgetBytes: DESCRIPTOR_BUDGET_BYTES,
         });
+
+        // Base agent — the dispatcher lands here by default. No `variant:`
+        // frontmatter field, no suffix on the file name.
+        const baseRoute: RoutedAgentRoute = {
+          providerId: route.providerId,
+          modelId: route.modelId,
+          hostName: route.hostName,
+          baseTemplate: route.baseTemplate,
+        };
+        const baseAgentBody = renderCanonicalRoutedAgentMarkdown(baseRoute);
+        const baseAgentAbsolute = path.join(this.workspace.root, route.agentRelative);
+        const baseAgentWrite = atomicWriteDescriptor({
+          finalPath: baseAgentAbsolute,
+          body: baseAgentBody,
+          journalDir: this.workspace.journalDir,
+          budgetBytes: DESCRIPTOR_BUDGET_BYTES,
+        });
+
+        // Per-level variant agents (`-low`, `-medium`, `-high`). The mapping
+        // comes from the variant snapshot; absent mapping -> no variants are
+        // emitted (only the base agent + the canary command).
+        const mapping = this.variantSnapshot.get(`${route.providerId}/${route.modelId}`)?.levels ?? {};
+        const variantAgentWrites: Array<{ relativePath: string; sha256: string; bytes: number }> = [];
+        for (const [level, variantKey] of Object.entries(mapping)) {
+          if (typeof variantKey !== "string" || variantKey.length === 0) continue;
+          if (level !== "low" && level !== "medium" && level !== "high") continue;
+          const variantRoute: RoutedAgentRoute = {
+            ...baseRoute,
+            hostName: `${route.hostName}-${level}`,
+          };
+          const variant: RoutedAgentVariant = { level: level as "low" | "medium" | "high", variantKey };
+          const variantBody = renderCanonicalRoutedAgentMarkdown(variantRoute, variant);
+          const variantRelative = path.join(
+            AGENTS_RELATIVE_DIR,
+            `${ROUTE_AGENT_PREFIX}${extractHash(route.hostName)}-${level}.md`,
+          );
+          const variantAbsolute = path.join(this.workspace.root, variantRelative);
+          const variantWrite = atomicWriteDescriptor({
+            finalPath: variantAbsolute,
+            body: variantBody,
+            journalDir: this.workspace.journalDir,
+            budgetBytes: DESCRIPTOR_BUDGET_BYTES,
+          });
+          variantAgentWrites.push({
+            relativePath: variantRelative,
+            sha256: variantWrite.sha256,
+            bytes: variantWrite.bytes,
+          });
+        }
+
         manifestRoutes.push({
           baseTemplate: route.baseTemplate,
           providerId: route.providerId,
@@ -1046,8 +1078,8 @@ export class DiskAgentGenerator {
           hostName: route.hostName,
           agentFile: {
             relativePath: route.agentRelative,
-            sha256: agentWrite.sha256,
-            bytes: agentWrite.bytes,
+            sha256: baseAgentWrite.sha256,
+            bytes: baseAgentWrite.bytes,
           },
           commandFile: {
             relativePath: route.commandRelative,

@@ -23,6 +23,11 @@ import { normalizeEffortLevels } from "../../domain/model-routing/effort-levels.
 
 import type { OpenCodeClient } from "./opencode-model-catalog.adapter.js";
 
+// Re-export the OpenCode client shape so consumers that only need
+// variant discovery can import it from the variant-snapshot module
+// without having to reach into the catalog adapter.
+export type { OpenCodeClient } from "./opencode-model-catalog.adapter.js";
+
 export const ROUTING_RELATIVE_DIR = path.join(".opencode", "sdd-model-routing");
 export const VARIANTS_RELATIVE = path.join(ROUTING_RELATIVE_DIR, "variants.json");
 

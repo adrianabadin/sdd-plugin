@@ -13,11 +13,15 @@ import { DiskAgentGenerator } from "../src/infrastructure/opencode/disk-agent-ge
 import type { EffortLevelMapping } from "../src/domain/model-routing/effort-levels.js";
 import { hashHostName } from "../src/domain/model-routing/model-route-host-naming.js";
 
+function routesConfigPath(dir: string): string {
+  return path.join(dir, "config", "model-routing", "routes.json");
+}
+
 function routesConfig(dir: string, models: Array<{ providerId: string; modelId: string }>): void {
   const configDir = path.join(dir, "config", "model-routing");
   mkdirSync(configDir, { recursive: true });
   writeFileSync(
-    path.join(configDir, "routes.json"),
+    routesConfigPath(dir),
     JSON.stringify({
       schemaVersion: 1,
       generatorVersion: "1.1.0",
@@ -27,7 +31,14 @@ function routesConfig(dir: string, models: Array<{ providerId: string; modelId: 
   );
 }
 
-function writeVariantsSnapshot(dir: string, snapshot: Record<string, Partial<EffortLevelMapping>>): void {
+function makeGen(workspaceRoot: string): DiskAgentGenerator {
+  return new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
+}
+
+function writeVariantsSnapshot(
+  dir: string,
+  snapshot: Record<string, { levels: Partial<EffortLevelMapping> }>,
+): void {
   const routingDir = path.join(dir, ".opencode", "sdd-model-routing");
   mkdirSync(routingDir, { recursive: true });
   writeFileSync(path.join(routingDir, "variants.json"), JSON.stringify(snapshot, null, 2));
@@ -47,8 +58,8 @@ async function run(): Promise<void> {
       const workspaceRoot = path.join(tmp, "ws");
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "openai", modelId: "gpt-5.6" }]);
-      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { low: "minimal", medium: "medium", high: "high" } });
-      const gen = new DiskAgentGenerator({ workspaceRoot, quarantineStore: null, loadQuarantineEntries: async () => [] });
+      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { levels: { low: "minimal", medium: "medium", high: "high" } } });
+      const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const hash = hashHostName("sdd-mr-base", { providerId: "openai", modelId: "gpt-5.6" }).slice("sdd-mr-v1-".length);
       for (const suffix of ["", "-low", "-medium", "-high"]) {
@@ -71,8 +82,8 @@ async function run(): Promise<void> {
       const workspaceRoot = path.join(tmp, "ws");
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "anthropic", modelId: "claude-opus-5" }]);
-      writeVariantsSnapshot(workspaceRoot, { "anthropic/claude-opus-5": { low: "high", high: "max" } });
-      const gen = new DiskAgentGenerator({ workspaceRoot, quarantineStore: null, loadQuarantineEntries: async () => [] });
+      writeVariantsSnapshot(workspaceRoot, { "anthropic/claude-opus-5": { levels: { low: "high", high: "max" } } });
+      const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const hash = hashHostName("sdd-mr-base", { providerId: "anthropic", modelId: "claude-opus-5" }).slice("sdd-mr-v1-".length);
       for (const suffix of ["", "-low", "-high"]) {
@@ -93,7 +104,7 @@ async function run(): Promise<void> {
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "google", modelId: "gemini-flash" }]);
       writeVariantsSnapshot(workspaceRoot, { "google/gemini-flash": {} });
-      const gen = new DiskAgentGenerator({ workspaceRoot, quarantineStore: null, loadQuarantineEntries: async () => [] });
+      const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const hash = hashHostName("sdd-mr-base", { providerId: "google", modelId: "gemini-flash" }).slice("sdd-mr-v1-".length);
       assert.ok(existsSync(path.join(workspaceRoot, ".opencode", "agents", `sdd-mr-v1-${hash}.md`)),
@@ -113,8 +124,8 @@ async function run(): Promise<void> {
       const workspaceRoot = path.join(tmp, "ws");
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "openai", modelId: "gpt-5.6" }]);
-      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { low: "low", medium: "medium", high: "high" } });
-      const gen = new DiskAgentGenerator({ workspaceRoot, quarantineStore: null, loadQuarantineEntries: async () => [] });
+      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { levels: { low: "low", medium: "medium", high: "high" } } });
+      const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const hash = hashHostName("sdd-mr-base", { providerId: "openai", modelId: "gpt-5.6" }).slice("sdd-mr-v1-".length);
       for (const suffix of ["", "-low", "-medium", "-high"]) {
@@ -138,7 +149,7 @@ async function run(): Promise<void> {
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "openai", modelId: "gpt-5.6" }]);
       writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { low: "low", medium: "medium", high: "high" } });
-      const gen = new DiskAgentGenerator({ workspaceRoot, quarantineStore: null, loadQuarantineEntries: async () => [] });
+      const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const hash = hashHostName("sdd-mr-base", { providerId: "openai", modelId: "gpt-5.6" }).slice("sdd-mr-v1-".length);
       const commands = readdirSync(path.join(workspaceRoot, ".opencode", "commands"))
@@ -163,8 +174,8 @@ async function run(): Promise<void> {
       writeFileSync(path.join(agentsDir, `sdd-mr-v1-${staleHash}-high.md`), "stale");
 
       routesConfig(workspaceRoot, [{ providerId: "openai", modelId: "gpt-5.6" }]);
-      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { low: "low", high: "high" } });
-      const gen = new DiskAgentGenerator({ workspaceRoot, quarantineStore: null, loadQuarantineEntries: async () => [] });
+      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { levels: { low: "low", high: "high" } } });
+      const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
 
       assert.ok(!existsSync(path.join(agentsDir, `sdd-mr-v1-${staleHash}-low.md`)), "stale -low swept");
@@ -180,8 +191,8 @@ async function run(): Promise<void> {
       const workspaceRoot = path.join(tmp, "ws");
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "openai", modelId: "gpt-5.6" }]);
-      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { low: "low", high: "high" } });
-      const gen = new DiskAgentGenerator({ workspaceRoot, quarantineStore: null, loadQuarantineEntries: async () => [] });
+      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { levels: { low: "low", high: "high" } } });
+      const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const variantsPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "variants.json");
       assert.ok(existsSync(variantsPath), "variants.json is written next to the manifest");
