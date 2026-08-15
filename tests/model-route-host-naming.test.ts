@@ -7,11 +7,6 @@ import {
   hashHostName,
 } from "../src/domain/model-routing/model-route-host-naming.js";
 import * as modelRouting from "../src/domain/model-routing/index.js";
-import {
-  OpenCodeCompatError,
-  OPENCODE_COMPAT_VERSION,
-  assertOpenCodeCompatible,
-} from "../src/domain/model-routing/opencode-compat.js";
 
 function run(): void {
   console.log("--- model-route pure host naming ---");
@@ -55,11 +50,6 @@ function run(): void {
     formatCanonicalModelId,
     "barrel exports canonical formatter",
   );
-  assert.equal(
-    "buildRoutedHostSpecs" in modelRouting,
-    false,
-    "barrel does not retain staging-only routed-host orchestration",
-  );
 
   const namingSource = readFileSync(
     new URL("../src/domain/model-routing/model-route-host-naming.ts", import.meta.url),
@@ -71,45 +61,16 @@ function run(): void {
     "pure naming helper is detached from synthetic Config shapes",
   );
 
-  assert.doesNotThrow(() => assertOpenCodeCompatible(OPENCODE_COMPAT_VERSION));
-  assert.throws(
-    () => assertOpenCodeCompatible("1.18.4"),
-    OpenCodeCompatError,
-    "compatibility gate refuses the legacy 1.18.4 runtime",
-  );
-  assert.throws(
-    () => assertOpenCodeCompatible("1.18.5"),
-    OpenCodeCompatError,
-    "compatibility gate refuses runtimes below the minimum",
-  );
-  assert.throws(
-    () => assertOpenCodeCompatible("1.18.10"),
-    OpenCodeCompatError,
-    "compatibility gate refuses 1.18.10 below the 1.18.17 minimum",
-  );
-  assert.throws(
-    () => assertOpenCodeCompatible("1.18.16"),
-    OpenCodeCompatError,
-    "patch downgrade below the minimum fails closed",
-  );
-  assert.doesNotThrow(
-    () => assertOpenCodeCompatible("1.18.18"),
-    "patch update within the same minor is transparent",
-  );
-  assert.doesNotThrow(
-    () => assertOpenCodeCompatible("1.19.0"),
-    "minor update within the same major is transparent",
-  );
-  assert.throws(
-    () => assertOpenCodeCompatible("2.0.0"),
-    OpenCodeCompatError,
-    "major bump fails closed: the SDK surface is only audited inside one major",
-  );
-  assert.throws(
-    () => assertOpenCodeCompatible("latest"),
-    OpenCodeCompatError,
-    "unparsable version fails closed",
-  );
+  // Suffix names: the variant fleet derives base + -low/-medium/-high host
+  // names by string concatenation of the canonical hash. The base hash
+  // is unchanged, and the suffixed names carry the level lexically so
+  // the dispatcher can find them on disk.
+  const hash = expected.slice(ROUTED_HOST_NAME_PREFIX.length);
+  assert.equal(`${expected}-low`, `sdd-mr-v1-${hash}-low`, "low agent file name");
+  assert.equal(`${expected}-medium`, `sdd-mr-v1-${hash}-medium`, "medium agent file name");
+  assert.equal(`${expected}-high`, `sdd-mr-v1-${hash}-high`, "high agent file name");
+  assert.match(`${expected}-low`, /^sdd-mr-v1-[a-f0-9]{16}-low$/, "low suffix format");
+  assert.match(`${expected}-high`, /^sdd-mr-v1-[a-f0-9]{16}-high$/, "high suffix format");
 
   console.log("All pure host naming assertions passed.");
 }

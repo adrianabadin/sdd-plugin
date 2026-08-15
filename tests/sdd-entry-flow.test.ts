@@ -260,8 +260,8 @@ async function runTests(): Promise<void> {
     const mockResolver = {
       async resolve(phrase: string) {
         throw new RouteAmbiguousError(phrase, [
-          { providerId: "google", modelId: "gemini-1.5-flash", modelName: "Flash 1.5" },
-          { providerId: "google", modelId: "gemini-2.5-flash", modelName: "Flash 2.5" },
+          { providerId: "google", modelId: "gemini-1.5-flash" },
+          { providerId: "google", modelId: "gemini-2.5-flash" },
         ]);
       },
     };

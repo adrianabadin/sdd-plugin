@@ -103,7 +103,7 @@ async function run(): Promise<void> {
       const workspaceRoot = path.join(tmp, "ws");
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "google", modelId: "gemini-flash" }]);
-      writeVariantsSnapshot(workspaceRoot, { "google/gemini-flash": {} });
+      writeVariantsSnapshot(workspaceRoot, { "google/gemini-flash": { levels: {} } });
       const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const hash = hashHostName("sdd-mr-base", { providerId: "google", modelId: "gemini-flash" }).slice("sdd-mr-v1-".length);
@@ -148,7 +148,7 @@ async function run(): Promise<void> {
       const workspaceRoot = path.join(tmp, "ws");
       mkdirSync(workspaceRoot, { recursive: true });
       routesConfig(workspaceRoot, [{ providerId: "openai", modelId: "gpt-5.6" }]);
-      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { low: "low", medium: "medium", high: "high" } });
+      writeVariantsSnapshot(workspaceRoot, { "openai/gpt-5.6": { levels: { low: "low", medium: "medium", high: "high" } } });
       const gen = new DiskAgentGenerator({ workspaceRoot, routesConfigPath: routesConfigPath(workspaceRoot) });
       await gen.run();
       const hash = hashHostName("sdd-mr-base", { providerId: "openai", modelId: "gpt-5.6" }).slice("sdd-mr-v1-".length);

@@ -25,7 +25,6 @@ import {
   decodeRoutesConfig,
   encodeRoutesConfig,
 } from "../src/infrastructure/opencode/disk-agent-generator.js";
-import { REQUIRED_OPENCODE_VERSION } from "../src/infrastructure/opencode/model-route-readiness.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -126,7 +125,7 @@ interface Manifest {
   workspaceIdentity: string;
   routingNamespace: string;
   descriptorBudgetBytes: number;
-  requiredOpenCodeVersion: string;
+  requiredOpenCodeVersion?: never; // Rev 2: no OpenCode version pinning in the manifest.
   routes: Array<{
     baseTemplate: string;
     providerId: string;
@@ -284,7 +283,8 @@ async function run(): Promise<void> {
     assert.equal(manifest.generatorVersion, GENERATOR_VERSION);
     assert.equal(manifest.routingNamespace, ROUTING_NAMESPACE_VERSION);
     assert.equal(manifest.descriptorBudgetBytes, DESCRIPTOR_BUDGET_BYTES);
-  assert.equal(manifest.requiredOpenCodeVersion, REQUIRED_OPENCODE_VERSION, "manifest binds to the required OpenCode runtime");
+  assert.equal((manifest as { requiredOpenCodeVersion?: string }).requiredOpenCodeVersion, undefined,
+    "Rev 2: manifest no longer binds to a required OpenCode version");
     assert.equal(manifest.routes.length, 3);
     assert.ok(manifest.generationEpoch.length > 0, "generation epoch present");
     assert.ok(manifest.workspaceIdentity.length > 0, "workspace identity present");
@@ -297,17 +297,19 @@ async function run(): Promise<void> {
     const expectedManifestHash = sha256Hex(JSON.stringify(manifestForHash));
     assert.equal(manifest.manifestHash, expectedManifestHash, "manifest hash matches sha256 of body");
 
-    // 13b. A pre-1.18.9 manifest (requiredOpenCodeVersion=1.18.4) is rejected
-    // by the readiness contract: its requiredOpenCodeVersion cannot equal
-    // the runtime contract, so it must be regenerated before attestation.
-    const staleManifest: Manifest = {
+    // 13b. Rev 2: a pre-1.18.9 manifest is NOT a thing anymore — there is
+    // no OpenCode version pin in the manifest, and the version contract
+    // is not checked at any layer. The dispatch and the generator work
+    // against any OpenCode version that supports subagent dispatch.
+    // The contract here is that two distinct manifest bodies produce
+    // distinct hashes (the inverse direction of the new contract).
+    const otherManifest: Manifest = {
       ...manifest,
-      requiredOpenCodeVersion: "1.18.4",
       generatorVersion: "1.0.0",
     };
-    const staleBody = { ...staleManifest, manifestHash: undefined };
-    const staleForHash = sha256Hex(JSON.stringify(staleBody));
-    assert.notEqual(staleForHash, manifest.manifestHash, "1.18.4 manifest produces a distinct digest from 1.18.9");
+    const otherBody = { ...otherManifest, manifestHash: undefined };
+    const otherForHash = sha256Hex(JSON.stringify(otherBody));
+    assert.notEqual(otherForHash, manifest.manifestHash, "different generatorVersion produces a distinct manifest digest");
 
     // 14. Each route's host name matches the deterministic hashHostName contract
     const { hashHostName } = await import("../src/domain/model-routing/model-route-host-naming.js");
