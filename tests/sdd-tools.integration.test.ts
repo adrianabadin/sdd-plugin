@@ -9,7 +9,8 @@ import path from "node:path";
 
 import { buildSddTools, type SddToolsDeps } from "../src/bootstrap/sdd-tools.js";
 import { canonicalizeProjectRoot } from "../src/domain/sdd/project-identity.js";
-import type { UnresolvableSkillError } from "../src/domain/sdd/prompt-composition.js";
+import { UnresolvableSkillError } from "../src/domain/sdd/prompt-composition.js";
+import { STATIC_PHASE_SKILLS_MAP } from "../src/domain/sdd/prompt-composition.js";
 import { initConfigKey } from "../src/domain/sdd/sdd-keys.js";
 import type { SkillResolutionAttempt, SkillResolver } from "../src/domain/sdd/skill-resolution.js";
 import type { WorktreeFingerprint } from "../src/domain/sdd/worktree-fingerprint.js";
@@ -1427,6 +1428,97 @@ async function runTests(): Promise<void> {
       "a broken injection fails loud instead of silently resolving the configured entry",
     );
     console.log("  pass: C-R1 injected skill paths win, and a broken injection hard-stops with no config fallback");
+
+    // W-N2 — a compose failure releases its durable lock, preserves the
+    // enriched original error, and reports secondary release failures.
+    const releaseFailureRoot = path.join(tempDir, "release-failure");
+    mkdirSync(releaseFailureRoot);
+    const releaseErrors: unknown[] = [];
+    const releaseFaultStore = new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === "releaseChangeStateLock") {
+          return async (...args: unknown[]) => {
+            await target.releaseChangeStateLock(
+              args[0] as string,
+              args[1] as string,
+              args[2] as string,
+              args[3] as number,
+            );
+            throw new Error("forced release failure");
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as unknown as SddChangeStateStorePort;
+    const releaseFaultTools = buildSddTools({
+      store,
+      changeStateStore: releaseFaultStore,
+      captureFingerprint: async () => baseline,
+      createSkillResolver: () => Object.assign(
+        (_skill: string): string | null => null,
+        {
+          attempts: (_skill: string): readonly SkillResolutionAttempt[] => [
+            { source: "test", lookupKey: _skill, reason: "name-absent" },
+          ],
+        },
+      ),
+      onLockReleaseError: (error) => releaseErrors.push(error),
+    }) as unknown as Record<string, unknown>;
+    await assert.rejects(
+      () => invoke(releaseFaultTools, "sdd_compose_phase_prompt", {
+        projectRoot: releaseFailureRoot,
+        changeName: "release-failure-target",
+        phase: "sdd-tasks",
+        modelReference: "test/model",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof UnresolvableSkillError, "the original compose error remains typed");
+        assert.equal((error as UnresolvableSkillError).code, "UNRESOLVABLE_SKILL");
+        assert.equal((error as UnresolvableSkillError).attempts.length, 1, "the original attempts remain intact");
+        return true;
+      },
+      "compose surfaces the original enriched skill-resolution error when release fails",
+    );
+    assert.equal(releaseErrors.length, 1, "the secondary release error is reported exactly once");
+    assert.match(String((releaseErrors[0] as Error).message), /forced release failure/);
+    const releaseFailureState = await store.readChangeState(releaseFailureRoot, "release-failure-target");
+    assert.equal(releaseFailureState?.lock, undefined, "the release-failure fixture has no durable lock after retry cleanup");
+
+    // The init sentinel is acquired before the user change. Temporarily adding
+    // a mandatory skill to the init phase gives this integration test a real
+    // compose-time UnresolvableSkillError while both locks are held.
+    const sentinelFailureRoot = path.join(tempDir, "sentinel-compose-failure");
+    mkdirSync(sentinelFailureRoot);
+    const initSkills = STATIC_PHASE_SKILLS_MAP["sdd-init"];
+    initSkills.push("work-unit-commits");
+    const sentinelFailureTools = buildSddTools({
+      store,
+      changeStateStore: store,
+      captureFingerprint: async () => baseline,
+      createSkillResolver: () => Object.assign(
+        (_skill: string): string | null => null,
+        { attempts: (): readonly SkillResolutionAttempt[] => [] },
+      ),
+    }) as unknown as Record<string, unknown>;
+    try {
+      await assert.rejects(
+        () => invoke(sentinelFailureTools, "sdd_compose_phase_prompt", {
+          projectRoot: sentinelFailureRoot,
+          changeName: "sentinel-compose-failure-target",
+          phase: "sdd-init",
+          modelReference: "test/model",
+        }),
+        (error: unknown) => error instanceof UnresolvableSkillError && error.code === "UNRESOLVABLE_SKILL",
+        "compose surfaces the enriched error while the init sentinel is held",
+      );
+      const failedUserState = await store.readChangeState(sentinelFailureRoot, "sentinel-compose-failure-target");
+      const failedSentinelState = await store.readChangeState(sentinelFailureRoot, "__sdd_project_init_lock__");
+      assert.equal(failedUserState?.lock, undefined, "failed init compose releases the user change lock");
+      assert.equal(failedSentinelState?.lock, undefined, "failed init compose releases the project-init sentinel");
+    } finally {
+      initSkills.pop();
+    }
+
     configClient.close();
 
     console.log("All sdd-tools integration tests passed.");

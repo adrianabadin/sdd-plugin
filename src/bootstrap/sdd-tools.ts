@@ -433,6 +433,13 @@ const sddComposePhasePrompt: ToolDefinition = tool({
         // replaced this token), the lock is no longer ours to leak either
         // way, and the caller needs to see the ORIGINAL compose error, not a
         // secondary release failure.
+        // Drop in-memory ownership before attempting best-effort cleanup. A
+        // failed release must never leave this tool surface believing it still
+        // owns a token that may already have been reclaimed elsewhere.
+        ownerTokens.delete(ownerKey);
+        if (projectInitLock !== null && projectInitOwnerToken !== null) {
+          ownerTokens.delete(projectInitOwnerKey);
+        }
         try {
           await deps.changeStateStore.releaseChangeStateLock(
             args.projectRoot,
@@ -440,7 +447,6 @@ const sddComposePhasePrompt: ToolDefinition = tool({
             ownerToken,
             preparedState.version,
           );
-          ownerTokens.delete(ownerKey);
         } catch (releaseError) {
           // best-effort — see comment above — but no longer silent (W-N2).
           deps.onLockReleaseError?.(releaseError);
@@ -453,7 +459,6 @@ const sddComposePhasePrompt: ToolDefinition = tool({
               projectInitOwnerToken,
               projectInitLock.version,
             );
-            ownerTokens.delete(projectInitOwnerKey);
           } catch (releaseError) {
             // best-effort — see comment above — but no longer silent (W-N2).
             deps.onLockReleaseError?.(releaseError);
