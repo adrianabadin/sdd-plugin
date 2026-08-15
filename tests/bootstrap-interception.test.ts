@@ -67,7 +67,27 @@ async function runTest(): Promise<void> {
     const registry = getOrCreateModelConfigRegistry();
     assert.equal(registry.get('anthropic', 'claude-3-5-sonnet'), undefined);
 
-    const plugin = await SddPlugin({ project: 'test', client: {} });
+    const startupLogs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      startupLogs.push(args.map(String).join(' '));
+      originalLog(...args);
+    };
+    let plugin: Awaited<ReturnType<typeof SddPlugin>>;
+    try {
+      plugin = await SddPlugin({ project: 'test', client: {}, directory: tmpDir });
+    } finally {
+      console.log = originalLog;
+    }
+    assert.ok(
+      startupLogs.some((line) => line.includes('SDD_SKILL_RESOLUTION_NOT_CONFIGURED')),
+      'startup logs the stable skill-resolution-not-configured code when skillPaths are absent',
+    );
+    assert.equal(
+      Object.keys((plugin as Record<string, unknown>).tool ?? {}).length,
+      8,
+      'startup still registers the complete SDD tool surface when skillPaths are absent',
+    );
     const hook = plugin['tool.execute.before'];
 
     // Use a non-quarantined provider for the registry hydration assertion:
