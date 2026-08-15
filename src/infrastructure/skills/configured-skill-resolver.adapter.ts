@@ -43,9 +43,17 @@ export interface ConfiguredSkillResolverOptions {
   readonly configured?: SkillPathMap | null;
   /** The config field `configured` came from; qualifies its lookup keys. */
   readonly configKey?: string;
+  /**
+   * The label reported as `source` for the `configured` map. Defaults to the
+   * generic `configured`; a caller that knows WHERE the map came from should
+   * say so (e.g. `project-config`), because "edit your config" is only
+   * actionable once the operator knows which config was read.
+   */
+  readonly configSource?: string;
 }
 
 const DEFAULT_CONFIG_KEY = "skillPaths";
+const DEFAULT_CONFIG_SOURCE = "configured";
 
 /** A source that failed; `null` means the candidate path validated. */
 function validate(candidate: string, projectRoot: string): { reason: "missing" | "unreadable"; detail: string } | null {
@@ -80,11 +88,17 @@ function validate(candidate: string, projectRoot: string): { reason: "missing" |
 }
 
 export function createConfiguredSkillResolver(options: ConfiguredSkillResolverOptions): SkillResolver {
-  const { projectRoot, injected, configured, configKey = DEFAULT_CONFIG_KEY } = options;
+  const {
+    projectRoot,
+    injected,
+    configured,
+    configKey = DEFAULT_CONFIG_KEY,
+    configSource = DEFAULT_CONFIG_SOURCE,
+  } = options;
 
   const sources: readonly { readonly source: string; readonly map: SkillPathMap; readonly qualify: (name: string) => string }[] = [
     { source: "injected", map: injected ?? {}, qualify: (name) => name },
-    { source: "configured", map: configured ?? {}, qualify: (name) => `${configKey}.${name}` },
+    { source: configSource, map: configured ?? {}, qualify: (name) => `${configKey}.${name}` },
   ];
 
   /**

@@ -38,7 +38,7 @@ import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 import { SqliteMcpToolClient } from "../infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
 import { PmcSddArtifactStoreAdapter } from "../infrastructure/pmc/pmc-sdd-artifact-store.adapter.js";
-import { createSkillRegistryResolver } from "../infrastructure/skills/skill-registry-resolver.adapter.js";
+import { createProjectConfigSkillResolverFactory } from "../infrastructure/skills/project-config-skill-resolver.factory.js";
 import { buildSddTools } from "./sdd-tools.js";
 
 /**
@@ -227,24 +227,26 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
   try {
     const sddMcpClient = new SqliteMcpToolClient();
     const sddStore = new PmcSddArtifactStoreAdapter(sddMcpClient);
-    // C-N1 remediation (part A2) + C-R1 resolution (Option B) — without a
-    // real skillResolver here, the default resolver in `composePhasePrompt`
-    // always returns null (PC-6), so `sdd-tasks` and `sdd-apply` (the only
-    // phases with mandatory skills) could never successfully compose in
-    // production. The FACTORY is passed unbound: `buildSddTools` invokes it
-    // with the per-call `args.projectRoot` on every invocation (W-N1 — the
-    // module's documented invariant forbids a startup-time `directory`
-    // capture). Resolution order per call: the machine-local
-    // `<projectRoot>/.atl/skill-registry.md` (written by the external
-    // `gentle-ai` binary) wins when present; otherwise the committed default
-    // `config/sdd/default-skill-registry.md` shipped with the plugin — so a
-    // fresh clone or CI runner has a declared registry contract instead of
-    // an opaque null (C-R1). See
-    // `src/infrastructure/skills/skill-registry-resolver.adapter.ts`.
+    // Skill resolution reads each project's OWN persisted init config
+    // (`sdd-init/{hash}.skillPaths`), which `sdd_save_config` validates before
+    // it can be written. Without a real resolver here the default in
+    // `composePhasePrompt` always returns null (PC-6), so `sdd-tasks` and
+    // `sdd-apply` — the only phases with mandatory skills — could never
+    // compose in production.
+    //
+    // The FACTORY is passed unbound: `buildSddTools` invokes it with the
+    // per-call `args.projectRoot` on every invocation (W-N1 — the module's
+    // documented invariant forbids a startup-time `directory` capture), and
+    // the factory reads THAT root's checkpoint each time. The previous
+    // registry resolver read a gitignored, externally-generated
+    // `.atl/skill-registry.md` that a fresh clone never has; the config is
+    // written by the SDD init round itself, so there is no external producer
+    // to depend on. See
+    // `src/infrastructure/skills/project-config-skill-resolver.factory.ts`.
     sddTools = buildSddTools({
       store: sddStore,
       changeStateStore: sddStore,
-      createSkillResolver: createSkillRegistryResolver,
+      createSkillResolver: createProjectConfigSkillResolverFactory(sddStore),
       // W-N2 — best-effort lock releases on compose failure must not fail
       // silently; the original compose error is still the one rethrown.
       onLockReleaseError: (releaseError) =>

@@ -92,7 +92,7 @@ import {
 } from "../application/sdd/checkpoint.js";
 import { canonicalizeProjectRoot } from "../domain/sdd/project-identity.js";
 import { UnresolvableSkillError } from "../domain/sdd/prompt-composition.js";
-import type { SkillResolutionAttempt } from "../domain/sdd/skill-resolution.js";
+import type { SkillResolver } from "../domain/sdd/skill-resolution.js";
 import { changeArtifactKey, initConfigKey } from "../domain/sdd/sdd-keys.js";
 import {
   compareWorktreeFingerprints,
@@ -114,15 +114,19 @@ export interface SddToolsDeps {
   /**
    * Creates the skill resolver for the PER-CALL `args.projectRoot` — invoked
    * on every tool call, so resolution follows the module's documented
-   * invariant (per-call root, never a startup-time capture; W-N1). The
-   * returned resolver may optionally expose `attempts()` diagnostics, which
-   * are folded into `UnresolvableSkillError` so a compose failure names every
-   * skill source, its lookup key, and why it failed. Null from the resolver
-   * means "unresolvable" (PC-6).
+   * invariant (per-call root, never a startup-time capture; W-N1).
+   *
+   * The factory may be async: the production one reads the project's init
+   * checkpoint to lift its `skillPaths` map, which is exactly what makes the
+   * per-call root binding observable.
+   *
+   * `attempts()` is REQUIRED, not optional. A resolver that can return null
+   * without saying which sources it consulted turns every compose failure into
+   * a bare "skill X is unresolvable", leaving the operator to bisect config by
+   * hand — the diagnosis is folded into `UnresolvableSkillError` (PC-6), so it
+   * is part of the contract rather than a nicety.
    */
-  readonly createSkillResolver?: (projectRoot: string) => ((skillName: string) => string | null) & {
-    readonly attempts?: (skillName: string) => readonly SkillResolutionAttempt[];
-  };
+  readonly createSkillResolver?: (projectRoot: string) => SkillResolver | Promise<SkillResolver>;
   /**
    * Observability for the best-effort lock release on compose failure (W-N2):
    * a release failure is reported here instead of vanishing silently. The
@@ -379,8 +383,10 @@ const sddComposePhasePrompt: ToolDefinition = tool({
       let result: ReturnType<typeof composePhasePrompt>;
       // W-N1 — the resolver is created HERE, per call, from args.projectRoot,
       // so resolution always follows the session's actual project root and
-      // never a startup-time capture.
-      const skillResolver = deps.createSkillResolver?.(args.projectRoot);
+      // never a startup-time capture. Awaited because the production factory
+      // reads that root's own init checkpoint to build the resolver; `await`
+      // on a synchronous factory's return value is a no-op.
+      const skillResolver = await deps.createSkillResolver?.(args.projectRoot);
       try {
         result = composePhasePrompt({
           phase: args.phase,
