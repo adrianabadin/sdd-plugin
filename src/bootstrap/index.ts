@@ -4,6 +4,12 @@
  *
  * The plugin contract: an async function that receives the OpenCode
  * runtime context and returns a map of hook handlers.
+ *
+ * Rev 2 — no boot identity, no signing key, no lease, no foreign-agent
+ * scan, no OpenCode version check. Routing is wired directly from
+ * `routes.json` (whitelist) + `variants.json` (variant snapshot). The
+ * hook works in a plain OpenCode session that knows nothing about the
+ * routing infrastructure.
  */
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 import { PrismaClient } from "../infrastructure/prisma/generated-prisma-client.js";
@@ -18,18 +24,16 @@ import { BackgroundModelRefreshCoordinator } from "../application/background-mod
 import { OpenCodeAppLogNotifierAdapter } from "../infrastructure/logging/opencode-app-log.notifier.adapter.js";
 import { ModelRefreshTraceLogger } from "../infrastructure/logging/model-refresh-trace.logger.js";
 import { OpenCodeModelCatalogAdapter } from "../infrastructure/opencode/opencode-model-catalog.adapter.js";
-import { PrismaModelRouteCatalogAdapter } from "../infrastructure/prisma/model-route-catalog.adapter.js";
 import { PrismaModelRouteQuarantineAdapter } from "../infrastructure/prisma/model-route-quarantine.adapter.js";
 import { PrismaModelRepositoryAdapter } from "../infrastructure/prisma/prisma-model-repository.adapter.js";
 import { ModelRouteResolver } from "../domain/model-routing/model-route-resolver.js";
+import { RouteWhitelist, loadRouteWhitelist } from "../domain/model-routing/route-whitelist.js";
 import { parseModelRouteGrammar } from "../domain/model-routing/model-route-grammar.js";
 import { NATURAL_MODEL_ALIASES } from "../domain/model-routing/natural-model-aliases.js";
 import { parseNaturalModelIntent } from "../domain/model-routing/natural-model-intent.js";
-import { naturalIntentBlockedFromParse } from "../domain/model-routing/natural-model-routing-errors.js";
 import { ModelRouteTaskHook } from "../infrastructure/opencode/model-route-task-hook.js";
+import { readVariantSnapshot } from "../infrastructure/opencode/variant-snapshot.js";
 import { resolveDatabasePath, initializeDatabase } from "../infrastructure/runtime/database-path.js";
-import { loadOrCreateRoutingSecrets } from "../infrastructure/runtime/model-route-secrets.js";
-import { renewRoutingLease, LEASE_RENEWAL_MS } from "../infrastructure/runtime/model-route-lease.js";
 import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-config-registry.js";
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 import { SqliteMcpToolClient } from "../infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
@@ -93,52 +97,6 @@ export function getPrismaClient(): PrismaClient {
 export const BOOTSTRAP_BUSY_TIMEOUT_MS = 5000;
 
 /**
- * Env-driven operator configuration for the deterministic routing hook.
- *
- * Both variables are REQUIRED. Unit 6 contract: the plugin never invents
- * defaults (no `boot-default`, no callID-derived identity, no random key),
- * and it never reads `OPENCODE_BOOT_ID` as a fallback. A missing or
- * insecure value must block routing on the first hook invocation; the
- * plugin does not silently substitute.
- *
- * Persistent fallback: when the env vars are absent — the case for any
- * OpenCode started outside the supervisor, which cannot inherit its
- * process env — the resolvers read the STABLE workspace secrets
- * (`secrets.json`) via `loadOrCreateRoutingSecrets`. Because the secrets
- * are persisted and reused across boots, an interactive session always
- * resolves the same key the supervisor signs its attestation with, so
- * deterministic routing no longer races on boot ordering.
- */
-export const ROUTING_BOOT_ID_ENV = "SDD_MODEL_ROUTING_BOOT_ID";
-export const ROUTING_SIGNING_KEY_ENV = "SDD_MODEL_ROUTING_SIGNING_KEY";
-
-/**
- * Resolve the operator-supplied boot nonce. Returns `null` when the
- * configuration is missing or uses the legacy `boot-default` sentinel;
- * the hook caller is responsible for failing closed in that case.
- */
-export function resolveRoutingBootIdentity(workspaceRoot?: string): string | null {
-  const value = process.env[ROUTING_BOOT_ID_ENV];
-  if (value === "boot-default") return null;
-  if (typeof value === "string" && value.length > 0) return value;
-  if (workspaceRoot === undefined) return null;
-  return loadOrCreateRoutingSecrets(workspaceRoot).bootIdentity;
-}
-
-/**
- * Resolve the operator-supplied HMAC signing key. Returns `null` when
- * the configuration is missing or uses the legacy `deterministic-key`
- * sentinel; the hook caller is responsible for failing closed.
- */
-export function resolveRoutingSigningKey(workspaceRoot?: string): string | null {
-  const value = process.env[ROUTING_SIGNING_KEY_ENV];
-  if (value === "deterministic-key") return null;
-  if (typeof value === "string" && value.length > 0) return value;
-  if (workspaceRoot === undefined) return null;
-  return loadOrCreateRoutingSecrets(workspaceRoot).signingKey;
-}
-
-/**
  * Release every Prisma client owned by the bootstrap composition root.
  *
  * Safe to call repeatedly and concurrently: each tracked client receives
@@ -195,13 +153,6 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
   const project = resolveProjectLabel(ctx?.project);
   const directory = ctx?.directory ?? "";
   const client = ctx?.client;
-
-  // Bind the supervisor's lifetime to this session: renew the workspace
-  // lease on a fixed cadence. The timer dies with this process, so when
-  // the session closes the lease expires and the supervisor stops itself.
-  const leaseRoot = directory || process.cwd();
-  const leaseRenewal = setInterval(() => renewRoutingLease(leaseRoot), LEASE_RENEWAL_MS);
-  leaseRenewal.unref?.();
 
   const logger = {
     info: (message: string) => console.log(`[${project}] INFO: ${message}`),
@@ -342,38 +293,27 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
         // Reserved routing grammar: defer entirely to the deterministic
         // routing pipeline. The legacy code (which reads args.model) is
         // intentionally NOT invoked for routing calls so that the new
-        // pipeline can own the parse → resolve → quarantine → readiness
-        // → audit → rewrite sequence without any fallback.
-        //
-        // Unit 6: boot identity and HMAC signing key MUST come from the
-        // operator-supplied stable host nonce and shared secret env vars.
-        // callID, the legacy `OPENCODE_BOOT_ID` env var, and the
-        // `boot-default` / `deterministic-key` sentinels are rejected.
-        const bootIdentity = resolveRoutingBootIdentity(directory || process.cwd());
-        const signingKey = resolveRoutingSigningKey(directory || process.cwd());
-        if (!bootIdentity || !signingKey) {
-          const reason = !bootIdentity && !signingKey
-            ? `${ROUTING_BOOT_ID_ENV} and ${ROUTING_SIGNING_KEY_ENV} are both required`
-            : !bootIdentity
-              ? `${ROUTING_BOOT_ID_ENV} is required (callID/OPENCODE_BOOT_ID/'boot-default' are not accepted)`
-              : `${ROUTING_SIGNING_KEY_ENV} is required ('deterministic-key'/random keys are not accepted)`;
-          logger.error(`BLOCKED routing call (subagent_type=${subagentType}): ${reason}.`, null);
-          throw new Error(`ROUTING_NOT_CONFIGURED: ${reason}; deterministic routing refuses to run.`);
-        }
+        // pipeline can own the parse → resolve → quarantine → whitelist
+        // → variant → disk → audit → rewrite sequence without any fallback.
         const routingQuarantineAdapter = new PrismaModelRouteQuarantineAdapter(prisma);
-        const routingResolver = new ModelRouteResolver(
-          new PrismaModelRouteCatalogAdapter(prisma),
-          new Map(),
-        );
-        const auditPath = path.join(directory || process.cwd(), ".opencode", "sdd-model-routing", "routing.audit.jsonl");
+        const workspaceRoot = directory || process.cwd();
+        const whitelist = loadRouteWhitelist(workspaceRoot);
+        const variants = readVariantSnapshot(workspaceRoot);
+        const routingResolver = new ModelRouteResolver(whitelist, new Map());
+        const auditPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "routing.audit.jsonl");
         const routingHook = new ModelRouteTaskHook({
-          workspaceRoot: directory || process.cwd(),
+          workspaceRoot,
+          whitelist,
+          variants,
           resolver: routingResolver,
           quarantineStore: getGlobalQuarantineStore(),
           audit: { path: auditPath },
-          bootIdentity,
-          signingKey,
           loadQuarantineEntries: async () => routingQuarantineAdapter.listActive(),
+          logger: {
+            info: (m: string) => logger.info(m),
+            warn: (m: string) => console.warn(`[${project}] WARN: ${m}`),
+            error: (m: string) => logger.error(m, null),
+          },
         });
         await routingHook.execute(_input, output);
         return;
@@ -402,52 +342,36 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
         try {
           naturalIntent = parseNaturalModelIntent(promptArg);
         } catch (error) {
-          // Fail-closed at the bootstrap boundary so the operator sees
-          // the localized error before any child creation. The hook
-          // would also throw — surfacing it here is a defense-in-depth
-          // guard and ensures the audit entry is never written for a
-          // prompt the parser cannot even classify.
-          const blocked = naturalIntentBlockedFromParse(
-            error as Parameters<typeof naturalIntentBlockedFromParse>[0],
-            promptArg,
-          );
-          logger.error(
-            `BLOCKED natural routing call (subagent_type=${subagentType}): ${blocked.format("en")}`,
-            null,
-          );
-          throw blocked;
+          // The hook itself throws on ambiguous/malformed/unknown-level
+          // intents. We let those propagate; the hook also handles the
+          // grammar-error path internally.
+          throw error;
         }
         if (naturalIntent !== null) {
-          const bootIdentity = resolveRoutingBootIdentity(directory || process.cwd());
-          const signingKey = resolveRoutingSigningKey(directory || process.cwd());
-          if (!bootIdentity || !signingKey) {
-            const reason = !bootIdentity && !signingKey
-              ? `${ROUTING_BOOT_ID_ENV} and ${ROUTING_SIGNING_KEY_ENV} are both required`
-              : !bootIdentity
-                ? `${ROUTING_BOOT_ID_ENV} is required (callID/OPENCODE_BOOT_ID/'boot-default' are not accepted)`
-                : `${ROUTING_SIGNING_KEY_ENV} is required ('deterministic-key'/random keys are not accepted)`;
-            logger.error(`BLOCKED natural routing call (subagent_type=${subagentType}): ${reason}.`, null);
-            throw new Error(`ROUTING_NOT_CONFIGURED: ${reason}; deterministic natural routing refuses to run.`);
-          }
           const routingQuarantineAdapter = new PrismaModelRouteQuarantineAdapter(prisma);
+          const workspaceRoot = directory || process.cwd();
+          const whitelist: RouteWhitelist = loadRouteWhitelist(workspaceRoot);
+          const variants = readVariantSnapshot(workspaceRoot);
           // WU2: the resolver MUST be wired with the verified
           // `NATURAL_MODEL_ALIASES` so the natural reference hits the
           // alias table before any Tier 3 fuzzy fallback. The explicit
           // routing path keeps an empty alias map so it can never pick
           // up natural aliases by accident.
-          const routingResolver = new ModelRouteResolver(
-            new PrismaModelRouteCatalogAdapter(prisma),
-            NATURAL_MODEL_ALIASES,
-          );
-          const auditPath = path.join(directory || process.cwd(), ".opencode", "sdd-model-routing", "routing.audit.jsonl");
+          const routingResolver = new ModelRouteResolver(whitelist, NATURAL_MODEL_ALIASES);
+          const auditPath = path.join(workspaceRoot, ".opencode", "sdd-model-routing", "routing.audit.jsonl");
           const routingHook = new ModelRouteTaskHook({
-            workspaceRoot: directory || process.cwd(),
+            workspaceRoot,
+            whitelist,
+            variants,
             resolver: routingResolver,
             quarantineStore: getGlobalQuarantineStore(),
             audit: { path: auditPath },
-            bootIdentity,
-            signingKey,
             loadQuarantineEntries: async () => routingQuarantineAdapter.listActive(),
+            logger: {
+              info: (m: string) => logger.info(m),
+              warn: (m: string) => console.warn(`[${project}] WARN: ${m}`),
+              error: (m: string) => logger.error(m, null),
+            },
           });
           await routingHook.execute(_input, output);
           return;

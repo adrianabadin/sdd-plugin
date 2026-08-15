@@ -183,7 +183,7 @@ export class ModelRouteTaskHook {
         output,
         parsedGrammar.reference,
         effortFromGrammar,
-        { trigger: undefined, naturalReference: undefined },
+        {},
       );
       return;
     }
