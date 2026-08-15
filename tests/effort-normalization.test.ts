@@ -46,11 +46,19 @@ async function run(): Promise<void> {
     "non-canonical 3 keys map to lowest/middle/highest of the ranking",
   );
 
-  // Unknown keys are ignored, not crashed on.
+  // Unknown keys are ignored, not crashed on. With only one known key left
+  // the result is "no levels" (1-key rule).
   assert.deepEqual(
     normalizeEffortLevels(["turbo", "ultra", "high"]),
-    { low: "high", high: "high" },
-    "unknown keys are ignored and the rest is ranked",
+    {},
+    "unknown keys are ignored; one known key left -> no levels",
+  );
+
+  // Mix of unknown and known that lands at 2 levels.
+  assert.deepEqual(
+    normalizeEffortLevels(["turbo", "low", "high", "ultra"]),
+    { low: "low", high: "high" },
+    "unknown keys are filtered, remaining keys are ranked",
   );
 
   // Determinism: same input -> same output.
