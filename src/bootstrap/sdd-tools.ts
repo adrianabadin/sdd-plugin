@@ -688,12 +688,39 @@ async execute(args) {
         return { output: JSON.stringify({ ok: false, inFlightPhase: state.lock!.phase, unexpectedWrites: true }, null, 2) };
       }
       const projectRootHash = resolveProjectHash(args.projectRoot);
-      const saved = await saveInitConfig(
-        deps.store,
-        projectRootHash,
-        args.detection as Parameters<typeof saveInitConfig>[2],
-        (args.userAnswers ?? {}) as Parameters<typeof saveInitConfig>[3],
-      );
+      let saved: Awaited<ReturnType<typeof saveInitConfig>>;
+      try {
+        saved = await saveInitConfig(
+          deps.store,
+          projectRootHash,
+          args.detection as Parameters<typeof saveInitConfig>[2],
+          (args.userAnswers ?? {}) as Parameters<typeof saveInitConfig>[3],
+        );
+      } catch (saveConfigError) {
+        ownerTokens.delete(ownerKey);
+        ownerTokens.delete(projectInitOwnerKey);
+        try {
+          await deps.changeStateStore.releaseChangeStateLock(
+            args.projectRoot,
+            args.changeName,
+            ownerToken,
+            validated.userState.version,
+          );
+        } catch (releaseError) {
+          deps.onLockReleaseError?.(releaseError);
+        }
+        try {
+          await deps.changeStateStore.releaseChangeStateLock(
+            args.projectRoot,
+            projectInitLockChangeName,
+            projectInitOwnerToken,
+            validated.sentinelState.version,
+          );
+        } catch (releaseError) {
+          deps.onLockReleaseError?.(releaseError);
+        }
+        throw saveConfigError;
+      }
       await deps.changeStateStore.releaseChangeStateLock(
         args.projectRoot,
         args.changeName,

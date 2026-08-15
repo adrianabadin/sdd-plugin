@@ -9,6 +9,7 @@ import path from "node:path";
 
 import { buildSddTools, type SddToolsDeps } from "../src/bootstrap/sdd-tools.js";
 import { canonicalizeProjectRoot } from "../src/domain/sdd/project-identity.js";
+import { SddChangeStateLockConflictError } from "../src/ports/sdd-artifact-store.port.js";
 import { UnresolvableSkillError } from "../src/domain/sdd/prompt-composition.js";
 import { STATIC_PHASE_SKILLS_MAP } from "../src/domain/sdd/prompt-composition.js";
 import { initConfigKey } from "../src/domain/sdd/sdd-keys.js";
@@ -181,12 +182,14 @@ async function runTests(): Promise<void> {
   const fingerprints = [baseline, changed, baseline, baseline, baseline, probeFailed, baseline, changed];
   const projectRoot = tempDir;
   const initValidationRoot = path.join(tempDir, "init-validation");
+  const initSkillPathValidationRoot = path.join(tempDir, "init-skill-path-validation");
   const initReadbackRoot = path.join(tempDir, "init-readback");
   const initFingerprintRoot = path.join(tempDir, "init-fingerprint");
   const initProjectLockRoot = path.join(tempDir, "init-project-lock");
   const initWriteFailureRoot = path.join(tempDir, "init-write-failure");
   const sentinelSpoofRoot = path.join(tempDir, "sentinel-spoof");
   mkdirSync(initValidationRoot);
+  mkdirSync(initSkillPathValidationRoot);
   mkdirSync(initReadbackRoot);
   mkdirSync(initFingerprintRoot);
   mkdirSync(initProjectLockRoot);
@@ -597,14 +600,55 @@ async function runTests(): Promise<void> {
         detection: null,
       }),
       /detection must run before saving config/,
-      "config validation failure rejects while the init lock remains held",
+      "config validation failure rejects and releases the init lock",
     );
     const initValidationFailureStatus = await invoke<{ inFlightPhase: string | null }>(tools, "sdd_status", {
       projectRoot: initValidationRoot,
       changeName: "init-validation-failure",
       allIds: [],
     });
-    assert.equal(initValidationFailureStatus.inFlightPhase, "sdd-init", "config validation failure retains the init lock");
+    assert.equal(initValidationFailureStatus.inFlightPhase, null, "config validation failure releases the init lock");
+
+    // W-N2 save-config release observability: validation errors after both
+    // init locks are held must release both durable locks and drop ownership.
+    await invoke(tools, "sdd_compose_phase_prompt", {
+      projectRoot: initSkillPathValidationRoot,
+      changeName: "init-skill-path-validation",
+      phase: "sdd-init",
+      modelReference: "test/model",
+    });
+    await assert.rejects(
+      () => invoke(tools, "sdd_save_config", {
+        projectRoot: initSkillPathValidationRoot,
+        changeName: "init-skill-path-validation",
+        detection: initQuestions.detection,
+        userAnswers: { skillPaths: { "work-unit-commits": "relative/SKILL.md" } },
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "INVALID_SKILL_PATH_MAP");
+        return error instanceof Error && error.name === "InvalidSkillPathMapError";
+      },
+      "invalid skillPaths rejects with InvalidSkillPathMapError",
+    );
+    const invalidSkillPathUserState = await store.readChangeState(
+      initSkillPathValidationRoot,
+      "init-skill-path-validation",
+    );
+    const invalidSkillPathSentinelState = await store.readChangeState(
+      initSkillPathValidationRoot,
+      "__sdd_project_init_lock__",
+    );
+    assert.equal(invalidSkillPathUserState?.lock, undefined, "save-config validation clears the user change lock");
+    assert.equal(invalidSkillPathSentinelState?.lock, undefined, "save-config validation clears the project-init sentinel");
+    await assert.rejects(
+      () => invoke(tools, "sdd_save_config", {
+        projectRoot: initSkillPathValidationRoot,
+        changeName: "init-skill-path-validation",
+        detection: initQuestions.detection,
+      }),
+      (error: unknown) => error instanceof SddChangeStateLockConflictError,
+      "save-config validation drops both in-memory owner tokens",
+    );
 
     const configFaultStore = new ArtifactFaultStore(store);
     const configFaultTools = buildSddTools({
@@ -627,14 +671,14 @@ async function runTests(): Promise<void> {
         detection: initQuestions.detection,
       }),
       /SDD_INIT_CONFIG_READBACK_MISMATCH/,
-      "config readback mismatch rejects while the init lock remains held",
+      "config readback mismatch rejects and releases the init lock",
     );
     const initReadbackFailureStatus = await invoke<{ inFlightPhase: string | null }>(configFaultTools, "sdd_status", {
       projectRoot: initReadbackRoot,
       changeName: "init-readback-failure",
       allIds: [],
     });
-    assert.equal(initReadbackFailureStatus.inFlightPhase, "sdd-init", "config readback failure retains the init lock");
+    assert.equal(initReadbackFailureStatus.inFlightPhase, null, "config readback failure releases the init lock");
 
     const initFingerprints = [baseline, changed];
     const initFingerprintTools = buildSddTools({
@@ -905,14 +949,14 @@ async function runTests(): Promise<void> {
         detection: initQuestions.detection,
       }),
       /forced config checkpoint write failure/,
-      "thrown config checkpoint write retains the init lock",
+      "thrown config checkpoint write releases the init lock",
     );
     const initWriteFailureStatus = await invoke<{ inFlightPhase: string | null }>(initWriteFaultTools, "sdd_status", {
       projectRoot: initWriteFailureRoot,
       changeName: "init-write-failure",
       allIds: [],
     });
-    assert.equal(initWriteFailureStatus.inFlightPhase, "sdd-init", "thrown config write retains the init lock");
+    assert.equal(initWriteFailureStatus.inFlightPhase, null, "thrown config write releases the init lock");
 
     // Reviewer finding #1 — public-surface end-to-end. A crashed sdd-init
     // dispatch leaves the project-global init sentinel held by sdd-init
