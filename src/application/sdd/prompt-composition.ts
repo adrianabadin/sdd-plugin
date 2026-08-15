@@ -12,6 +12,7 @@ import {
   STATIC_PHASE_SKILLS_MAP,
   UnresolvableSkillError,
 } from "../../domain/sdd/prompt-composition.js";
+import type { SkillResolutionAttempt } from "../../domain/sdd/skill-resolution.js";
 import { isPhaseMutating } from "../../domain/sdd/worktree-fingerprint.js";
 import { acquireDispatchLock } from "./dispatch-lock.js";
 
@@ -23,10 +24,25 @@ export interface ComposePhasePromptOptions {
     readonly testingSkill?: string | null;
     readonly [key: string]: unknown;
   } | null;
-  readonly skillResolver?: (skillName: string) => string | null;
+  /**
+   * Resolves a mapped skill name to a readable absolute path, or null (PC-6).
+   * `attempts` is optional so plain function resolvers stay valid; when the
+   * injected resolver provides it, the failure the caller sees names every
+   * source that was consulted instead of just the skill name.
+   */
+  readonly skillResolver?: ((skillName: string) => string | null) & {
+    readonly attempts?: (skillName: string) => readonly SkillResolutionAttempt[];
+  };
   readonly budgetLimitChars?: number;
   readonly currentInFlightPhase?: string | null;
 }
+
+/**
+ * PC-6 default: resolves nothing, so a caller that injects no resolver fails
+ * loudly on any mapped skill. Typed as the option itself (rather than left as
+ * an inline `() => null`) so the resolver stays a single type at the use site.
+ */
+const NO_SKILL_RESOLVER: NonNullable<ComposePhasePromptOptions["skillResolver"]> = () => null;
 
 export interface ComposePhasePromptResult {
   readonly subagentType: string;
@@ -46,7 +62,7 @@ export function composePhasePrompt(options: ComposePhasePromptOptions): ComposeP
     // skill. The earlier default fabricated `/skills/${name}`, which made the
     // throw branch unreachable in production — a missing skill silently
     // produced a bogus path baked into the prompt instead of failing loud.
-    skillResolver = () => null,
+    skillResolver = NO_SKILL_RESOLVER,
     budgetLimitChars = 100_000,
     currentInFlightPhase = null,
   } = options;
@@ -86,7 +102,9 @@ export function composePhasePrompt(options: ComposePhasePromptOptions): ComposeP
     if (!skillName) continue;
     const resolved = skillResolver(skillName);
     if (!resolved) {
-      throw new UnresolvableSkillError(skillName);
+      // Carry the resolver's own diagnosis so the failure names which sources
+      // were consulted and why each one did not produce a readable path.
+      throw new UnresolvableSkillError(skillName, skillResolver.attempts?.(skillName) ?? []);
     }
     resolvedSkills.push(resolved);
   }

@@ -4,16 +4,40 @@
  * Design from docs/superpowers/specs/2026-08-01-sdd-phase-agents-design.md (§5, §6, §9, §9.1).
  */
 
+import type { SkillResolutionAttempt } from "./skill-resolution.js";
+
+/**
+ * A mapped skill could not be resolved to a readable path (PC-6).
+ *
+ * The message names EVERY declared source that was consulted, its lookup key,
+ * the path it mapped the name to (when it mapped one), and why that source
+ * failed. A bare "skill X is unresolvable" forces the operator to bisect their
+ * config by hand; this tells them which field to edit and what was wrong with
+ * the value it held.
+ */
 export class UnresolvableSkillError extends Error {
   readonly code = "UNRESOLVABLE_SKILL";
   readonly skillName: string;
+  readonly attempts: readonly SkillResolutionAttempt[];
 
-  constructor(skillName: string, detail?: string) {
+  constructor(skillName: string, attempts: readonly SkillResolutionAttempt[] = []) {
     super(
-      `UNRESOLVABLE_SKILL: mapped skill "${skillName}" could not be resolved to a readable path${detail !== undefined ? ` (${detail})` : ""}`,
+      `UNRESOLVABLE_SKILL: mapped skill "${skillName}" could not be resolved to a readable path.` +
+        (attempts.length > 0
+          ? ` Attempts: ${attempts
+              .map(
+                (attempt) =>
+                  `${attempt.source}[${attempt.lookupKey}]` +
+                  `${attempt.path !== undefined ? ` -> ${attempt.path}` : ""}` +
+                  `: ${attempt.reason}` +
+                  `${attempt.detail !== undefined ? ` (${attempt.detail})` : ""}`,
+              )
+              .join("; ")}`
+          : " No skill sources were consulted."),
     );
     this.name = "UnresolvableSkillError";
     this.skillName = skillName;
+    this.attempts = attempts;
   }
 }
 
