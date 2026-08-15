@@ -3,6 +3,10 @@
  * Spec capability: `sdd-init-round`
  */
 
+import path from "node:path";
+
+import type { SkillPathMap } from "./skill-resolution.js";
+
 export interface InitDetectionResult {
   readonly stack: string | null;
   readonly testingCommand: string | null;
@@ -28,7 +32,59 @@ export interface ProjectConfig {
   readonly conventions: string | null;
   readonly testingSkill: string | null;
   readonly model?: string | null;
+  /**
+   * `skill name -> absolute SKILL.md path`, the map the configured skill
+   * resolver consults at compose time. Optional on the TYPE because configs
+   * persisted before this field existed read back without it; `mergeConfig`
+   * always writes at least `{}` going forward (migration contract).
+   */
+  readonly skillPaths?: SkillPathMap;
   readonly [key: string]: unknown;
+}
+
+/**
+ * A `skillPaths` value was not a usable `skill name -> absolute path` map.
+ *
+ * Thrown from `mergeConfig`, which runs BEFORE the config is persisted, so a
+ * malformed map never reaches the checkpoint. That ordering is the point: a
+ * persisted bad map would turn every later compose into an
+ * `UnresolvableSkillError` blaming a config value the operator never knowingly
+ * saved, and the fix would be an edit to a file they never saw written.
+ */
+export class InvalidSkillPathMapError extends Error {
+  readonly code = "INVALID_SKILL_PATH_MAP";
+  constructor(readonly detail: string) {
+    super(`INVALID_SKILL_PATH_MAP: ${detail}`);
+    this.name = "InvalidSkillPathMapError";
+  }
+}
+
+/**
+ * Validates a candidate `skillPaths` value and returns it as a `SkillPathMap`.
+ *
+ * Absoluteness is checked with `path.isAbsolute` — the SAME predicate the
+ * configured resolver uses to reject a mapped path
+ * (`src/infrastructure/skills/configured-skill-resolver.adapter.ts`). Using a
+ * different rule here would let a value pass validation and then be rejected
+ * at resolution time, which is the worst of both: persisted AND unusable.
+ */
+function validateSkillPathMap(candidate: unknown): SkillPathMap {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    throw new InvalidSkillPathMapError(`skillPaths must be an object mapping skill names to absolute paths, received ${Array.isArray(candidate) ? "an array" : typeof candidate}`);
+  }
+  const entries = Object.entries(candidate as Record<string, unknown>);
+  for (const [name, value] of entries) {
+    if (name.trim() === "") {
+      throw new InvalidSkillPathMapError("skillPaths contains an empty skill name; a name that cannot be looked up can never resolve");
+    }
+    if (typeof value !== "string" || value === "") {
+      throw new InvalidSkillPathMapError(`skillPaths["${name}"] must be a non-empty string path, received ${value === "" ? "an empty string" : typeof value}`);
+    }
+    if (!path.isAbsolute(value)) {
+      throw new InvalidSkillPathMapError(`skillPaths["${name}"] must be an absolute path; "${value}" is relative and skill paths are never resolved against the project root`);
+    }
+  }
+  return Object.fromEntries(entries) as SkillPathMap;
 }
 
 /**
@@ -169,6 +225,13 @@ export function mergeConfig(
   detected: InitDetectionResult,
   userAnswers: Partial<ProjectConfig> = {},
 ): ProjectConfig {
+  // Validate FIRST, before a single merged field is computed. `saveInitConfig`
+  // calls this before `writeCheckpoint`, so throwing here is what guarantees a
+  // malformed map never reaches the store (design scenario 5).
+  const mergedSkillPaths = userAnswers.skillPaths !== undefined
+    ? validateSkillPathMap(userAnswers.skillPaths)
+    : {};
+
   const mergedTestingSkill = userAnswers.testingSkill !== undefined
     ? userAnswers.testingSkill
     : (detected.testingSkill ?? null);
@@ -179,6 +242,9 @@ export function mergeConfig(
     strictTddSupport: userAnswers.strictTddSupport !== undefined ? userAnswers.strictTddSupport : detected.strictTddSupport,
     conventions: userAnswers.conventions !== undefined ? userAnswers.conventions : detected.conventions,
     testingSkill: mergedTestingSkill,
+    // Always written — an absent map persists as `{}` so a config read back by
+    // the resolver is never missing the key it looks up (migration contract).
+    skillPaths: mergedSkillPaths,
     ...(userAnswers.model !== undefined ? { model: userAnswers.model } : {}),
   };
 }

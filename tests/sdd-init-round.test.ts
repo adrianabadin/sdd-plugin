@@ -4,13 +4,16 @@
  */
 
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   detectProjectFacts,
   getInitQuestions,
   mergeConfig,
   shouldReopenConfig,
+  InvalidSkillPathMapError,
   type InitDetectionResult,
+  type ProjectConfig,
 } from "../src/domain/sdd/init-round.js";
 import {
   isProjectInitialized,
@@ -245,7 +248,79 @@ async function runTests(): Promise<void> {
   }
   console.log("  pass: IR-12 save config refused before detection has run");
 
-  console.log("\nAll 13 sdd-init-round (WU6) tests passed successfully!");
+  // Design scenario 5 (CR1) — `skillPaths` is a PERSISTED CONFIG CONTRACT, not
+  // an ad-hoc bag riding the index signature. Three properties are load-bearing
+  // for the resolver that reads it back:
+  //   1. it round-trips EXACTLY — the resolver stats what the operator wrote,
+  //      so any normalization here would resolve a path nobody declared;
+  //   2. a malformed map is rejected BEFORE anything is persisted — a
+  //      half-written config would fail every later compose with a diagnosis
+  //      pointing at a value the operator never intentionally saved;
+  //   3. its ABSENCE merges to `{}`, never `undefined` — configs written before
+  //      this field existed must read back as "declared nothing", which is a
+  //      resolvable `name-absent` attempt, not a crash on a missing key.
+  {
+    const detection: InitDetectionResult = {
+      stack: "typescript",
+      testingCommand: "npm test",
+      strictTddSupport: true,
+      conventions: "eslint",
+      testingSkill: null,
+      residuals: [],
+    };
+    // `path.resolve` is absolute on every platform — no hardcoded drive letter
+    // or leading slash, so the fixture is portable between Windows and POSIX.
+    const absoluteSkillPath = path.resolve("fixture-skills", "work-unit-commits", "SKILL.md");
+    const skillPaths = { "work-unit-commits": absoluteSkillPath };
+
+    const merged = mergeConfig(detection, { skillPaths });
+    assert.deepEqual(merged.skillPaths, skillPaths, "scenario 5: skillPaths round-trips exactly through mergeConfig");
+
+    const malformed: ReadonlyArray<{ readonly label: string; readonly value: unknown }> = [
+      { label: "non-string value", value: { "work-unit-commits": 42 } },
+      { label: "empty key", value: { "": absoluteSkillPath } },
+      { label: "non-absolute path", value: { "work-unit-commits": "fixture-skills/work-unit-commits/SKILL.md" } },
+    ];
+
+    for (const { label, value } of malformed) {
+      assert.throws(
+        () => mergeConfig(detection, { skillPaths: value } as unknown as Partial<ProjectConfig>),
+        InvalidSkillPathMapError,
+        `scenario 5: a ${label} is rejected by mergeConfig`,
+      );
+    }
+
+    // "Before any write" is the part that matters, so it is asserted against a
+    // store that ALREADY holds a good config: a rejected save must leave both
+    // the content and the version untouched.
+    const store = new MockArtifactStore();
+    const hash = "skill-paths-hash";
+    const savedConfig = await saveInitConfig(store, hash, detection, { skillPaths });
+    assert.deepEqual(savedConfig.skillPaths, skillPaths, "scenario 5: saved config carries the exact skillPaths map");
+    const before = await store.readCheckpoint(initConfigKey(hash));
+    assert.deepEqual(
+      (before?.content as ProjectConfig).skillPaths,
+      skillPaths,
+      "scenario 5: skillPaths reads back exactly from the init checkpoint",
+    );
+
+    for (const { label, value } of malformed) {
+      await assert.rejects(
+        () => saveInitConfig(store, hash, detection, { skillPaths: value } as unknown as Partial<ProjectConfig>),
+        InvalidSkillPathMapError,
+        `scenario 5: saveInitConfig rejects a ${label}`,
+      );
+      const after = await store.readCheckpoint(initConfigKey(hash));
+      assert.deepEqual(after, before, `scenario 5: a ${label} leaves the init checkpoint unmutated (content and version)`);
+    }
+
+    const withoutSkillPaths = mergeConfig(detection);
+    assert.ok("skillPaths" in withoutSkillPaths, "scenario 5: skillPaths key is present even when nothing was declared");
+    assert.deepEqual(withoutSkillPaths.skillPaths, {}, "scenario 5: absent skillPaths migrates to {}, never undefined");
+  }
+  console.log("  pass: scenario 5 skillPaths round-trips, rejects malformed maps before any write, migrates absent to {}");
+
+  console.log("\nAll 14 sdd-init-round (WU6 + CR1 scenario 5) tests passed successfully!");
 }
 
 runTests().catch((err) => {
