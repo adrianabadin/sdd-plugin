@@ -9,6 +9,9 @@ import path from "node:path";
 
 import { buildSddTools, type SddToolsDeps } from "../src/bootstrap/sdd-tools.js";
 import { canonicalizeProjectRoot } from "../src/domain/sdd/project-identity.js";
+import { SddChangeStateLockConflictError } from "../src/ports/sdd-artifact-store.port.js";
+import { UnresolvableSkillError } from "../src/domain/sdd/prompt-composition.js";
+import { STATIC_PHASE_SKILLS_MAP } from "../src/domain/sdd/prompt-composition.js";
 import { initConfigKey } from "../src/domain/sdd/sdd-keys.js";
 import type { SkillResolutionAttempt, SkillResolver } from "../src/domain/sdd/skill-resolution.js";
 import type { WorktreeFingerprint } from "../src/domain/sdd/worktree-fingerprint.js";
@@ -179,12 +182,14 @@ async function runTests(): Promise<void> {
   const fingerprints = [baseline, changed, baseline, baseline, baseline, probeFailed, baseline, changed];
   const projectRoot = tempDir;
   const initValidationRoot = path.join(tempDir, "init-validation");
+  const initSkillPathValidationRoot = path.join(tempDir, "init-skill-path-validation");
   const initReadbackRoot = path.join(tempDir, "init-readback");
   const initFingerprintRoot = path.join(tempDir, "init-fingerprint");
   const initProjectLockRoot = path.join(tempDir, "init-project-lock");
   const initWriteFailureRoot = path.join(tempDir, "init-write-failure");
   const sentinelSpoofRoot = path.join(tempDir, "sentinel-spoof");
   mkdirSync(initValidationRoot);
+  mkdirSync(initSkillPathValidationRoot);
   mkdirSync(initReadbackRoot);
   mkdirSync(initFingerprintRoot);
   mkdirSync(initProjectLockRoot);
@@ -595,14 +600,55 @@ async function runTests(): Promise<void> {
         detection: null,
       }),
       /detection must run before saving config/,
-      "config validation failure rejects while the init lock remains held",
+      "config validation failure rejects and releases the init lock",
     );
     const initValidationFailureStatus = await invoke<{ inFlightPhase: string | null }>(tools, "sdd_status", {
       projectRoot: initValidationRoot,
       changeName: "init-validation-failure",
       allIds: [],
     });
-    assert.equal(initValidationFailureStatus.inFlightPhase, "sdd-init", "config validation failure retains the init lock");
+    assert.equal(initValidationFailureStatus.inFlightPhase, null, "config validation failure releases the init lock");
+
+    // W-N2 save-config release observability: validation errors after both
+    // init locks are held must release both durable locks and drop ownership.
+    await invoke(tools, "sdd_compose_phase_prompt", {
+      projectRoot: initSkillPathValidationRoot,
+      changeName: "init-skill-path-validation",
+      phase: "sdd-init",
+      modelReference: "test/model",
+    });
+    await assert.rejects(
+      () => invoke(tools, "sdd_save_config", {
+        projectRoot: initSkillPathValidationRoot,
+        changeName: "init-skill-path-validation",
+        detection: initQuestions.detection,
+        userAnswers: { skillPaths: { "work-unit-commits": "relative/SKILL.md" } },
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "INVALID_SKILL_PATH_MAP");
+        return error instanceof Error && error.name === "InvalidSkillPathMapError";
+      },
+      "invalid skillPaths rejects with InvalidSkillPathMapError",
+    );
+    const invalidSkillPathUserState = await store.readChangeState(
+      initSkillPathValidationRoot,
+      "init-skill-path-validation",
+    );
+    const invalidSkillPathSentinelState = await store.readChangeState(
+      initSkillPathValidationRoot,
+      "__sdd_project_init_lock__",
+    );
+    assert.equal(invalidSkillPathUserState?.lock, undefined, "save-config validation clears the user change lock");
+    assert.equal(invalidSkillPathSentinelState?.lock, undefined, "save-config validation clears the project-init sentinel");
+    await assert.rejects(
+      () => invoke(tools, "sdd_save_config", {
+        projectRoot: initSkillPathValidationRoot,
+        changeName: "init-skill-path-validation",
+        detection: initQuestions.detection,
+      }),
+      (error: unknown) => error instanceof SddChangeStateLockConflictError,
+      "save-config validation drops both in-memory owner tokens",
+    );
 
     const configFaultStore = new ArtifactFaultStore(store);
     const configFaultTools = buildSddTools({
@@ -625,14 +671,14 @@ async function runTests(): Promise<void> {
         detection: initQuestions.detection,
       }),
       /SDD_INIT_CONFIG_READBACK_MISMATCH/,
-      "config readback mismatch rejects while the init lock remains held",
+      "config readback mismatch rejects and releases the init lock",
     );
     const initReadbackFailureStatus = await invoke<{ inFlightPhase: string | null }>(configFaultTools, "sdd_status", {
       projectRoot: initReadbackRoot,
       changeName: "init-readback-failure",
       allIds: [],
     });
-    assert.equal(initReadbackFailureStatus.inFlightPhase, "sdd-init", "config readback failure retains the init lock");
+    assert.equal(initReadbackFailureStatus.inFlightPhase, null, "config readback failure releases the init lock");
 
     const initFingerprints = [baseline, changed];
     const initFingerprintTools = buildSddTools({
@@ -903,14 +949,14 @@ async function runTests(): Promise<void> {
         detection: initQuestions.detection,
       }),
       /forced config checkpoint write failure/,
-      "thrown config checkpoint write retains the init lock",
+      "thrown config checkpoint write releases the init lock",
     );
     const initWriteFailureStatus = await invoke<{ inFlightPhase: string | null }>(initWriteFaultTools, "sdd_status", {
       projectRoot: initWriteFailureRoot,
       changeName: "init-write-failure",
       allIds: [],
     });
-    assert.equal(initWriteFailureStatus.inFlightPhase, "sdd-init", "thrown config write retains the init lock");
+    assert.equal(initWriteFailureStatus.inFlightPhase, null, "thrown config write releases the init lock");
 
     // Reviewer finding #1 — public-surface end-to-end. A crashed sdd-init
     // dispatch leaves the project-global init sentinel held by sdd-init
@@ -1352,12 +1398,186 @@ async function runTests(): Promise<void> {
       "the durable lock acquired by the config-failing compose does not survive the throw",
     );
     console.log("  pass: a root with no configured skillPaths fails diagnosably and releases the lock");
+
+    // C-R1 injected skill paths win (design scenario 1).
+    //
+    // The orchestrator can pin a specific skill file for THIS dispatch. The
+    // injection is not a hint layered on top of the config — it REPLACES the
+    // configured entry for every name it maps. Root A has BOTH names validly
+    // configured, so a leaked configured path here would not be a missing
+    // feature but a prompt that LIES: it would tell the executor to load a
+    // file the orchestrator deliberately overrode for this call.
+    const injectedWorkUnit = writeSkillFixture("injected-work-unit-commits");
+    const injectedChainedPr = writeSkillFixture("injected-chained-pr");
+    const injectedCompose = await invoke<{ prompt: string }>(configTools, "sdd_compose_phase_prompt", {
+      projectRoot: configRootA,
+      changeName: "injection-precedence-target",
+      phase: "sdd-tasks",
+      modelReference: "test/model",
+      skillPaths: {
+        "work-unit-commits": injectedWorkUnit,
+        "chained-pr": injectedChainedPr,
+      },
+    });
+    assert.ok(
+      injectedCompose.prompt.includes(injectedWorkUnit),
+      "the injected work-unit-commits path is the one baked into the prompt",
+    );
+    assert.ok(
+      injectedCompose.prompt.includes(injectedChainedPr),
+      "the injected chained-pr path is the one baked into the prompt",
+    );
+    assert.ok(
+      !injectedCompose.prompt.includes(rootAWorkUnit),
+      "root A's configured work-unit-commits path is fully displaced by the injection",
+    );
+    assert.ok(
+      !injectedCompose.prompt.includes(rootAChainedPr),
+      "root A's configured chained-pr path is fully displaced by the injection",
+    );
+
+    // A BAD injection is a hard stop, never a fallback. The configured entry
+    // for the same name is valid and would resolve — so if resolution fell
+    // through, this compose would succeed against a file the caller did not
+    // ask for and nobody would ever learn the injection was broken.
+    const brokenInjection = path.join(skillFixtureDir, "injected-but-absent.SKILL.md");
+    await assert.rejects(
+      () =>
+        invoke(configTools, "sdd_compose_phase_prompt", {
+          projectRoot: configRootA,
+          changeName: "injection-hard-stop-target",
+          phase: "sdd-apply",
+          modelReference: "test/model",
+          skillPaths: { "work-unit-commits": brokenInjection },
+        }),
+      (err: unknown) => {
+        const error = err as UnresolvableSkillError;
+        assert.match(error.message, /UNRESOLVABLE_SKILL/, "names the failure code");
+        assert.ok(
+          error.message.includes("orchestrator-injection"),
+          "names the injection as the source that failed, so the operator fixes the CALL and not the config",
+        );
+        assert.ok(error.message.includes(brokenInjection), "carries the exact injected path");
+        assert.ok(
+          !error.message.includes("project-config"),
+          "the valid configured entry was never consulted — no silent fallback",
+        );
+        assert.ok(
+          !error.message.includes(rootAWorkUnit),
+          "the configured path never appears: resolution hard-stopped before reaching it",
+        );
+        assert.equal(error.attempts.length, 1, "exactly one source was consulted before the hard stop");
+        return true;
+      },
+      "a broken injection fails loud instead of silently resolving the configured entry",
+    );
+    console.log("  pass: C-R1 injected skill paths win, and a broken injection hard-stops with no config fallback");
+
+    // W-N2 — a compose failure releases its durable lock, preserves the
+    // enriched original error, and reports secondary release failures.
+    const releaseFailureRoot = path.join(tempDir, "release-failure");
+    mkdirSync(releaseFailureRoot);
+    const releaseErrors: unknown[] = [];
+    const releaseFaultStore = new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === "releaseChangeStateLock") {
+          return async (...args: unknown[]) => {
+            await target.releaseChangeStateLock(
+              args[0] as string,
+              args[1] as string,
+              args[2] as string,
+              args[3] as number,
+            );
+            throw new Error("forced release failure");
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as unknown as SddChangeStateStorePort;
+    const releaseFaultTools = buildSddTools({
+      store,
+      changeStateStore: releaseFaultStore,
+      captureFingerprint: async () => baseline,
+      createSkillResolver: () => Object.assign(
+        (_skill: string): string | null => null,
+        {
+          attempts: (_skill: string): readonly SkillResolutionAttempt[] => [
+            { source: "test", lookupKey: _skill, reason: "name-absent" },
+          ],
+        },
+      ),
+      onLockReleaseError: (error) => releaseErrors.push(error),
+    }) as unknown as Record<string, unknown>;
+    await assert.rejects(
+      () => invoke(releaseFaultTools, "sdd_compose_phase_prompt", {
+        projectRoot: releaseFailureRoot,
+        changeName: "release-failure-target",
+        phase: "sdd-tasks",
+        modelReference: "test/model",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof UnresolvableSkillError, "the original compose error remains typed");
+        assert.equal((error as UnresolvableSkillError).code, "UNRESOLVABLE_SKILL");
+        assert.equal((error as UnresolvableSkillError).attempts.length, 1, "the original attempts remain intact");
+        return true;
+      },
+      "compose surfaces the original enriched skill-resolution error when release fails",
+    );
+    assert.equal(releaseErrors.length, 1, "the secondary release error is reported exactly once");
+    assert.match(String((releaseErrors[0] as Error).message), /forced release failure/);
+    const releaseFailureState = await store.readChangeState(releaseFailureRoot, "release-failure-target");
+    assert.equal(releaseFailureState?.lock, undefined, "the release-failure fixture has no durable lock after retry cleanup");
+
+    // The init sentinel is acquired before the user change. Temporarily adding
+    // a mandatory skill to the init phase gives this integration test a real
+    // compose-time UnresolvableSkillError while both locks are held.
+    const sentinelFailureRoot = path.join(tempDir, "sentinel-compose-failure");
+    mkdirSync(sentinelFailureRoot);
+    const initSkills = STATIC_PHASE_SKILLS_MAP["sdd-init"];
+    initSkills.push("work-unit-commits");
+    const sentinelFailureTools = buildSddTools({
+      store,
+      changeStateStore: store,
+      captureFingerprint: async () => baseline,
+      createSkillResolver: () => Object.assign(
+        (_skill: string): string | null => null,
+        { attempts: (): readonly SkillResolutionAttempt[] => [] },
+      ),
+    }) as unknown as Record<string, unknown>;
+    try {
+      await assert.rejects(
+        () => invoke(sentinelFailureTools, "sdd_compose_phase_prompt", {
+          projectRoot: sentinelFailureRoot,
+          changeName: "sentinel-compose-failure-target",
+          phase: "sdd-init",
+          modelReference: "test/model",
+        }),
+        (error: unknown) => error instanceof UnresolvableSkillError && error.code === "UNRESOLVABLE_SKILL",
+        "compose surfaces the enriched error while the init sentinel is held",
+      );
+      const failedUserState = await store.readChangeState(sentinelFailureRoot, "sentinel-compose-failure-target");
+      const failedSentinelState = await store.readChangeState(sentinelFailureRoot, "__sdd_project_init_lock__");
+      assert.equal(failedUserState?.lock, undefined, "failed init compose releases the user change lock");
+      assert.equal(failedSentinelState?.lock, undefined, "failed init compose releases the project-init sentinel");
+    } finally {
+      initSkills.pop();
+    }
+
     configClient.close();
 
     console.log("All sdd-tools integration tests passed.");
   } finally {
     client.close();
-    rmSync(tempDir, { recursive: true, force: true });
+    // Best-effort: when an assertion throws mid-suite, the SQLite clients
+    // opened after it never reach their `close()`, and Windows then refuses
+    // to unlink the temp tree. An EPERM raised HERE would replace the real
+    // assertion error and report a cleanup problem instead of the failure
+    // that actually happened. The OS reclaims its own temp directory.
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn(`  warn: temp dir cleanup skipped (${String(cleanupError)})`);
+    }
   }
 }
 

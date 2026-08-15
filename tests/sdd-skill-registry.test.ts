@@ -34,6 +34,7 @@ import path from "node:path";
 import { UnresolvableSkillError } from "../src/domain/sdd/prompt-composition.js";
 import type { SkillResolutionAttempt } from "../src/domain/sdd/skill-resolution.js";
 import { createConfiguredSkillResolver } from "../src/infrastructure/skills/configured-skill-resolver.adapter.js";
+import { checkSkillResolutionReadiness } from "../src/domain/sdd/skill-resolution.js";
 
 const SKILL = "work-unit-commits";
 const CONFIG_KEY = "skillPaths";
@@ -185,6 +186,24 @@ async function runTests(): Promise<void> {
       assert.ok(message.includes("name-absent"), "the message carries the name-absent reason");
       assert.ok(message.includes("missing"), "the message carries the missing reason");
       console.log("  pass: UnresolvableSkillError names every source, lookup key, path and reason");
+    }
+
+    // ---------------------------------------------------------------- test 5
+    // Startup readiness is informational and absence-tolerant: a fresh project
+    // has no configured map yet, but every missing mandatory name is reported.
+    {
+      const readiness = checkSkillResolutionReadiness(
+        projectRoot,
+        undefined,
+        ["work-unit-commits", "chained-pr"],
+      );
+      assert.equal(readiness.ready, false, "missing startup skill paths are not ready");
+      assert.deepEqual(
+        readiness.attempts,
+        ["work-unit-commits", "chained-pr"],
+        "readiness reports each missing skill name exactly once",
+      );
+      console.log("  pass: startup readiness is absence-tolerant and reports exact missing names");
     }
   } finally {
     rmSync(tempDir, { recursive: true, force: true });

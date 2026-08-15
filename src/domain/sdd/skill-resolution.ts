@@ -52,3 +52,26 @@ export interface SkillResolutionAttempt {
 export type SkillResolver = ((skillName: string) => string | null) & {
   readonly attempts: (skillName: string) => readonly SkillResolutionAttempt[];
 };
+
+export interface SkillResolutionReadiness {
+  readonly ready: boolean;
+  /** Mandatory skill names absent from the configured map. */
+  readonly attempts: readonly string[];
+}
+
+/**
+ * Checks the startup-visible portion of skill resolution without throwing.
+ *
+ * Startup is only an informational signal: the per-call resolver remains the
+ * authority for readable files and detailed diagnostics. `configured` is
+ * optional because a project may not have completed initialization yet.
+ */
+export function checkSkillResolutionReadiness(
+  projectRoot: string,
+  configured: SkillPathMap | null | undefined,
+  requiredNames: readonly string[],
+): SkillResolutionReadiness {
+  void projectRoot;
+  const missing = requiredNames.filter((name) => typeof configured?.[name] !== "string" || configured[name] === "");
+  return { ready: missing.length === 0, attempts: missing };
+}

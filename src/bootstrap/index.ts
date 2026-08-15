@@ -38,7 +38,11 @@ import { getOrCreateModelConfigRegistry } from "../infrastructure/runtime/model-
 import { getGlobalQuarantineStore } from "../infrastructure/runtime/quarantine-store.js";
 import { SqliteMcpToolClient } from "../infrastructure/pmc/sqlite-mcp-tool-client.adapter.js";
 import { PmcSddArtifactStoreAdapter } from "../infrastructure/pmc/pmc-sdd-artifact-store.adapter.js";
-import { createProjectConfigSkillResolverFactory } from "../infrastructure/skills/project-config-skill-resolver.factory.js";
+import {
+  createProjectConfigSkillResolverFactory,
+  readProjectConfigSkillPaths,
+} from "../infrastructure/skills/project-config-skill-resolver.factory.js";
+import { checkSkillResolutionReadiness } from "../domain/sdd/skill-resolution.js";
 import { buildSddTools } from "./sdd-tools.js";
 
 /**
@@ -227,6 +231,18 @@ export const SddPlugin = async (ctx: SddPluginContext) => {
   try {
     const sddMcpClient = new SqliteMcpToolClient();
     const sddStore = new PmcSddArtifactStoreAdapter(sddMcpClient);
+    const startupRoot = directory || process.cwd();
+    const configuredSkillPaths = await readProjectConfigSkillPaths(sddStore, startupRoot);
+    const skillReadiness = checkSkillResolutionReadiness(
+      startupRoot,
+      configuredSkillPaths,
+      ["work-unit-commits", "chained-pr"],
+    );
+    if (!skillReadiness.ready) {
+      logger.info(
+        `SDD_SKILL_RESOLUTION_NOT_CONFIGURED (missing: ${skillReadiness.attempts.join(", ")})`,
+      );
+    }
     // Skill resolution reads each project's OWN persisted init config
     // (`sdd-init/{hash}.skillPaths`), which `sdd_save_config` validates before
     // it can be written. Without a real resolver here the default in
