@@ -36,12 +36,6 @@ export {
 } from "./model-route-host-naming.js";
 
 export {
-  OPENCODE_COMPAT_VERSION,
-  OpenCodeCompatError,
-  assertOpenCodeCompatible,
-} from "./opencode-compat.js";
-
-export {
   RouteWhitelist,
   loadRouteWhitelist,
   DEFAULT_ROUTES_CONFIG_RELATIVE,

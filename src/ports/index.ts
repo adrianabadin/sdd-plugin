@@ -5,5 +5,4 @@ export type { ModelDetailQueryPort, PersistedModelDetail } from "./model-detail-
 export type { ModelDetailWritePort, SaveModelDetailCommand } from "./model-detail-write.port.js";
 export type { QuarantineWritePort, SetQuarantineCommand } from "./quarantine-write.port.js";
 export type { QuarantineQueryPort, PersistedQuarantine } from "./quarantine-query.port.js";
-export type { ModelRouteCatalogPort, RouteCandidate } from "./model-route-catalog.port.js";
 
