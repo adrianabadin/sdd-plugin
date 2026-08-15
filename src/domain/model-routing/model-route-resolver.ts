@@ -2,9 +2,9 @@
  * Ordered identity resolution for deterministic model routing.
  *
  * Tiers (highest priority first):
- *   1. exact canonical "provider/model"           -> port.existsCanonical
+ *   1. exact canonical "provider/model"           -> whitelist.existsCanonical
  *   2. explicit alias lookup                      -> in-memory alias map
- *   3. unique normalized fuzzy match              -> port.searchNormalized
+ *   3. unique normalized fuzzy match              -> whitelist.searchNormalized
  *
  * Failure modes (fail-loud, no silent substitution):
  *   - 0 candidates -> RouteUnknownError
@@ -12,11 +12,15 @@
  *
  * Identity NEVER consults benchmark/pricing/subscription metadata
  * (authoritative design c96148ae-04f9-468f-9ca7-e14456dc1513).
+ *
+ * Rev 2: the resolver is now backed by the static `RouteWhitelist`
+ * (loaded from `routes.json`); no port, no I/O, no async await.
+ * The `async` signature is preserved for call-site compatibility.
  */
 
 import type { CanonicalModelId } from "./canonical-model-id.js";
 import { makeCanonicalModelId, parseCanonicalModelId } from "./canonical-model-id.js";
-import type { ModelRouteCatalogPort, RouteCandidate } from "../../ports/model-route-catalog.port.js";
+import { RouteWhitelist, type WhitelistedRoute } from "./route-whitelist.js";
 
 export class RouteUnknownError extends Error {
   readonly reference: string;
@@ -29,11 +33,11 @@ export class RouteUnknownError extends Error {
 
 export class RouteAmbiguousError extends Error {
   readonly reference: string;
-  readonly candidates: ReadonlyArray<RouteCandidate>;
-  constructor(reference: string, candidates: ReadonlyArray<RouteCandidate>) {
+  readonly candidates: ReadonlyArray<{ providerId: string; modelId: string }>;
+  constructor(reference: string, candidates: ReadonlyArray<{ providerId: string; modelId: string }>) {
     super(
       `Model route "${reference}" is ambiguous across ${candidates.length} candidates: ` +
-        candidates.map((c) => `${c.providerId}/${c.modelId} (${c.modelName})`).join(", "),
+        candidates.map((c) => `${c.providerId}/${c.modelId}`).join(", "),
     );
     this.name = "RouteAmbiguousError";
     this.reference = reference;
@@ -44,11 +48,11 @@ export class RouteAmbiguousError extends Error {
 export type ModelRouteAliasTable = ReadonlyMap<string, string>;
 
 export class ModelRouteResolver {
-  /** Upper bound from the design contract; the adapter enforces it at SQL level. */
+  /** Upper bound from the design contract. */
   static readonly MAX_SEARCH_LIMIT = 8;
 
   constructor(
-    private readonly catalog: ModelRouteCatalogPort,
+    private readonly whitelist: RouteWhitelist,
     private readonly aliases: ModelRouteAliasTable = new Map<string, string>(),
   ) {}
 
@@ -63,7 +67,7 @@ export class ModelRouteResolver {
       const providerId = reference.slice(0, slashIdx);
       const modelId = reference.slice(slashIdx + 1);
       if (providerId.length > 0 && modelId.length > 0) {
-        if (await this.catalog.existsCanonical(providerId, modelId)) {
+        if (this.whitelist.existsCanonical(providerId, modelId)) {
           return makeCanonicalModelId(providerId, modelId);
         }
       }
@@ -78,7 +82,10 @@ export class ModelRouteResolver {
     }
 
     // Tier 3: unique normalized.
-    const candidates = await this.catalog.searchNormalized(reference, ModelRouteResolver.MAX_SEARCH_LIMIT);
+    const candidates: ReadonlyArray<WhitelistedRoute> = this.whitelist.searchNormalized(
+      reference,
+      ModelRouteResolver.MAX_SEARCH_LIMIT,
+    );
     if (candidates.length === 1) {
       const only = candidates[0]!;
       return makeCanonicalModelId(only.providerId, only.modelId);
@@ -86,11 +93,7 @@ export class ModelRouteResolver {
     if (candidates.length === 0) {
       throw new RouteUnknownError(reference);
     }
-    const sorted = [...candidates].sort((a, b) => {
-      if (a.providerId !== b.providerId) return a.providerId < b.providerId ? -1 : 1;
-      if (a.modelId !== b.modelId) return a.modelId < b.modelId ? -1 : 1;
-      return 0;
-    });
+    const sorted = candidates.map((c) => ({ providerId: c.providerId, modelId: c.modelId }));
     throw new RouteAmbiguousError(reference, sorted);
   }
 }

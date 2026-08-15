@@ -25,18 +25,18 @@ async function run(): Promise<void> {
 
   // 1) model + effort trigger: returned.
   {
-    const out = parseNaturalModelIntent("usá opus 5 con esfuerzo high");
+    const out = parseNaturalModelIntent("usando opus 5 con esfuerzo high");
     assert.ok(out !== null, "parser returns a value when both model and effort trigger");
-    assert.equal(out!.modelRef, "opus 5", "model reference is extracted");
+    assert.equal(out!.rawReference, "opus 5", "model reference is extracted");
     assert.equal(out!.effort, "high", "effort is extracted");
-    console.log("  pass: model + esfuerzo high -> { modelRef, effort: high }");
+    console.log("  pass: model + esfuerzo high -> { rawReference, effort: high }");
   }
 
   // 2) model only, no effort -> default low.
   {
     const out = parseNaturalModelIntent("usando glm 5.2");
     assert.ok(out !== null, "parser returns a value when only a model trigger is present");
-    assert.equal(out!.modelRef, "glm 5.2", "model reference is extracted");
+    assert.equal(out!.rawReference, "glm 5.2", "model reference is extracted");
     assert.equal(out!.effort, "low", "effort defaults to low when no effort trigger");
     console.log("  pass: model only -> effort defaults to low");
   }
@@ -55,9 +55,9 @@ async function run(): Promise<void> {
   {
     const out = parseNaturalModelIntent("effort medium usando terra");
     assert.ok(out !== null, "parser returns a value when effort precedes the model trigger");
-    assert.equal(out!.modelRef, "terra", "model reference is extracted regardless of order");
+    assert.equal(out!.rawReference, "terra", "model reference is extracted regardless of order");
     assert.equal(out!.effort, "medium", "effort is extracted regardless of order");
-    console.log("  pass: effort medium usando terra -> { modelRef: 'terra', effort: 'medium' }");
+    console.log("  pass: effort medium usando terra -> { rawReference: 'terra', effort: 'medium' }");
   }
 
   // 5) effort-only phrase, no model trigger -> no routing (null).

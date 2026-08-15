@@ -4,6 +4,9 @@
  *  - Detects only four trigger spans, matched case- and diacritic-insensitively
  *    over a separate NFKC + Spanish-folded view: `usando <ref>`,
  *    `con el modelo <ref>`, `using model <ref>`, `@model <ref>`.
+ *  - Also detects an optional effort level: `esfuerzo <level>`, `con esfuerzo <level>`,
+ *    `effort <level>`. The allowed vocabulary is the canonical three:
+ *    `low | medium | high`. Anything else -> `EffortLevelUnknownError`.
  *  - The original prompt bytes are NEVER mutated; the raw extracted reference
  *    is taken from the original prompt at the post-trigger position mapped
  *    via a stable character-offset index.
@@ -12,9 +15,14 @@
  *  - More than one trigger span => NaturalIntentAmbiguousError (fail closed).
  *  - Empty / whitespace-only / control-bearing / > 256-byte reference
  *    => NaturalIntentMalformedError (fail closed).
+ *  - Effort is OPTIONAL. No model trigger span => null, regardless of effort
+ *    phrases present in the prompt (effort only pairs with a model intent).
  *  - No LLM classifier, no fuzzy match, no inspection of `args.model`.
  *    Authoritative design: 41aa141d-1bbf-4cd0-aba7-63f82f83fbd6.
+ *    Rev 2 adds effort parsing per docs/plans/2026-08-14-model-routing-whitelist-only.md.
  */
+
+import type { NormalizedEffortLevel } from "./effort-levels.js";
 
 export const NATURAL_INTENT_REFERENCE_MAX_BYTES = 256;
 
@@ -27,6 +35,8 @@ export type NaturalIntentTrigger =
 export interface NaturalModelIntent {
   readonly trigger: NaturalIntentTrigger;
   readonly rawReference: string;
+  /** Normalized effort level, always present when a model intent is detected. */
+  readonly effort: NormalizedEffortLevel;
 }
 
 export type NaturalIntentMalformedCode =
@@ -62,9 +72,28 @@ export class NaturalIntentAmbiguousError extends Error {
   }
 }
 
+export class EffortLevelUnknownError extends Error {
+  readonly level: string;
+  readonly input: string;
+  constructor(level: string, input: string) {
+    super(
+      `natural-intent effort level "${level}" is unknown; expected one of: low | medium | high.`,
+    );
+    this.name = "EffortLevelUnknownError";
+    this.level = level;
+    this.input = input;
+  }
+}
+
 interface TriggerMatch {
   readonly trigger: NaturalIntentTrigger;
   readonly endInFolded: number;
+}
+
+interface EffortMatch {
+  readonly endInFolded: number;
+  readonly startInFolded: number;
+  readonly raw: string;
 }
 
 const SPANISH_DIACRITIC_FOLDS: Readonly<Record<string, string>> = Object.freeze({
@@ -90,6 +119,18 @@ const TRIGGER_DEFINITIONS: ReadonlyArray<{
   { trigger: "using model", pattern: "\\busing model\\b" },
   { trigger: "@model", pattern: "@model\\b" },
 ];
+
+const EFFORT_TRIGGER_PATTERNS: ReadonlyArray<RegExp> = [
+  /\bcon\s+esfuerzo\s+(\S+)/gi,
+  /\besfuerzo\s+(\S+)/gi,
+  /\beffort\s+(\S+)/gi,
+];
+
+const EFFORT_LEVEL_WORDS: Readonly<Record<string, NormalizedEffortLevel>> = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+};
 
 /**
  * Build a separate detection view: NFKC + Spanish diacritic fold, with a
@@ -151,6 +192,24 @@ function findTriggerMatches(folded: string): ReadonlyArray<TriggerMatch> {
   return matches;
 }
 
+/**
+ * Find the FIRST effort trigger in the folded view. We deliberately
+ * accept the first match only — a prompt that mentions multiple effort
+ * levels is a misuse of the contract and we don't try to disambiguate.
+ * The captured word is the raw token (with trailing punctuation trimmed).
+ */
+function findEffortMatch(folded: string): EffortMatch | null {
+  for (const pattern of EFFORT_TRIGGER_PATTERNS) {
+    pattern.lastIndex = 0;
+    const m = pattern.exec(folded);
+    if (m !== null) {
+      const raw = (m[1] ?? "").replace(/[.,;:!?()\[\]{}"']+$/g, "");
+      return { startInFolded: m.index, endInFolded: m.index + m[0].length, raw };
+    }
+  }
+  return null;
+}
+
 function containsControlCharacter(value: string): { code: number } | null {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
@@ -164,11 +223,17 @@ function containsControlCharacter(value: string): { code: number } | null {
 /**
  * Parse a prompt for bounded natural-intent model selection.
  *
- * @returns A `NaturalModelIntent` when exactly one trigger span is present,
- *          `null` when no trigger is present (legacy pass-through).
- * @throws {NaturalIntentAmbiguousError} when more than one trigger span is present.
- * @throws {NaturalIntentMalformedError} when the extracted reference is empty,
- *         exceeds the UTF-8 byte limit, or contains a control character.
+ * @returns A `NaturalModelIntent` when exactly one model trigger span is
+ *          present (effort defaults to `"low"` when no effort trigger is
+ *          found), `null` when no model trigger is present
+ *          (legacy pass-through, even if an effort-only phrase exists).
+ * @throws {NaturalIntentAmbiguousError} when more than one model trigger
+ *         span is present.
+ * @throws {NaturalIntentMalformedError} when the extracted reference is
+ *         empty, exceeds the UTF-8 byte limit, or contains a control
+ *         character.
+ * @throws {EffortLevelUnknownError} when the effort trigger captures a
+ *         word that is not one of `low | medium | high`.
  */
 export function parseNaturalModelIntent(input: string): NaturalModelIntent | null {
   if (typeof input !== "string") return null;
@@ -190,7 +255,24 @@ export function parseNaturalModelIntent(input: string): NaturalModelIntent | nul
   ) {
     referenceStartInOriginal += 1;
   }
+
+  // The model reference ends at the end of the prompt, trimmed, unless
+  // an effort trigger appears in the post-trigger region — in which case
+  // the reference ends at the start of the effort phrase (so `usando
+  // opus 5 con esfuerzo high` yields reference "opus 5", not "opus 5
+  // con esfuerzo high"). This is the boundary contract: the reference is
+  // the model identity; the effort phrase is metadata that pairs with it.
   let referenceEndInOriginal = input.length;
+  for (const pattern of EFFORT_TRIGGER_PATTERNS) {
+    pattern.lastIndex = referenceStartInFolded;
+    const m = pattern.exec(folded);
+    if (m !== null) {
+      const endInFolded = m.index;
+      const endInOriginal = foldedToOriginal[endInFolded] ?? input.length;
+      if (endInOriginal < referenceEndInOriginal) referenceEndInOriginal = endInOriginal;
+      break;
+    }
+  }
   while (
     referenceEndInOriginal > referenceStartInOriginal &&
     isWhitespaceChar(input.charCodeAt(referenceEndInOriginal - 1))
@@ -225,5 +307,19 @@ export function parseNaturalModelIntent(input: string): NaturalModelIntent | nul
     );
   }
 
-  return { trigger: only.trigger, rawReference };
+  // Effort extraction. The effort trigger may appear anywhere in the prompt;
+  // we look for the first one. If found, the captured word must be one of
+  // the three canonical levels; anything else -> EffortLevelUnknownError.
+  const effortMatch = findEffortMatch(folded);
+  let effort: NormalizedEffortLevel = "low";
+  if (effortMatch !== null) {
+    const word = effortMatch.raw.toLowerCase();
+    const level = EFFORT_LEVEL_WORDS[word];
+    if (level === undefined) {
+      throw new EffortLevelUnknownError(effortMatch.raw, input);
+    }
+    effort = level;
+  }
+
+  return { trigger: only.trigger, rawReference, effort };
 }
