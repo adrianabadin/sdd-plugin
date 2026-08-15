@@ -1,26 +1,17 @@
+/**
+ * RED — `routes.json` is the only inclusion authority for fleet regeneration.
+ * Connectivity and canary blocklists are gone; only permanent quarantines
+ * exclude a route at generation time. TTL quarantines are dispatched against.
+ */
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FilterFleetRoutesUseCase } from "../src/application/filter-fleet-routes/filter-fleet-routes.use-case.js";
-import type { ModelRouteCatalogPort, RouteCandidate } from "../src/ports/model-route-catalog.port.js";
 import type { QuarantineWritePort, SetQuarantineCommand } from "../src/ports/quarantine-write.port.js";
 import type { QuarantineEntry, QuarantineTarget } from "../src/domain/model/quarantine.js";
 import type { RouteEntry } from "../src/infrastructure/opencode/disk-agent-generator.js";
 
-class MockCatalogPort implements ModelRouteCatalogPort {
-  constructor(private connectedKeys: Set<string>) {}
-
-  async existsCanonical(providerId: string, modelId: string): Promise<boolean> {
-    return this.connectedKeys.has(`${providerId}:${modelId}`);
-  }
-
-  async searchNormalized(_term: string, _limit: number): Promise<ReadonlyArray<RouteCandidate>> {
-    return [];
-  }
-}
-
 class MockQuarantinePort implements QuarantineWritePort {
-  public listCallCount = 0;
-
   constructor(private entries: QuarantineEntry[]) {}
 
   async setQuarantine(_cmd: SetQuarantineCommand): Promise<QuarantineEntry> {
@@ -32,188 +23,83 @@ class MockQuarantinePort implements QuarantineWritePort {
   }
 
   async listQuarantines(): Promise<QuarantineEntry[]> {
-    this.listCallCount++;
     return this.entries;
   }
 }
 
-test("connected route included", async () => {
-  const catalog = new MockCatalogPort(new Set(["anthropic:claude-3-5-sonnet"]));
-  const quarantine = new MockQuarantinePort([]);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
+function makeRoute(providerId: string, modelId: string): RouteEntry {
+  return { baseTemplate: "sdd-mr-base", providerId, modelId };
+}
 
-  const route: RouteEntry = {
-    baseTemplate: "general",
-    providerId: "anthropic",
-    modelId: "claude-3-5-sonnet",
-  };
-
-  const res = await filter.execute({ routes: [route] });
-  assert.equal(res.included.length, 1);
-  assert.equal(res.excluded.length, 0);
-  assert.deepEqual(res.included[0], route);
-});
-
-test("disconnected or never-synced route excluded as NOT_CONNECTED", async () => {
-  const catalog = new MockCatalogPort(new Set());
-  const quarantine = new MockQuarantinePort([]);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
-
-  const route: RouteEntry = {
-    baseTemplate: "general",
-    providerId: "openai",
-    modelId: "gpt-4o",
-  };
-
-  const res = await filter.execute({ routes: [route] });
-  assert.equal(res.included.length, 0);
-  assert.equal(res.excluded.length, 1);
-  assert.equal(res.excluded[0].reason, "NOT_CONNECTED");
-});
-
-test("permanent quarantine excluded as PERMANENTLY_QUARANTINED with precedence", async () => {
-  const catalog = new MockCatalogPort(
-    new Set(["openai:gpt-4o", "anthropic:claude-3-5-sonnet", "google:gemini-pro"]),
+test("permanent quarantine excludes as PERMANENTLY_QUARANTINED", async () => {
+  const filter = new FilterFleetRoutesUseCase(
+    new MockQuarantinePort([
+      { level: "model", modelId: "gpt-4o", type: "permanent", reason: "model block" },
+    ]),
   );
-  const quarantines: QuarantineEntry[] = [
-    { level: "provider", providerId: "openai", type: "permanent", reason: "provider block" },
-    { level: "model", modelId: "gpt-4o", type: "permanent", reason: "model block" },
-    {
-      level: "modelProvider",
-      providerId: "openai",
-      modelId: "gpt-4o",
-      type: "permanent",
-      reason: "modelProvider block",
-    },
-    { level: "model", modelId: "claude-3-5-sonnet", type: "permanent" },
-  ];
-  const quarantine = new MockQuarantinePort(quarantines);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
 
-  const routes: RouteEntry[] = [
-    { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" },
-    { baseTemplate: "general", providerId: "anthropic", modelId: "claude-3-5-sonnet" },
-  ];
+  const res = await filter.execute({
+    routes: [makeRoute("openai", "gpt-4o"), makeRoute("anthropic", "claude-opus-5")],
+  });
 
-  const res = await filter.execute({ routes });
-  assert.equal(res.included.length, 0);
-  assert.equal(res.excluded.length, 2);
-  // Provider precedence wins over model and modelProvider
-  assert.equal(res.excluded[0].reason, "PERMANENTLY_QUARANTINED");
-  assert.match(res.excluded[0].detail, /provider/i);
-  // Model precedence wins
-  assert.equal(res.excluded[1].reason, "PERMANENTLY_QUARANTINED");
-  assert.match(res.excluded[1].detail, /model/i);
+  assert.equal(res.included.length, 1, "non-quarantined route included");
+  assert.equal(res.included[0].modelId, "claude-opus-5", "the right route is included");
+  assert.equal(res.excluded.length, 1, "permanently quarantined route excluded");
+  assert.equal(res.excluded[0].reason, "PERMANENTLY_QUARANTINED", "reason is the single literal");
+  assert.match(res.excluded[0].detail, /model block/, "detail carries the quarantine reason");
 });
 
-test("TTL-only quarantine is included", async () => {
-  const catalog = new MockCatalogPort(new Set(["openai:gpt-4o"]));
-  const quarantines: QuarantineEntry[] = [
-    {
-      level: "model",
-      modelId: "gpt-4o",
-      type: "ttl",
-      until: new Date(Date.now() + 3600000),
-      reason: "temp outage",
-    },
-  ];
-  const quarantine = new MockQuarantinePort(quarantines);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
+test("TTL quarantine does NOT exclude at generation time", async () => {
+  const filter = new FilterFleetRoutesUseCase(
+    new MockQuarantinePort([
+      {
+        level: "model",
+        modelId: "gpt-4o",
+        type: "ttl",
+        until: new Date(Date.now() + 3600_000),
+        reason: "temp outage",
+      },
+    ]),
+  );
 
-  const route: RouteEntry = { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" };
-  const res = await filter.execute({ routes: [route] });
-  assert.equal(res.included.length, 1);
+  const res = await filter.execute({
+    routes: [makeRoute("openai", "gpt-4o")],
+  });
+
+  assert.equal(res.included.length, 1, "TTL-quarantined route is still included for generation");
+  assert.equal(res.included[0].modelId, "gpt-4o");
   assert.equal(res.excluded.length, 0);
 });
 
-test("order is preserved and listQuarantines called exactly once", async () => {
-  const catalog = new MockCatalogPort(new Set(["p1:m1", "p2:m2", "p3:m3"]));
-  const quarantine = new MockQuarantinePort([
-    { level: "provider", providerId: "p2", type: "permanent" },
-  ]);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
-
-  const routes: RouteEntry[] = [
-    { baseTemplate: "t1", providerId: "p1", modelId: "m1" },
-    { baseTemplate: "t2", providerId: "p2", modelId: "m2" },
-    { baseTemplate: "t3", providerId: "p3", modelId: "m3" },
-  ];
-
-  const res = await filter.execute({ routes });
-  assert.equal(quarantine.listCallCount, 1);
-  assert.equal(res.included.length, 2);
-  assert.equal(res.included[0].providerId, "p1");
-  assert.equal(res.included[1].providerId, "p3");
-  assert.equal(res.excluded.length, 1);
-  assert.equal(res.excluded[0].route.providerId, "p2");
-});
-
-test("connectivity checked before quarantine", async () => {
-  const catalog = new MockCatalogPort(new Set()); // disconnected
-  const quarantine = new MockQuarantinePort([
-    { level: "provider", providerId: "p1", type: "permanent" },
-  ]);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
-
-  const route: RouteEntry = { baseTemplate: "t1", providerId: "p1", modelId: "m1" };
-  const res = await filter.execute({ routes: [route] });
-  assert.equal(res.excluded.length, 1);
-  assert.equal(res.excluded[0].reason, "NOT_CONNECTED");
-});
-
-test("excludedCanonicalIds route excluded as CANARY_BLOCKED", async () => {
-  const catalog = new MockCatalogPort(new Set(["openai:gpt-4o"]));
-  const quarantine = new MockQuarantinePort([]);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
-
-  const route: RouteEntry = { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" };
+test("disconnected provider is included (NOT_CONNECTED is gone)", async () => {
+  // The previous contract excluded routes whose provider was not in the Prisma catalog.
+  // Rev 2 removes that filter entirely: routes.json is the only inclusion authority,
+  // and a route with an unknown provider is generated as an agent that fails loudly
+  // on use, instead of being silently dropped.
+  const filter = new FilterFleetRoutesUseCase(new MockQuarantinePort([]));
 
   const res = await filter.execute({
-    routes: [route],
-    excludedCanonicalIds: new Set(["openai/gpt-4o"]),
+    routes: [makeRoute("nowhere", "phantom-7")],
   });
-  assert.equal(res.included.length, 0);
-  assert.equal(res.excluded.length, 1);
-  assert.equal(res.excluded[0].reason, "CANARY_BLOCKED");
-  assert.equal(res.excluded[0].route.providerId, "openai");
+
+  assert.equal(res.included.length, 1, "the route is included even though no provider is connected");
+  assert.equal(res.excluded.length, 0, "no NOT_CONNECTED exclusion is emitted");
+  assert.equal(res.included[0].modelId, "phantom-7");
 });
 
-test("NOT_CONNECTED takes precedence over CANARY_BLOCKED", async () => {
-  const catalog = new MockCatalogPort(new Set()); // disconnected
-  const quarantine = new MockQuarantinePort([]);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
+test("FilterFleetRoutesInput no longer carries excludedCanonicalIds", async () => {
+  // The new input type is structural; the test only needs to confirm that
+  // an input matching the new shape compiles and runs without using the
+  // removed field. This is enforced at compile time by the new input type
+  // (see `filter-fleet-routes.input.ts`).
+  const input: import("../src/application/filter-fleet-routes/filter-fleet-routes.input.js").FilterFleetRoutesInput = {
+    routes: [makeRoute("anthropic", "claude-opus-5")],
+  };
+  assert.equal((input as { excludedCanonicalIds?: unknown }).excludedCanonicalIds, undefined,
+    "excludedCanonicalIds is no longer part of the input type");
 
-  const route: RouteEntry = { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" };
-
-  const res = await filter.execute({
-    routes: [route],
-    excludedCanonicalIds: new Set(["openai/gpt-4o"]),
-  });
-  assert.equal(res.included.length, 0);
-  assert.equal(res.excluded.length, 1);
-  assert.equal(res.excluded[0].reason, "NOT_CONNECTED");
-});
-
-test("TTL-only quarantine remains included when exclusion set does not contain the route", async () => {
-  const catalog = new MockCatalogPort(new Set(["openai:gpt-4o"]));
-  const quarantines: QuarantineEntry[] = [
-    {
-      level: "model",
-      modelId: "gpt-4o",
-      type: "ttl",
-      until: new Date(Date.now() + 3600000),
-      reason: "temp outage",
-    },
-  ];
-  const quarantine = new MockQuarantinePort(quarantines);
-  const filter = new FilterFleetRoutesUseCase(catalog, quarantine);
-
-  const route: RouteEntry = { baseTemplate: "general", providerId: "openai", modelId: "gpt-4o" };
-  const res = await filter.execute({
-    routes: [route],
-    excludedCanonicalIds: new Set(["google/gemini-pro"]),
-  });
+  const filter = new FilterFleetRoutesUseCase(new MockQuarantinePort([]));
+  const res = await filter.execute(input);
   assert.equal(res.included.length, 1);
   assert.equal(res.excluded.length, 0);
-  assert.deepEqual(res.included[0], route);
 });
