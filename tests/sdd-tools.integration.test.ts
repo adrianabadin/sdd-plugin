@@ -9,6 +9,7 @@ import path from "node:path";
 
 import { buildSddTools, type SddToolsDeps } from "../src/bootstrap/sdd-tools.js";
 import { canonicalizeProjectRoot } from "../src/domain/sdd/project-identity.js";
+import type { UnresolvableSkillError } from "../src/domain/sdd/prompt-composition.js";
 import { initConfigKey } from "../src/domain/sdd/sdd-keys.js";
 import type { SkillResolutionAttempt, SkillResolver } from "../src/domain/sdd/skill-resolution.js";
 import type { WorktreeFingerprint } from "../src/domain/sdd/worktree-fingerprint.js";
@@ -1352,12 +1353,95 @@ async function runTests(): Promise<void> {
       "the durable lock acquired by the config-failing compose does not survive the throw",
     );
     console.log("  pass: a root with no configured skillPaths fails diagnosably and releases the lock");
+
+    // C-R1 injected skill paths win (design scenario 1).
+    //
+    // The orchestrator can pin a specific skill file for THIS dispatch. The
+    // injection is not a hint layered on top of the config — it REPLACES the
+    // configured entry for every name it maps. Root A has BOTH names validly
+    // configured, so a leaked configured path here would not be a missing
+    // feature but a prompt that LIES: it would tell the executor to load a
+    // file the orchestrator deliberately overrode for this call.
+    const injectedWorkUnit = writeSkillFixture("injected-work-unit-commits");
+    const injectedChainedPr = writeSkillFixture("injected-chained-pr");
+    const injectedCompose = await invoke<{ prompt: string }>(configTools, "sdd_compose_phase_prompt", {
+      projectRoot: configRootA,
+      changeName: "injection-precedence-target",
+      phase: "sdd-tasks",
+      modelReference: "test/model",
+      skillPaths: {
+        "work-unit-commits": injectedWorkUnit,
+        "chained-pr": injectedChainedPr,
+      },
+    });
+    assert.ok(
+      injectedCompose.prompt.includes(injectedWorkUnit),
+      "the injected work-unit-commits path is the one baked into the prompt",
+    );
+    assert.ok(
+      injectedCompose.prompt.includes(injectedChainedPr),
+      "the injected chained-pr path is the one baked into the prompt",
+    );
+    assert.ok(
+      !injectedCompose.prompt.includes(rootAWorkUnit),
+      "root A's configured work-unit-commits path is fully displaced by the injection",
+    );
+    assert.ok(
+      !injectedCompose.prompt.includes(rootAChainedPr),
+      "root A's configured chained-pr path is fully displaced by the injection",
+    );
+
+    // A BAD injection is a hard stop, never a fallback. The configured entry
+    // for the same name is valid and would resolve — so if resolution fell
+    // through, this compose would succeed against a file the caller did not
+    // ask for and nobody would ever learn the injection was broken.
+    const brokenInjection = path.join(skillFixtureDir, "injected-but-absent.SKILL.md");
+    await assert.rejects(
+      () =>
+        invoke(configTools, "sdd_compose_phase_prompt", {
+          projectRoot: configRootA,
+          changeName: "injection-hard-stop-target",
+          phase: "sdd-apply",
+          modelReference: "test/model",
+          skillPaths: { "work-unit-commits": brokenInjection },
+        }),
+      (err: unknown) => {
+        const error = err as UnresolvableSkillError;
+        assert.match(error.message, /UNRESOLVABLE_SKILL/, "names the failure code");
+        assert.ok(
+          error.message.includes("orchestrator-injection"),
+          "names the injection as the source that failed, so the operator fixes the CALL and not the config",
+        );
+        assert.ok(error.message.includes(brokenInjection), "carries the exact injected path");
+        assert.ok(
+          !error.message.includes("project-config"),
+          "the valid configured entry was never consulted — no silent fallback",
+        );
+        assert.ok(
+          !error.message.includes(rootAWorkUnit),
+          "the configured path never appears: resolution hard-stopped before reaching it",
+        );
+        assert.equal(error.attempts.length, 1, "exactly one source was consulted before the hard stop");
+        return true;
+      },
+      "a broken injection fails loud instead of silently resolving the configured entry",
+    );
+    console.log("  pass: C-R1 injected skill paths win, and a broken injection hard-stops with no config fallback");
     configClient.close();
 
     console.log("All sdd-tools integration tests passed.");
   } finally {
     client.close();
-    rmSync(tempDir, { recursive: true, force: true });
+    // Best-effort: when an assertion throws mid-suite, the SQLite clients
+    // opened after it never reach their `close()`, and Windows then refuses
+    // to unlink the temp tree. An EPERM raised HERE would replace the real
+    // assertion error and report a cleanup problem instead of the failure
+    // that actually happened. The OS reclaims its own temp directory.
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn(`  warn: temp dir cleanup skipped (${String(cleanupError)})`);
+    }
   }
 }
 

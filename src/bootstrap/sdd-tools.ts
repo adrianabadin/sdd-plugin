@@ -92,7 +92,7 @@ import {
 } from "../application/sdd/checkpoint.js";
 import { canonicalizeProjectRoot } from "../domain/sdd/project-identity.js";
 import { UnresolvableSkillError } from "../domain/sdd/prompt-composition.js";
-import type { SkillResolver } from "../domain/sdd/skill-resolution.js";
+import type { SkillPathMap, SkillResolver } from "../domain/sdd/skill-resolution.js";
 import { changeArtifactKey, initConfigKey } from "../domain/sdd/sdd-keys.js";
 import {
   compareWorktreeFingerprints,
@@ -125,8 +125,16 @@ export interface SddToolsDeps {
    * a bare "skill X is unresolvable", leaving the operator to bisect config by
    * hand — the diagnosis is folded into `UnresolvableSkillError` (PC-6), so it
    * is part of the contract rather than a nicety.
+   *
+   * `injectedSkillPaths` carries the compose call's own `skillPaths` argument
+   * (C-R1). It is a per-CALL override that outranks the project config: the
+   * orchestrator pinning a skill file for one dispatch must not be overruled
+   * by whatever that root happens to have persisted.
    */
-  readonly createSkillResolver?: (projectRoot: string) => SkillResolver | Promise<SkillResolver>;
+  readonly createSkillResolver?: (
+    projectRoot: string,
+    injectedSkillPaths?: SkillPathMap | null,
+  ) => SkillResolver | Promise<SkillResolver>;
   /**
    * Observability for the best-effort lock release on compose failure (W-N2):
    * a release failure is reported here instead of vanishing silently. The
@@ -245,6 +253,12 @@ const sddComposePhasePrompt: ToolDefinition = tool({
       projectRoot: tool.schema.string().describe("Absolute path to the project root."),
       changeName: tool.schema.string().describe("The change slug to compose."),
       modelReference: tool.schema.string().describe("Canonical model reference (provider/model)."),
+      skillPaths: tool.schema
+        .record(tool.schema.string(), tool.schema.string())
+        .optional()
+        .describe(
+          "Optional per-call skill name -> absolute SKILL.md path overrides (C-R1). Outranks the project config for the names it maps; an entry that does not resolve fails the compose instead of falling back to the configured path.",
+        ),
     },
     async execute(args) {
       assertPublicChangeName(args.changeName);
@@ -386,7 +400,10 @@ const sddComposePhasePrompt: ToolDefinition = tool({
       // never a startup-time capture. Awaited because the production factory
       // reads that root's own init checkpoint to build the resolver; `await`
       // on a synchronous factory's return value is a no-op.
-      const skillResolver = await deps.createSkillResolver?.(args.projectRoot);
+      // C-R1 — the call's own `skillPaths` travel with the root, so the
+      // resolver's precedence walk (injection first, hard stop on a bad
+      // injection) is decided per dispatch rather than per process.
+      const skillResolver = await deps.createSkillResolver?.(args.projectRoot, args.skillPaths ?? null);
       try {
         result = composePhasePrompt({
           phase: args.phase,

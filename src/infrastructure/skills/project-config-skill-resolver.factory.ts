@@ -61,15 +61,46 @@ function readSkillPaths(content: unknown): SkillPathMap {
   );
 }
 
+/**
+ * Reads a root's persisted `skillPaths` map, or `{}` when the root has no init
+ * checkpoint at all. Exported because the startup readiness signal
+ * (`checkSkillResolutionReadiness`) has to inspect exactly the same map the
+ * per-call resolver will consult — deriving it twice is how the two drift and
+ * the startup log starts describing a config nobody resolves against.
+ */
+export async function readProjectConfigSkillPaths(
+  store: Pick<SddArtifactStorePort, "readCheckpoint">,
+  projectRoot: string,
+): Promise<SkillPathMap> {
+  const record = await store.readCheckpoint(
+    initConfigKey(canonicalizeProjectRoot(projectRoot).projectRootHash),
+  );
+  return readSkillPaths(record?.content);
+}
+
+/**
+ * Reported as the `source` for the per-call injected map. Not the generic
+ * `injected`: when this entry is the one that failed, the repair is to fix the
+ * ORCHESTRATOR'S CALL, not any file on disk — and an operator grepping their
+ * config for a path that was never in it wastes the whole diagnosis.
+ */
+const ORCHESTRATOR_INJECTION_SOURCE = "orchestrator-injection";
+
 export function createProjectConfigSkillResolverFactory(
   store: Pick<SddArtifactStorePort, "readCheckpoint">,
-): (projectRoot: string) => Promise<SkillResolver> {
-  return async (projectRoot: string): Promise<SkillResolver> => {
+): (projectRoot: string, injected?: SkillPathMap | null) => Promise<SkillResolver> {
+  return async (projectRoot: string, injected?: SkillPathMap | null): Promise<SkillResolver> => {
     const configKey = initConfigKey(canonicalizeProjectRoot(projectRoot).projectRootHash);
-    const record = await store.readCheckpoint(configKey);
     return createConfiguredSkillResolver({
       projectRoot,
-      configured: readSkillPaths(record?.content),
+      // Per-call injection outranks the persisted config, and a BAD injection
+      // is a hard stop inside the adapter — the config is not consulted as a
+      // fallback, because resolving to a file the caller explicitly overrode
+      // would make the composed prompt lie about what it told the executor to
+      // load.
+      injected: injected ?? null,
+      injectedSource: ORCHESTRATOR_INJECTION_SOURCE,
+      configured: await readProjectConfigSkillPaths(store, projectRoot),
       // Qualifying the lookup key with the checkpoint key is what makes the
       // failure actionable across roots: `sdd-init/<hash>.skillPaths.<skill>`
       // names the exact record and field to edit, not just a field name that
