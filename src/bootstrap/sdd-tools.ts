@@ -92,6 +92,7 @@ import {
 } from "../application/sdd/checkpoint.js";
 import { canonicalizeProjectRoot } from "../domain/sdd/project-identity.js";
 import { UnresolvableSkillError } from "../domain/sdd/prompt-composition.js";
+import type { SkillResolutionAttempt } from "../domain/sdd/skill-resolution.js";
 import { changeArtifactKey, initConfigKey } from "../domain/sdd/sdd-keys.js";
 import {
   compareWorktreeFingerprints,
@@ -114,13 +115,13 @@ export interface SddToolsDeps {
    * Creates the skill resolver for the PER-CALL `args.projectRoot` — invoked
    * on every tool call, so resolution follows the module's documented
    * invariant (per-call root, never a startup-time capture; W-N1). The
-   * returned resolver may optionally expose `searchedRegistries()`
-   * diagnostics, which are folded into `UnresolvableSkillError` so a compose
-   * failure names the registry paths and per-path reasons (C-R1). Null from
-   * the resolver means "unresolvable" (PC-6).
+   * returned resolver may optionally expose `attempts()` diagnostics, which
+   * are folded into `UnresolvableSkillError` so a compose failure names every
+   * skill source, its lookup key, and why it failed. Null from the resolver
+   * means "unresolvable" (PC-6).
    */
   readonly createSkillResolver?: (projectRoot: string) => ((skillName: string) => string | null) & {
-    readonly searchedRegistries?: () => readonly { readonly path: string; readonly status: string }[];
+    readonly attempts?: (skillName: string) => readonly SkillResolutionAttempt[];
   };
   /**
    * Observability for the best-effort lock release on compose failure (W-N2):
@@ -435,17 +436,14 @@ const sddComposePhasePrompt: ToolDefinition = tool({
             deps.onLockReleaseError?.(releaseError);
           }
         }
-        // C-R1 diagnosability — fold the resolver's registry-search
-        // diagnostics into the UnresolvableSkillError so the caller sees
-        // WHICH registries were searched and why each failed, not just the
-        // skill name.
-        if (composeError instanceof UnresolvableSkillError) {
-          const searched = skillResolver?.searchedRegistries?.();
-          if (searched !== undefined && searched.length > 0) {
-            throw new UnresolvableSkillError(
-              composeError.skillName,
-              `searched registries: ${searched.map((entry) => `${entry.path} (${entry.status})`).join("; ")}`,
-            );
+        // Diagnosability — the application layer already attaches the
+        // resolver's attempts, so this fold only covers the case where a
+        // resolver exposes diagnostics the composition layer could not reach
+        // (e.g. a resolver injected without `attempts` at compose time).
+        if (composeError instanceof UnresolvableSkillError && composeError.attempts.length === 0) {
+          const attempts = skillResolver?.attempts?.(composeError.skillName);
+          if (attempts !== undefined && attempts.length > 0) {
+            throw new UnresolvableSkillError(composeError.skillName, attempts);
           }
         }
         throw composeError;

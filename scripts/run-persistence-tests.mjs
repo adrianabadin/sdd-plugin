@@ -56,6 +56,7 @@ const SUITE = [
 { file: "tests/sqlite-contention.test.ts" },
   { file: "tests/sqlite-mcp-tool-client-occ.test.ts" },
   { file: "tests/sdd-change-state.test.ts" },
+  { file: "tests/sdd-skill-registry.test.ts" },
   { file: "tests/sdd-tools.integration.test.ts" },
   { file: "tests/persistence-guard.test.ts" },
 ];

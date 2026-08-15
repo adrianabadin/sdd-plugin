@@ -1,240 +1,196 @@
 /**
- * C-N1 remediation (part A2) + C-R1 resolution (Option B) — real
- * skillResolver wiring for `composePhasePrompt`.
+ * Skill resolution contract — `createConfiguredSkillResolver` (design scenario 3).
  *
- * Design §5.1 (docs/superpowers/specs/2026-08-01-sdd-phase-agents-design.md,
- * lines 417-418): mapped skill names are "resolved to absolute paths against
- * the project's skill registry at compose time." Neither the design nor the
- * SPEC pins down the registry's file location or exact table format — the
- * NARROWEST reading that satisfies PC-6 (an unresolvable mapped skill fails
- * composition, see docs/superpowers/specs/2026-08-02-sdd-phase-agents-TASKS.md:177)
- * is implemented here: parse the `.atl/skill-registry.md` markdown table
- * convention this repository actually uses (see the registry's own "Loading
- * protocol" section), and return null — never fabricate a path — for any
- * name absent from the table.
+ * The previous incarnation of this file tested a markdown-table registry parser
+ * (`.atl/skill-registry.md` + a committed default). That design made resolution
+ * depend on a file format nobody declares and on a machine-local, gitignored
+ * artifact. It is replaced here by DECLARED SOURCES: an in-process `injected`
+ * map and a `configured` map lifted out of the project config under `configKey`.
  *
- * C-R1 (Option B): the registry is no longer a single gitignored file that
- * only exists on the author's machine. The resolver searches, in order:
- *   1. `<projectRoot>/.atl/skill-registry.md` — machine-local, written by
- *      `gentle-ai skill-registry refresh`; authoritative when present.
- *   2. the committed default `config/sdd/default-skill-registry.md` shipped
- *      with the plugin (overridable in tests via options.defaultRegistryPath).
- * If NO candidate is readable, the resolver throws SkillRegistryUnavailableError
- * naming every searched path and why it failed (missing vs unreadable) —
- * "no registry at all" and "name absent from a readable registry" are
- * distinguishable failures (W-N3). If a registry was read but the name is
- * absent, the resolver returns null so composePhasePrompt raises
- * UnresolvableSkillError (PC-6 stays reachable).
+ * The contract this file pins down is the FAILURE DIAGNOSIS, because that is
+ * what an operator actually needs when a compose call dies:
+ *   - `name-absent`  — the source never mapped this skill name at all.
+ *   - `missing`      — the source mapped it, but nothing exists at that path (ENOENT).
+ *   - `unreadable`   — the source mapped it, but the path is not a readable file
+ *                      (a directory, a relative path, an access failure).
+ * `path` is present exactly when a source mapped the name, and absent otherwise —
+ * so "we never had a path" and "we had a path and it was bad" are never conflated.
+ *
+ * Precedence: `injected` wins. If the injected entry EXISTS but fails validation
+ * that is a hard stop — `configured` is not consulted — because a caller that
+ * deliberately injected a path is stating intent, and silently falling through to
+ * a different file would resolve the prompt against a skill the caller did not ask
+ * for.
+ *
+ * Windows note: the "unreadable" conditions here are built portably (a directory
+ * where a file is expected, and a relative path). No chmod/permission assumptions.
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { resolveSkillPathFromRegistry } from "../src/domain/sdd/skill-registry.js";
-import {
-  createSkillRegistryResolver,
-  defaultSkillRegistryPath,
-  SkillRegistryUnavailableError,
-} from "../src/infrastructure/skills/skill-registry-resolver.adapter.js";
+import { UnresolvableSkillError } from "../src/domain/sdd/prompt-composition.js";
+import type { SkillResolutionAttempt } from "../src/domain/sdd/skill-resolution.js";
+import { createConfiguredSkillResolver } from "../src/infrastructure/skills/configured-skill-resolver.adapter.js";
 
-const SAMPLE_REGISTRY_MARKDOWN = `# Skill Registry — sample
-
-## Skills
-
-| Skill | Trigger / description | Scope | Path |
-| --- | --- | --- | --- |
-| \`work-unit-commits\` | Plan commits as reviewable work units. | user | \`C:\\Users\\aabad\\.config\\opencode\\skills\\work-unit-commits\\SKILL.md\` |
-| \`chained-pr\` | Trigger: PRs over 400 lines, stacked PRs. | user | \`C:\\Users\\aabad\\.config\\opencode\\skills\\chained-pr\\SKILL.md\` |
-
-## Loading protocol
-
-1. Match task context against the Trigger / description column.
-`;
-
-const DEFAULT_FALLBACK_MARKDOWN = `# Skill Registry — committed default fallback
-
-## Skills
-
-| Skill | Trigger / description | Scope | Path |
-| --- | --- | --- | --- |
-| \`work-unit-commits\` | Plan commits as reviewable work units. | user | \`D:\\committed-default\\work-unit-commits\\SKILL.md\` |
-| \`chained-pr\` | Trigger: PRs over 400 lines, stacked PRs. | user | \`D:\\committed-default\\chained-pr\\SKILL.md\` |
-`;
-
-const EMPTY_TABLE_MARKDOWN = `# Skill Registry — empty
-
-## Skills
-
-| Skill | Trigger / description | Scope | Path |
-| --- | --- | --- | --- |
-`;
+const SKILL = "work-unit-commits";
+const CONFIG_KEY = "skillPaths";
 
 async function runTests(): Promise<void> {
-  console.log("--- sdd-skill-registry (C-N1 remediation + C-R1 Option B, RED-first) ---");
+  console.log("--- sdd-skill-resolution (design scenario 3, RED-first) ---");
 
-  // Pure parser: resolves a known skill name to its Path cell.
-  assert.equal(
-    resolveSkillPathFromRegistry(SAMPLE_REGISTRY_MARKDOWN, "work-unit-commits"),
-    "C:\\Users\\aabad\\.config\\opencode\\skills\\work-unit-commits\\SKILL.md",
-    "resolves a mapped skill name to its registry Path cell",
-  );
-  console.log("  pass: resolves a known skill name from the registry table");
+  const tempDir = mkdtempSync(path.join(tmpdir(), "sdd-skill-resolution-"));
+  const projectRoot = path.join(tempDir, "project");
+  mkdirSync(projectRoot, { recursive: true });
 
-  assert.equal(
-    resolveSkillPathFromRegistry(SAMPLE_REGISTRY_MARKDOWN, "chained-pr"),
-    "C:\\Users\\aabad\\.config\\opencode\\skills\\chained-pr\\SKILL.md",
-    "resolves the second mapped skill name",
-  );
-  console.log("  pass: resolves a second known skill name from the registry table");
+  const realSkillPath = path.join(tempDir, "real-skill", "SKILL.md");
+  mkdirSync(path.dirname(realSkillPath), { recursive: true });
+  writeFileSync(realSkillPath, "# a real skill file\n", "utf8");
 
-  // PC-6 stays reachable: an unknown skill name resolves to null, never a
-  // fabricated path.
-  assert.equal(
-    resolveSkillPathFromRegistry(SAMPLE_REGISTRY_MARKDOWN, "does-not-exist"),
-    null,
-    "an unmapped skill name resolves to null, not a guessed path",
-  );
-  console.log("  pass: an unmapped skill name resolves to null (PC-6 stays reachable)");
-
-  // The header row and separator row must never be mistaken for skill rows.
-  assert.equal(
-    resolveSkillPathFromRegistry(SAMPLE_REGISTRY_MARKDOWN, "Skill"),
-    null,
-    "the header row's 'Skill' cell is never treated as a skill name",
-  );
-  console.log("  pass: the table header/separator rows are not misparsed as skill entries");
-
-  const tempDir = mkdtempSync(path.join(tmpdir(), "sdd-skill-registry-"));
   try {
-    // Infra adapter: reads a real file from disk and resolves through it.
-    const registryDir = path.join(tempDir, "with-registry", ".atl");
-    mkdirSync(registryDir, { recursive: true });
-    writeFileSync(path.join(registryDir, "skill-registry.md"), SAMPLE_REGISTRY_MARKDOWN, "utf8");
+    // ---------------------------------------------------------------- test 1
+    // Name absent from BOTH declared sources: every source is reported, each
+    // with its own lookup key, and `path` is omitted (there never was one).
+    {
+      const resolver = createConfiguredSkillResolver({
+        projectRoot,
+        injected: {},
+        configured: {},
+        configKey: CONFIG_KEY,
+      });
 
-    const resolverWithRegistry = createSkillRegistryResolver(path.join(tempDir, "with-registry"));
-    assert.equal(
-      resolverWithRegistry("work-unit-commits"),
-      "C:\\Users\\aabad\\.config\\opencode\\skills\\work-unit-commits\\SKILL.md",
-      "the fs-backed resolver reads the real registry file and resolves a known name",
-    );
-    console.log("  pass: fs-backed resolver reads a real .atl/skill-registry.md and resolves a known name");
+      assert.equal(resolver(SKILL), null, "an unmapped name resolves to null, never a fabricated path");
 
-    assert.equal(
-      resolverWithRegistry("does-not-exist"),
-      null,
-      "the fs-backed resolver returns null for an unmapped name",
-    );
-    console.log("  pass: fs-backed resolver returns null for an unmapped name");
+      const attempts = resolver.attempts(SKILL);
+      assert.equal(attempts.length, 2, "both declared sources are reported");
+      assert.deepEqual(
+        attempts[0],
+        { source: "injected", lookupKey: SKILL, reason: "name-absent" },
+        "the injected attempt names its source and lookup key, and omits `path`",
+      );
+      assert.deepEqual(
+        attempts[1],
+        { source: "configured", lookupKey: `${CONFIG_KEY}.${SKILL}`, reason: "name-absent" },
+        "the configured attempt's lookup key is qualified by the config key, and omits `path`",
+      );
+      console.log("  pass: name absent from both sources -> two `name-absent` attempts, no `path`");
+    }
 
-    // C-R1 Option B: the committed default fallback is used when the
-    // machine-local .atl registry is absent.
-    const fallbackPath = path.join(tempDir, "committed-default.md");
-    writeFileSync(fallbackPath, DEFAULT_FALLBACK_MARKDOWN, "utf8");
-    const fallbackResolver = createSkillRegistryResolver(path.join(tempDir, "without-registry"), {
-      defaultRegistryPath: fallbackPath,
-    });
-    assert.equal(
-      fallbackResolver("work-unit-commits"),
-      "D:\\committed-default\\work-unit-commits\\SKILL.md",
-      "a missing .atl registry falls back to the committed default registry",
-    );
-    console.log("  pass: missing .atl registry falls back to the committed default");
+    // ---------------------------------------------------------------- test 2
+    // Mapped, but nothing is there (ENOENT) -> `missing`, carrying the path.
+    {
+      const missingPath = path.join(tempDir, "no-such-dir", "SKILL.md");
+      const resolver = createConfiguredSkillResolver({
+        projectRoot,
+        injected: {},
+        configured: { [SKILL]: missingPath },
+        configKey: CONFIG_KEY,
+      });
 
-    const fallbackSearch = fallbackResolver.searchedRegistries();
-    assert.equal(fallbackSearch.length, 2, "the search reports both candidates");
-    assert.equal(fallbackSearch[0]?.status, "missing", "the .atl candidate is reported missing");
-    assert.equal(fallbackSearch[1]?.status, "ok", "the default candidate is reported readable");
-    console.log("  pass: searchedRegistries reports missing external + ok default");
+      assert.equal(resolver(SKILL), null, "a mapped-but-absent file resolves to null");
 
-    // The machine-local registry wins over the committed default when both exist.
-    const externalWinsResolver = createSkillRegistryResolver(path.join(tempDir, "with-registry"), {
-      defaultRegistryPath: fallbackPath,
-    });
-    assert.equal(
-      externalWinsResolver("work-unit-commits"),
-      "C:\\Users\\aabad\\.config\\opencode\\skills\\work-unit-commits\\SKILL.md",
-      "the machine-local .atl registry is authoritative over the committed default",
-    );
-    console.log("  pass: machine-local .atl registry wins over the committed default");
+      const attempts = resolver.attempts(SKILL);
+      assert.equal(attempts.length, 2, "the absent injected source is still reported before the failure");
+      assert.equal(attempts[0]?.reason, "name-absent", "injected had no entry");
+      assert.equal(attempts[1]?.source, "configured");
+      assert.equal(attempts[1]?.lookupKey, `${CONFIG_KEY}.${SKILL}`);
+      assert.equal(attempts[1]?.reason, "missing", "ENOENT is `missing`, not `unreadable`");
+      assert.equal(attempts[1]?.path, missingPath, "the failing attempt carries the exact mapped path");
+      console.log("  pass: mapped path with ENOENT -> `missing` + exact path");
+    }
 
-    // W-N3: no readable registry at all is a distinct, diagnosable failure —
-    // it throws, naming every searched path and the reason for each.
-    const missingDefault = path.join(tempDir, "no-such-default.md");
-    const unavailableResolver = createSkillRegistryResolver(path.join(tempDir, "without-registry"), {
-      defaultRegistryPath: missingDefault,
-    });
-    assert.throws(
-      () => unavailableResolver("work-unit-commits"),
-      (err: unknown) => {
-        assert.ok(err instanceof SkillRegistryUnavailableError, "throws SkillRegistryUnavailableError");
-        assert.equal((err as SkillRegistryUnavailableError).code, "SKILL_REGISTRY_UNAVAILABLE");
-        assert.match((err as Error).message, /without-registry/, "message names the .atl candidate path");
-        assert.match((err as Error).message, /no-such-default\.md/, "message names the default candidate path");
-        assert.match((err as Error).message, /missing/, "message reports the missing reason");
-        return true;
-      },
-      "no readable registry throws a diagnosable SkillRegistryUnavailableError",
-    );
-    console.log("  pass: no readable registry throws with both paths and reasons");
+    // ---------------------------------------------------------------- test 3
+    // Mapped to something that is not a readable file -> `unreadable`, carrying
+    // the path AND a populated detail. Also pins the injected-wins hard stop.
+    {
+      const directoryPath = path.join(tempDir, "a-directory");
+      mkdirSync(directoryPath, { recursive: true });
 
-    // W-N3: unreadable and missing are distinguishable to the caller.
-    const unreadableRoot = path.join(tempDir, "unreadable-registry", ".atl", "skill-registry.md");
-    mkdirSync(unreadableRoot, { recursive: true }); // a directory where the file should be
-    const unreadableResolver = createSkillRegistryResolver(path.join(tempDir, "unreadable-registry"), {
-      defaultRegistryPath: missingDefault,
-    });
-    assert.throws(
-      () => unreadableResolver("work-unit-commits"),
-      (err: unknown) => {
-        assert.ok(err instanceof SkillRegistryUnavailableError);
-        const search = (err as SkillRegistryUnavailableError).search;
-        assert.equal(search[0]?.status, "unreadable", "a non-readable registry file is 'unreadable', not 'missing'");
-        assert.equal(search[1]?.status, "missing", "the absent default is still 'missing'");
-        return true;
-      },
-      "unreadable and missing registries are reported distinctly",
-    );
-    console.log("  pass: unreadable vs missing registry statuses are distinguishable");
+      // Control: with injected absent, this configured entry DOES resolve — so
+      // the short-circuit asserted below is a real short-circuit, not a resolver
+      // that simply never resolves anything.
+      const controlResolver = createConfiguredSkillResolver({
+        projectRoot,
+        injected: {},
+        configured: { [SKILL]: realSkillPath },
+        configKey: CONFIG_KEY,
+      });
+      assert.equal(controlResolver(SKILL), realSkillPath, "a valid configured entry resolves to its absolute path");
 
-    // Name absent from a READABLE registry is still null (PC-6), not a throw —
-    // and the diagnostics show the registry itself was fine.
-    const emptyRoot = path.join(tempDir, "empty-registry", ".atl");
-    mkdirSync(emptyRoot, { recursive: true });
-    writeFileSync(path.join(emptyRoot, "skill-registry.md"), EMPTY_TABLE_MARKDOWN, "utf8");
-    const emptyResolver = createSkillRegistryResolver(path.join(tempDir, "empty-registry"), {
-      defaultRegistryPath: missingDefault,
-    });
-    assert.equal(
-      emptyResolver("work-unit-commits"),
-      null,
-      "a name absent from a readable registry resolves to null (PC-6), never throws",
-    );
-    assert.equal(emptyResolver.searchedRegistries()[0]?.status, "ok", "the readable registry is reported ok");
-    console.log("  pass: name absent from a readable registry is null with ok diagnostics");
+      const resolver = createConfiguredSkillResolver({
+        projectRoot,
+        injected: { [SKILL]: directoryPath },
+        configured: { [SKILL]: realSkillPath },
+        configKey: CONFIG_KEY,
+      });
 
-    // Declared, enforced registry contract (C-R1 fix requirement 3): the
-    // committed default shipped with the plugin MUST exist and MUST map the
-    // mandatory skills of the two phases that have them (sdd-tasks:
-    // work-unit-commits + chained-pr; sdd-apply: work-unit-commits).
-    const shippedDefault = defaultSkillRegistryPath();
-    assert.match(shippedDefault, /config[\\/]sdd[\\/]default-skill-registry\.md$/, "the default lives under config/sdd");
-    const shippedMarkdown = readFileSync(shippedDefault, "utf8");
-    assert.ok(
-      resolveSkillPathFromRegistry(shippedMarkdown, "work-unit-commits") !== null,
-      "the committed default registry maps work-unit-commits",
-    );
-    assert.ok(
-      resolveSkillPathFromRegistry(shippedMarkdown, "chained-pr") !== null,
-      "the committed default registry maps chained-pr",
-    );
-    console.log("  pass: the committed default registry exists and maps both mandatory skills");
+      assert.equal(
+        resolver(SKILL),
+        null,
+        "an injected entry that fails validation is a hard stop — `configured` is never consulted",
+      );
+
+      const attempts = resolver.attempts(SKILL);
+      assert.equal(attempts.length, 1, "resolution stopped at the failing injected source");
+      assert.equal(attempts[0]?.source, "injected");
+      assert.equal(attempts[0]?.lookupKey, SKILL);
+      assert.equal(attempts[0]?.reason, "unreadable", "a directory where a file was expected is `unreadable`");
+      assert.equal(attempts[0]?.path, directoryPath, "the failing attempt carries the exact mapped path");
+      assert.ok((attempts[0]?.detail ?? "").length > 0, "`unreadable` populates `detail` with why it failed");
+
+      // A relative path is likewise `unreadable`: resolution is never performed
+      // relative to the project root.
+      const relativeResolver = createConfiguredSkillResolver({
+        projectRoot,
+        injected: {},
+        configured: { [SKILL]: path.join("relative", "SKILL.md") },
+        configKey: CONFIG_KEY,
+      });
+      assert.equal(relativeResolver(SKILL), null, "a relative mapped path resolves to null");
+      const relativeAttempts = relativeResolver.attempts(SKILL);
+      assert.equal(relativeAttempts[1]?.reason, "unreadable", "a relative path is `unreadable`, not `missing`");
+      assert.ok((relativeAttempts[1]?.detail ?? "").length > 0, "the relative-path failure explains itself");
+      console.log("  pass: directory / relative path -> `unreadable` + exact path + detail (injected short-circuits)");
+    }
+
+    // ---------------------------------------------------------------- test 4
+    // The error a caller actually reads must name EVERY source, its lookup key,
+    // the path when present, and the reason.
+    {
+      const mappedPath = path.join(tempDir, "no-such-dir", "SKILL.md");
+      const attempts: readonly SkillResolutionAttempt[] = [
+        { source: "injected", lookupKey: SKILL, reason: "name-absent" },
+        {
+          source: "configured",
+          lookupKey: `${CONFIG_KEY}.${SKILL}`,
+          path: mappedPath,
+          reason: "missing",
+          detail: "ENOENT",
+        },
+      ];
+      const error = new UnresolvableSkillError(SKILL, attempts);
+
+      assert.equal(error.code, "UNRESOLVABLE_SKILL");
+      assert.equal(error.skillName, SKILL);
+      assert.deepEqual(error.attempts, attempts, "the error carries the attempts for programmatic inspection");
+
+      const { message } = error;
+      assert.ok(message.includes(SKILL), "the message names the skill");
+      assert.ok(message.includes("injected"), "the message names the injected source");
+      assert.ok(message.includes("configured"), "the message names the configured source");
+      assert.ok(message.includes(`${CONFIG_KEY}.${SKILL}`), "the message carries the configured lookup key");
+      assert.ok(message.includes(mappedPath), "the message carries the path of the source that had one");
+      assert.ok(message.includes("name-absent"), "the message carries the name-absent reason");
+      assert.ok(message.includes("missing"), "the message carries the missing reason");
+      console.log("  pass: UnresolvableSkillError names every source, lookup key, path and reason");
+    }
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
 
-  console.log("All sdd-skill-registry tests passed.");
+  console.log("All sdd-skill-resolution tests passed.");
 }
 
 runTests().catch((err) => { console.error("Test failed:", err); process.exit(1); });
