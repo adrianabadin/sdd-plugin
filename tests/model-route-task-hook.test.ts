@@ -26,7 +26,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -111,7 +111,7 @@ function makeFixture(tmp: string, opts: MakeOpts = {}): {
     const until = opts.quarantined.type === "ttl"
       ? new Date(Date.now() + (opts.quarantined.ttlMs ?? 3_600_000))
       : undefined;
-    quarantine.set({
+    quarantine.publish({
       level: "model",
       modelId: MODEL,
       type: opts.quarantined.type,
@@ -148,32 +148,21 @@ function makeHook(args: {
   warnings: string[];
 }): ModelRouteTaskHook {
   const whitelist = loadRouteWhitelist(args.workspaceRoot);
-  const resolver = new ModelRouteResolver(
-    {
-      async existsCanonical(p: string, m: string) {
-        return whitelist.existsCanonical(p, m);
-      },
-      async searchNormalized(_t: string, _l: number) {
-        return [];
-      },
-    },
-    new Map(),
-  );
+  const resolver = new ModelRouteResolver(whitelist, new Map());
   return new ModelRouteTaskHook({
     workspaceRoot: args.workspaceRoot,
     whitelist,
     variants: args.variants,
     resolver,
     quarantineStore: args.quarantine,
-    audit: { path: args.auditPath, throwOnAppend: args.auditSinkThrows === true },
+    audit: { path: args.auditPath },
     logger: {
       info: () => {},
       warn: (msg: string) => args.warnings.push(msg),
-      error: () => {},
+      error: (msg: string) => args.warnings.push(`ERROR: ${msg}`),
     },
     loadQuarantineEntries: async () => {
-      const active = args.quarantine.listActive();
-      return active;
+      return args.quarantine.snapshot();
     },
   });
 }
@@ -293,7 +282,11 @@ async function run(): Promise<void> {
   {
     const tmp = mkdtempSync(path.join(tmpdir(), "sdd-mr-hook-"));
     try {
-      const fx = makeFixture(tmp, { quarantined: { type: "ttl", reason: "expired", ttlMs: -10_000 }, writeVariantAgents: true });
+      const fx = makeFixture(tmp, {
+        quarantined: { type: "ttl", reason: "expired", ttlMs: -10_000 },
+        variants: { low: "low", medium: "medium", high: "high" },
+        writeVariantAgents: true,
+      });
       const hook = makeHook({ ...fx, warnings: fx.warnings });
       const output = { args: { subagent_type: `model-route:v1|sdd-mr-base|${PROVIDER}/${MODEL}`, prompt: "x" } };
       await hook.execute({ tool: "task" }, output);
@@ -355,11 +348,35 @@ async function run(): Promise<void> {
     const tmp = mkdtempSync(path.join(tmpdir(), "sdd-mr-hook-"));
     try {
       const fx = makeFixture(tmp, { variants: { low: "high", high: "max" }, writeVariantAgents: true });
-      const hook = makeHook({ ...fx, warnings: fx.warnings, auditSinkThrows: true });
+      // Force the audit append to throw by pointing the file at a
+      // pre-existing directory. `openSync(<dir>, "a")` raises EISDIR,
+      // so every audit call fails — the dispatch must still rewrite.
+      const badAuditPath = path.join(tmp, "audit-as-dir");
+      mkdirSync(badAuditPath, { recursive: true });
+      const whitelist = loadRouteWhitelist(fx.workspaceRoot);
+      const resolver = new ModelRouteResolver(whitelist, new Map());
+      const hook = new ModelRouteTaskHook({
+        workspaceRoot: fx.workspaceRoot,
+        whitelist,
+        variants: fx.variants,
+        resolver,
+        quarantineStore: fx.quarantine,
+        audit: { path: badAuditPath },
+        logger: {
+          info: () => {},
+          warn: (msg: string) => fx.warnings.push(msg),
+          error: (msg: string) => fx.warnings.push(`ERROR: ${msg}`),
+        },
+        loadQuarantineEntries: async () => fx.quarantine.snapshot(),
+      });
       const output = { args: { subagent_type: `model-route:v1|sdd-mr-base|${PROVIDER}/${MODEL}|high`, prompt: "x" } };
       await hook.execute({ tool: "task" }, output);
       assert.equal(output.args.subagent_type, `${HOST}-high`, "rewrite happens even when audit throws");
-      console.log("  pass: audit sink throws -> rewrite still happens");
+      assert.ok(
+        fx.warnings.some((m) => m.startsWith("ERROR:") && /audit append failed/.test(m)),
+        "the audit failure is logged as an error",
+      );
+      console.log("  pass: audit sink throws -> rewrite still happens, failure logged");
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   }
 
@@ -370,12 +387,17 @@ async function run(): Promise<void> {
       const fx = makeFixture(tmp, { variants: { low: "high", high: "max" }, writeVariantAgents: true });
       const hook = makeHook({ ...fx, warnings: fx.warnings });
       const output = { args: { subagent_type: `model-route:v1|sdd-mr-base|${PROVIDER}/${MODEL}|high`, prompt: "x" } };
-      const before = readFileSync(fx.auditPath, "utf8").length;
+      const before = existsSync(fx.auditPath) ? readFileSync(fx.auditPath, "utf8").length : 0;
       await hook.execute({ tool: "task" }, output);
-      const after = readFileSync(fx.auditPath, "utf8").length;
-      assert.ok(after > before, "audit line appended");
-      // No new files in .opencode beyond the agent fixtures we wrote.
-      console.log("  pass: only the audit line was appended");
+      const after = existsSync(fx.auditPath) ? readFileSync(fx.auditPath, "utf8").length : 0;
+      assert.ok(after > before, "audit line appended (size grew)");
+      // Snapshot the agents dir before; assert it has the same files after.
+      const agentsDir = path.join(fx.workspaceRoot, ".opencode", "agents");
+      const beforeAgents = readdirSync(agentsDir).filter((f) => f.startsWith("sdd-mr-v1-")).sort();
+      await hook.execute({ tool: "task" }, output);
+      const afterAgents = readdirSync(agentsDir).filter((f) => f.startsWith("sdd-mr-v1-")).sort();
+      assert.deepEqual(afterAgents, beforeAgents, "the hook did not touch the agents directory");
+      console.log("  pass: only the audit line was appended; agents dir untouched");
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   }
 

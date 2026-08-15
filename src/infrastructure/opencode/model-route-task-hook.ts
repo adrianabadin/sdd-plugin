@@ -1,54 +1,42 @@
 /**
  * Synchronous deterministic model-routing `tool.execute.before` hook.
  *
- * Two paths converge here, with EXACTLY the same downstream gate order
- * (resolve → quarantine → readiness → audit → rewrite):
+ * Rev 2 — `routes.json` is the only routing authority; no attestation,
+ * no manifest, no boot identity, no signing key, no OpenCode version
+ * check. The hook works in a plain OpenCode session that knows nothing
+ * about the routing infrastructure.
  *
- *   A. Explicit-grammar path: `output.args.subagent_type` parses against
- *      the declared `model-route:v1|base|reference` grammar. The current
- *      behavior is preserved byte-for-byte (Unit 5 contract).
+ * Two paths converge on the same selection:
+ *   A. Explicit-grammar `model-route:v1|sdd-mr-base|<modelRef>[|<effort>]`
+ *      — the 4th segment is optional and selects the effort level.
+ *   B. Natural-intent prompt trigger (with optional effort phrase).
  *
- *   B. Natural-intent path (WU2): subagent_type does NOT carry the
- *      reserved grammar, but the WU1 parser finds exactly one trigger span
- *      in `output.args.prompt`. The extracted raw reference is resolved
- *      through the same `ModelRouteResolver` (now wired with the verified
- *      `NATURAL_MODEL_ALIASES`). The prompt itself is never mutated and
- *      is never read into the routing decision — the canonical identity
- *      is what controls every gate.
- *
- * No trigger in the prompt -> byte-for-byte legacy passthrough (no
- * rewrites, no audit). Multiple / malformed / unknown / ambiguous natural
- * intents fail closed BEFORE child creation with a localized (Spanish +
- * English) actionable error.
- *
- * Strict routing order (no silent fallback, no retry, no substitution):
- *   1. parse                            → ParsedModelRouteV1 OR NaturalModelIntent
- *   2. resolve (exact→alias→unique)     → CanonicalModelId
- *   3. quarantine reconciliation/check  → throw QuarantinedModelError
- *   4. readiness attestation            → manifest/file/hash/lock/journal/version/workspace
- *   5. synchronous durable audit        → routing[.natural].launch / .blocked
- *   6. rewrite subagent_type            → owned fixed host
- *   7. return                           → engine invokes TaskTool
+ * Selection (after parse + resolve + quarantine reconcile):
+ *   1. lookup hostName in whitelist (else ROUTE_NOT_WHITELISTED)
+ *   2. read variant mapping for the canonical id
+ *   3. resolve requested level (default low) against the mapping
+ *      - mapping empty     -> base agent + MODEL_HAS_NO_VARIANTS warning
+ *      - level not exposed -> nearest available + LEVEL_NOT_EXPOSED
+ *   4. confirm target .md exists on disk (else ROUTED_AGENT_UNAVAILABLE)
+ *   5. rewrite args.subagent_type
+ *   6. append best-effort audit entry (failure logs and continues)
  *
  * Constraints:
- *   - `args.model` is NEVER read, written, or relied on for routing on
- *     EITHER path.
- *   - The hook never mutates the disk: no generator, no manifest, no
- *     agent/command files, no lock, no journal. All disk writes belong
- *     to the pre-start CLI.
- *   - Missing/expired/mismatched attestation blocks immediately.
- *   - Off-fleet canonicals (not in the manifest whitelist) are rejected.
- *   - Audit failures are fail-closed: AUDIT_WRITE_FAILED short-circuits rewrite.
- *   - Prompt injection resistance: the prompt is data; the canonical
- *     identity is what controls every gate. The prompt is never recorded
- *     in audit entries (only the trigger label and the extracted raw
- *     reference are surfaced for traceability).
+ *  - `args.model` is NEVER read, written, or relied on for routing.
+ *  - `args.prompt` bytes are NEVER mutated by parsing.
+ *  - The hook only writes the audit line; no manifest, no agent files,
+ *    no lock, no journal. All disk writes belong to the pre-start CLI.
+ *  - No natural trigger + no grammar trigger -> byte-for-byte
+ *    passthrough, no audit entry.
+ *  - Prompt injection resistance: the prompt is data; the canonical
+ *    identity is what controls every gate. The prompt is never recorded
+ *    in audit entries.
  *
  * Design: 0695919c-2264-4e0d-a3fb-f7d4190661fc.
- * WU2 design: 41aa141d-1bbf-4cd0-aba7-63f82f83fbd6.
+ * Rev 2 plan: docs/plans/2026-08-14-model-routing-whitelist-only.md.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { parseModelRouteGrammar, ModelRouteGrammarError } from "../../domain/model-routing/model-route-grammar.js";
@@ -57,101 +45,104 @@ import {
   parseNaturalModelIntent,
   NaturalIntentAmbiguousError,
   NaturalIntentMalformedError,
+  EffortLevelUnknownError,
+  type NaturalModelIntent,
 } from "../../domain/model-routing/natural-model-intent.js";
-import {
-  naturalIntentAmbiguousError,
-  naturalIntentMalformedError,
-  naturalRouteAmbiguousError,
-  naturalRouteUnknownError,
-  NaturalIntentBlockedError,
-} from "../../domain/model-routing/natural-model-routing-errors.js";
+import type { NormalizedEffortLevel } from "../../domain/model-routing/effort-levels.js";
+import { isLevelExposed, nearestLevel } from "../../domain/model-routing/effort-levels.js";
+import { RouteWhitelist } from "../../domain/model-routing/route-whitelist.js";
+import type { VariantSnapshot } from "./variant-snapshot.js";
+import type { QuarantineStore } from "../runtime/quarantine-store.js";
 import type { QuarantineEntry } from "../../domain/model/quarantine.js";
 import { resolveQuarantinePrecedence } from "../../domain/model/quarantine.js";
-import type { QuarantineStore } from "../../infrastructure/runtime/quarantine-store.js";
-import {
-  AttestationExpiredError,
-  AttestationMismatchError,
-  ModelRouteReadiness,
-  REQUIRED_OPENCODE_VERSION,
-} from "./model-route-readiness.js";
 import {
   ModelRouteAuditLogger,
   type ModelRouteAuditEntry,
 } from "../logging/model-route-audit.logger.js";
-import type { Manifest } from "./disk-agent-generator.js";
 
-export class RoutedAgentUnavailableError extends Error { readonly code = "ROUTED_AGENT_UNAVAILABLE"; constructor(m: string) { super(`ROUTED_AGENT_UNAVAILABLE: ${m}`); this.name = "RoutedAgentUnavailableError"; } }
-export class QuarantinedModelError extends Error { readonly code = "QUARANTINED_MODEL"; constructor(m: string) { super(`QUARANTINED_MODEL: ${m}`); this.name = "QuarantinedModelError"; } }
-export class AttestationUnavailableError extends Error { readonly code = "ATTESTATION_UNAVAILABLE"; constructor(m: string) { super(`ATTESTATION_UNAVAILABLE: ${m}`); this.name = "AttestationUnavailableError"; } }
-export class TaskHookBootIdentityMissingError extends Error { readonly code = "TASK_HOOK_BOOT_IDENTITY_MISSING"; constructor() { super("TASK_HOOK_BOOT_IDENTITY_MISSING: explicit boot identity is required (no 'boot-default', callID, or env-var fallback)"); this.name = "TaskHookBootIdentityMissingError"; } }
-export class TaskHookSigningKeyMissingError extends Error { readonly code = "TASK_HOOK_SIGNING_KEY_MISSING"; constructor() { super("TASK_HOOK_SIGNING_KEY_MISSING: explicit HMAC signing key is required (no 'deterministic-key' or random fallback)"); this.name = "TaskHookSigningKeyMissingError"; } }
+export class RouteNotWhitelistedError extends Error {
+  readonly code = "ROUTE_NOT_WHITELISTED";
+  constructor(canonical: string) {
+    super(`ROUTE_NOT_WHITELISTED: ${canonical} is not in routes.json`);
+    this.name = "RouteNotWhitelistedError";
+  }
+}
+
+export class RoutedAgentUnavailableError extends Error {
+  readonly code = "ROUTED_AGENT_UNAVAILABLE";
+  constructor(agentFile: string) {
+    super(`ROUTED_AGENT_UNAVAILABLE: agent file missing on disk: ${agentFile}`);
+    this.name = "RoutedAgentUnavailableError";
+  }
+}
+
+export class QuarantinedModelError extends Error {
+  readonly code = "QUARANTINED_MODEL";
+  constructor(message: string) {
+    super(`QUARANTINED_MODEL: ${message}`);
+    this.name = "QuarantinedModelError";
+  }
+}
+
+export type EffortFallbackReason = "MODEL_HAS_NO_VARIANTS" | "LEVEL_NOT_EXPOSED";
+
+export interface ModelRouteTaskHookLogger {
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+}
+
+const NOOP_LOGGER: ModelRouteTaskHookLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
 
 export interface ModelRouteTaskHookOptions {
   readonly workspaceRoot: string;
-  readonly manifestPath?: string;
-  readonly attestationPath?: string;
-  readonly openCodeVersion?: string;
-  readonly bootIdentity: string;
-  readonly signingKey: string | Buffer;
+  readonly whitelist: RouteWhitelist;
+  readonly variants: ReadonlyMap<string, VariantSnapshot>;
   readonly resolver: ModelRouteResolver;
   readonly quarantineStore: QuarantineStore;
   readonly audit: { path: string; maxFieldBytes?: number; maxDepth?: number };
-  readonly now?: () => number;
   readonly loadQuarantineEntries?: () => Promise<ReadonlyArray<QuarantineEntry>>;
+  readonly logger?: ModelRouteTaskHookLogger;
+  readonly now?: () => number;
 }
 
-interface HookInput { readonly tool?: string; readonly callID?: string; readonly [key: string]: unknown; }
-interface HookOutput { args?: Record<string, unknown>; readonly [key: string]: unknown; }
+interface HookInput {
+  readonly tool?: string;
+  readonly callID?: string;
+  readonly [key: string]: unknown;
+}
 
-type ResolutionTier = "exact" | "alias" | "normalized";
+interface HookOutput {
+  args?: Record<string, unknown>;
+  readonly [key: string]: unknown;
+}
 
-interface BlockedFields {
-  correlationId: string;
-  requestedAlias: string;
-  resolutionTier: ResolutionTier;
-  resolvedProviderId: string;
-  resolvedModelId: string;
-  routedAgent: string;
-  errorClass: string;
+interface ResolvedRoute {
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly trigger?: string;
+  readonly naturalReference?: string;
 }
 
 export class ModelRouteTaskHook {
   private readonly workspaceRoot: string;
-  private readonly manifestPath: string;
-  private readonly openCodeVersion: string;
-  private readonly bootIdentity: string;
-  private readonly signingKey: Buffer;
+  private readonly whitelist: RouteWhitelist;
+  private readonly variants: ReadonlyMap<string, VariantSnapshot>;
   private readonly resolver: ModelRouteResolver;
   private readonly quarantineStore: QuarantineStore;
   private readonly auditLogger: ModelRouteAuditLogger;
   private readonly now: () => number;
   private readonly loadQuarantineEntries?: () => Promise<ReadonlyArray<QuarantineEntry>>;
+  private readonly logger: ModelRouteTaskHookLogger;
 
   constructor(options: ModelRouteTaskHookOptions) {
     this.workspaceRoot = path.resolve(options.workspaceRoot);
-    this.manifestPath = options.manifestPath ?? path.join(this.workspaceRoot, ".opencode", "sdd-model-routing", "manifest.json");
-    this.openCodeVersion = options.openCodeVersion ?? REQUIRED_OPENCODE_VERSION;
-    // Boot identity must come from the operator's stable host nonce; the
-    // plugin never invents "boot-default", never derives one from the task
-    // callID, and never reads an environment fallback. A missing boot
-    // identity is a configuration error and blocks routing immediately.
-    if (typeof options.bootIdentity !== "string" || options.bootIdentity.length === 0 || options.bootIdentity === "boot-default") {
-      throw new TaskHookBootIdentityMissingError();
-    }
-    this.bootIdentity = options.bootIdentity;
-    // Signing key must be the operator's explicit shared HMAC secret. There
-    // is no "deterministic-key" fallback and no random per-process key.
-    if (options.signingKey === undefined || options.signingKey === null) {
-      throw new TaskHookSigningKeyMissingError();
-    }
-    const key = options.signingKey;
-    if (typeof key === "string" && (key.length === 0 || key === "deterministic-key")) {
-      throw new TaskHookSigningKeyMissingError();
-    }
-    if (key instanceof Buffer && key.length === 0) {
-      throw new TaskHookSigningKeyMissingError();
-    }
-    this.signingKey = typeof key === "string" ? Buffer.from(key, "utf8") : key;
+    this.whitelist = options.whitelist;
+    this.variants = options.variants;
     this.resolver = options.resolver;
     this.quarantineStore = options.quarantineStore;
     const auditOptions: { path: string; maxFieldBytes?: number; maxDepth?: number } = { path: options.audit.path };
@@ -159,6 +150,7 @@ export class ModelRouteTaskHook {
     if (options.audit.maxDepth !== undefined) auditOptions.maxDepth = options.audit.maxDepth;
     this.auditLogger = new ModelRouteAuditLogger(auditOptions);
     this.now = options.now ?? Date.now;
+    this.logger = options.logger ?? NOOP_LOGGER;
     if (options.loadQuarantineEntries !== undefined) this.loadQuarantineEntries = options.loadQuarantineEntries;
   }
 
@@ -169,322 +161,302 @@ export class ModelRouteTaskHook {
       ? (output.args["subagent_type"] as string)
       : undefined;
 
-    let parsed: ReturnType<typeof parseModelRouteGrammar> = null;
+    // Path A: explicit grammar.
+    let parsedGrammar: ReturnType<typeof parseModelRouteGrammar> = null;
     if (typeof subagentType === "string") {
       try {
-        parsed = parseModelRouteGrammar(subagentType);
+        parsedGrammar = parseModelRouteGrammar(subagentType);
       } catch (error) {
         if (error instanceof ModelRouteGrammarError) {
-          await this.block(this.correlationIdFor(input), subagentType, "", "", "", error.name);
+          // Malformed grammar is not a routing request — pass through.
+          this.logger.warn(`[sdd-plugin.routing] grammar error: ${error.message}`);
+          return;
         }
         throw error;
       }
     }
 
-    // Path A: explicit `model-route:v1|base|reference` grammar. The
-    // existing routing pipeline is preserved byte-for-byte; this is
-    // unchanged from Unit 5.
-    if (parsed !== null) {
-      await this.routeFromGrammar(input, output, parsed);
+    if (parsedGrammar !== null) {
+      const effortFromGrammar = parsedGrammar.effort;
+      await this.dispatch(
+        input,
+        output,
+        parsedGrammar.reference,
+        effortFromGrammar,
+        { trigger: undefined, naturalReference: undefined },
+      );
       return;
     }
 
-    // Path B: WU2 natural-intent path. The prompt is data; the canonical
-    // identity is what controls every gate. The prompt itself is never
-    // mutated, never read into the routing decision, and is preserved
-    // byte-for-byte across the rewrite.
+    // Path B: natural-intent.
     const promptRaw = output.args?.["prompt"];
     if (typeof promptRaw !== "string" || promptRaw.length === 0) {
-      // No prompt -> nothing to parse; byte-for-byte legacy passthrough.
       return;
     }
-    const prompt = promptRaw;
-
-    // Parse the prompt for the WU1 bounded trigger set. No trigger ->
-    // byte-for-byte legacy passthrough (no rewrites, no audit).
-    let intent: ReturnType<typeof parseNaturalModelIntent> = null;
+    let intent: NaturalModelIntent | null;
     try {
-      intent = parseNaturalModelIntent(prompt);
+      intent = parseNaturalModelIntent(promptRaw);
     } catch (error) {
       if (error instanceof NaturalIntentAmbiguousError) {
-        const blocked = naturalIntentAmbiguousError(error.count);
-        await this.blockNatural(
-          this.correlationIdFor(input),
-          blocked.code,
-          "",
-          "",
-          "",
-          blocked.code,
-          undefined,
-        );
-        throw blocked;
+        this.logger.warn(`[sdd-plugin.routing] ${error.message}`);
+        return;
       }
       if (error instanceof NaturalIntentMalformedError) {
-        const blocked = naturalIntentMalformedError(
-          // The parser already carries the raw trigger label inside its
-          // own message; we forward it to the audit + error extras.
-          // The parser does not currently expose the trigger label
-          // directly, so we surface the input boundary.
-          "natural",
-          error.code,
-          error.code === "BYTE_LIMIT_EXCEEDED"
-            ? `input was ${Buffer.byteLength(prompt, "utf8")} bytes`
-            : error.code === "CONTROL_CHARACTER"
-              ? "see original input"
-              : "reference was empty after trimming",
-        );
-        await this.blockNatural(
-          this.correlationIdFor(input),
-          blocked.code,
-          "",
-          "",
-          "",
-          blocked.code,
-          undefined,
-        );
-        throw blocked;
+        this.logger.warn(`[sdd-plugin.routing] natural intent malformed (${error.code})`);
+        return;
+      }
+      if (error instanceof EffortLevelUnknownError) {
+        this.logger.warn(`[sdd-plugin.routing] ${error.message}`);
+        return;
       }
       throw error;
     }
-    if (intent === null) {
-      // No trigger in the prompt -> byte-for-byte legacy passthrough.
-      return;
-    }
+    if (intent === null) return;
 
-    await this.routeFromIntent(input, output, intent);
+    await this.dispatch(
+      input,
+      output,
+      intent.rawReference,
+      intent.effort,
+      { trigger: intent.trigger, naturalReference: intent.rawReference },
+    );
   }
 
   /**
-   * Path A: explicit-grammar routing. Preserved from Unit 5.
+   * Common selection flow: parse → resolve → quarantine → whitelist →
+   * variant → disk check → rewrite → best-effort audit.
    */
-  private async routeFromGrammar(
+  private async dispatch(
     input: HookInput,
     output: HookOutput,
-    parsed: NonNullable<ReturnType<typeof parseModelRouteGrammar>>,
+    requestedReference: string,
+    requestedEffort: NormalizedEffortLevel | undefined,
+    auditExtras: { trigger?: string; naturalReference?: string },
   ): Promise<void> {
     const startedAt = this.now();
     const correlationId = this.correlationIdFor(input);
-    const requestedAlias = parsed.reference;
 
+    // 1. Reconcile quarantine.
     if (this.loadQuarantineEntries) {
       try {
         const entries = await this.loadQuarantineEntries();
         this.quarantineStore.reconcile([...entries]);
       } catch (error) {
-        await this.block(correlationId, requestedAlias, "", "", "", (error as Error).name);
+        this.logger.error(`[sdd-plugin.routing] quarantine load failed: ${(error as Error).message}`);
+        await this.appendAudit({
+          stage: "routing.blocked",
+          status: "error",
+          correlationId,
+          requestedAlias: requestedReference,
+          resolutionTier: "exact",
+          resolvedProviderId: "",
+          resolvedModelId: "",
+          routedAgent: "",
+          quarantineChecked: false,
+          durationMs: this.now() - startedAt,
+          errorClass: (error as Error).name,
+          ...auditExtras,
+        });
         throw error;
       }
     }
 
-    let canonical;
+    // 2. Resolve to canonical identity. The whitelist is the only
+    //    source of truth, so a "model route unknown" is effectively
+    //    "model route not whitelisted" — we translate `RouteUnknownError`
+    //    to `RouteNotWhitelistedError` so the call site has one error
+    //    class to recognize. `RouteAmbiguousError` is preserved as-is
+    //    (multiple whitelisted candidates for the same reference is a
+    //    distinct failure mode the operator should see).
+    let canonical: ResolvedRoute;
     try {
-      canonical = await this.resolver.resolve(parsed.reference);
+      const id = await this.resolver.resolve(requestedReference);
+      canonical = { providerId: id.providerId, modelId: id.modelId };
     } catch (error) {
-      const errorClass = error instanceof RouteUnknownError
-        ? "RouteUnknownError"
-        : error instanceof RouteAmbiguousError
-          ? "RouteAmbiguousError"
-          : (error as Error).name;
-      await this.block(correlationId, requestedAlias, "", "", "", errorClass);
+      if (error instanceof RouteUnknownError) {
+        const whitelistedError = new RouteNotWhitelistedError(requestedReference);
+        await this.appendAudit({
+          stage: auditExtras.trigger ? "routing.natural.blocked" : "routing.blocked",
+          status: "error",
+          correlationId,
+          requestedAlias: requestedReference,
+          resolutionTier: "exact",
+          resolvedProviderId: "",
+          resolvedModelId: "",
+          routedAgent: "",
+          quarantineChecked: true,
+          durationMs: this.now() - startedAt,
+          errorClass: whitelistedError.name,
+          ...auditExtras,
+        });
+        throw whitelistedError;
+      }
+      if (error instanceof RouteAmbiguousError) {
+        await this.appendAudit({
+          stage: auditExtras.trigger ? "routing.natural.blocked" : "routing.blocked",
+          status: "error",
+          correlationId,
+          requestedAlias: requestedReference,
+          resolutionTier: "normalized",
+          resolvedProviderId: "",
+          resolvedModelId: "",
+          routedAgent: "",
+          quarantineChecked: true,
+          durationMs: this.now() - startedAt,
+          errorClass: error.name,
+          ...auditExtras,
+        });
+        throw error;
+      }
+      await this.appendAudit({
+        stage: auditExtras.trigger ? "routing.natural.blocked" : "routing.blocked",
+        status: "error",
+        correlationId,
+        requestedAlias: requestedReference,
+        resolutionTier: "exact",
+        resolvedProviderId: "",
+        resolvedModelId: "",
+        routedAgent: "",
+        quarantineChecked: true,
+        durationMs: this.now() - startedAt,
+        errorClass: (error as Error).name,
+        ...auditExtras,
+      });
       throw error;
     }
 
+    // 3. Quarantine check.
     if (this.quarantineStore.isActive(canonical.providerId, canonical.modelId)) {
       const reason = this.activeQuarantineReason(canonical.providerId, canonical.modelId);
-      const error = new QuarantinedModelError(
-        `${canonical.providerId}/${canonical.modelId} is quarantined${reason !== null ? ` (${reason})` : ""}; refusing to route`,
-      );
-      await this.block(correlationId, requestedAlias, canonical.providerId, canonical.modelId, "", error.name);
-      throw error;
-    }
-
-    const manifest = this.readManifest();
-    const hostName = this.manifestHostNameFor(manifest, canonical.providerId, canonical.modelId);
-    if (hostName === null) {
-      const error = new RoutedAgentUnavailableError(`${canonical.providerId}/${canonical.modelId} is not in the routing manifest fleet whitelist`);
-      await this.block(correlationId, requestedAlias, canonical.providerId, canonical.modelId, "", error.name);
-      throw error;
-    }
-
-    try {
-      new ModelRouteReadiness({
-        workspaceRoot: this.workspaceRoot,
-        now: this.now,
-        signingKey: this.signingKey,
-      }).verify({
-        manifest,
-        openCodeVersion: this.openCodeVersion,
-        bootIdentity: this.bootIdentity,
+      const message = `${canonical.providerId}/${canonical.modelId} is quarantined${reason !== null ? ` (${reason})` : ""}; refusing to route`;
+      const error = new QuarantinedModelError(message);
+      await this.appendAudit({
+        stage: auditExtras.trigger ? "routing.natural.blocked" : "routing.blocked",
+        status: "error",
+        correlationId,
+        requestedAlias: requestedReference,
+        resolutionTier: "exact",
+        resolvedProviderId: canonical.providerId,
+        resolvedModelId: canonical.modelId,
+        routedAgent: "",
+        quarantineChecked: true,
+        durationMs: this.now() - startedAt,
+        errorClass: error.name,
+        ...auditExtras,
       });
-    } catch (error) {
-      const errorClass = error instanceof AttestationExpiredError
-        ? "AttestationExpiredError"
-        : error instanceof AttestationMismatchError
-          ? "AttestationMismatchError"
-          : "AttestationUnavailableError";
-      await this.block(correlationId, requestedAlias, canonical.providerId, canonical.modelId, hostName, errorClass);
-      if (error instanceof AttestationExpiredError || error instanceof AttestationMismatchError) throw error;
-      throw new AttestationUnavailableError((error as Error).message);
+      throw error;
     }
 
-    await this.auditLogger.append({
-      stage: "routing.launch",
-      status: "success",
+    // 4. Whitelist lookup.
+    const hostName = this.whitelist.findHostName(canonical.providerId, canonical.modelId);
+    if (hostName === null) {
+      const error = new RouteNotWhitelistedError(`${canonical.providerId}/${canonical.modelId}`);
+      await this.appendAudit({
+        stage: auditExtras.trigger ? "routing.natural.blocked" : "routing.blocked",
+        status: "error",
+        correlationId,
+        requestedAlias: requestedReference,
+        resolutionTier: "exact",
+        resolvedProviderId: canonical.providerId,
+        resolvedModelId: canonical.modelId,
+        routedAgent: "",
+        quarantineChecked: true,
+        durationMs: this.now() - startedAt,
+        errorClass: error.name,
+        ...auditExtras,
+      });
+      throw error;
+    }
+
+    // 5. Effort selection.
+    const canonicalId = `${canonical.providerId}/${canonical.modelId}`;
+    const mapping = this.variants.get(canonicalId)?.levels ?? {};
+    const requested: NormalizedEffortLevel = requestedEffort ?? "low";
+    let targetAgent = hostName;
+    let appliedLevel: NormalizedEffortLevel | null = requested;
+    let fallbackReason: EffortFallbackReason | null = null;
+
+    if (Object.keys(mapping).length === 0) {
+      // No variants -> base agent + non-blocking warning.
+      fallbackReason = "MODEL_HAS_NO_VARIANTS";
+      appliedLevel = null;
+      this.logger.warn(
+        `[sdd-plugin.routing] model ${canonicalId} exposes no effort variants; dispatched base agent (requested: ${requested})`,
+      );
+    } else {
+      if (isLevelExposed(requested, mapping)) {
+        targetAgent = `${hostName}-${requested}` as typeof hostName;
+      } else {
+        const nearest = nearestLevel(requested, mapping);
+        if (nearest !== null) {
+          fallbackReason = "LEVEL_NOT_EXPOSED";
+          appliedLevel = nearest;
+          targetAgent = `${hostName}-${nearest}` as typeof hostName;
+        } else {
+          targetAgent = hostName;
+        }
+      }
+    }
+
+    // 6. Disk check.
+    const agentFile = path.join(this.workspaceRoot, ".opencode", "agents", `${targetAgent}.md`);
+    if (!existsSync(agentFile)) {
+      const error = new RoutedAgentUnavailableError(agentFile);
+      await this.appendAudit({
+        stage: auditExtras.trigger ? "routing.natural.blocked" : "routing.blocked",
+        status: "error",
+        correlationId,
+        requestedAlias: requestedReference,
+        resolutionTier: "exact",
+        resolvedProviderId: canonical.providerId,
+        resolvedModelId: canonical.modelId,
+        routedAgent: targetAgent,
+        quarantineChecked: true,
+        durationMs: this.now() - startedAt,
+        errorClass: error.name,
+        ...auditExtras,
+        effortRequested: requested,
+        effortApplied: appliedLevel,
+        effortFallbackReason: fallbackReason,
+      });
+      throw error;
+    }
+
+    // 7. Rewrite.
+    output.args = { ...output.args, subagent_type: targetAgent };
+
+    // 8. Best-effort audit.
+    await this.appendAudit({
+      stage: auditExtras.trigger ? "routing.natural.launch" : "routing.launch",
+      status: fallbackReason === null ? "success" : "warning",
       correlationId,
-      requestedAlias,
+      requestedAlias: requestedReference,
       resolutionTier: "exact",
       resolvedProviderId: canonical.providerId,
       resolvedModelId: canonical.modelId,
-      routedAgent: hostName,
+      routedAgent: targetAgent,
       quarantineChecked: true,
       durationMs: this.now() - startedAt,
+      ...auditExtras,
+      effortRequested: requested,
+      effortApplied: appliedLevel,
+      effortFallbackReason: fallbackReason,
     });
-
-    output.args = { ...output.args, subagent_type: hostName };
   }
 
   /**
-   * Path B (WU2): natural-intent routing. The prompt is data; the
-   * canonical identity controls every gate. The prompt is never mutated
-   * and never recorded in the audit entry. Only the trigger label and
-   * the extracted raw reference are surfaced for traceability.
+   * Append a single audit line. Wrapped in try/catch so a sink failure
+   * (disk full, ENOSPC, EACCES) is logged and the dispatch still
+   * returns successfully — routing is NEVER blocked by audit.
    */
-  private async routeFromIntent(
-    input: HookInput,
-    output: HookOutput,
-    intent: NonNullable<ReturnType<typeof parseNaturalModelIntent>>,
-  ): Promise<void> {
-    const startedAt = this.now();
-    const correlationId = this.correlationIdFor(input);
-    const requestedAlias = intent.rawReference;
-    const trigger = intent.trigger;
-
-    if (this.loadQuarantineEntries) {
-      try {
-        const entries = await this.loadQuarantineEntries();
-        this.quarantineStore.reconcile([...entries]);
-      } catch (error) {
-        await this.blockNatural(correlationId, "RouteResolverError", "", "", "", (error as Error).name, trigger);
-        throw error;
-      }
-    }
-
-    let canonical;
+  private async appendAudit(entry: ModelRouteAuditEntry): Promise<void> {
     try {
-      canonical = await this.resolver.resolve(intent.rawReference);
+      await this.auditLogger.append(entry);
     } catch (error) {
-      if (error instanceof RouteUnknownError) {
-        const blocked = naturalRouteUnknownError(intent.rawReference);
-        await this.blockNatural(
-          correlationId,
-          blocked.code,
-          "",
-          "",
-          "",
-          blocked.code,
-          trigger,
-        );
-        throw blocked;
-      }
-      if (error instanceof RouteAmbiguousError) {
-        const blocked = naturalRouteAmbiguousError(intent.rawReference, error.candidates);
-        await this.blockNatural(
-          correlationId,
-          blocked.code,
-          "",
-          "",
-          "",
-          blocked.code,
-          trigger,
-        );
-        throw blocked;
-      }
-      const errorClass = (error as Error).name;
-      await this.blockNatural(correlationId, errorClass, "", "", "", errorClass, trigger);
-      throw error;
-    }
-
-    if (this.quarantineStore.isActive(canonical.providerId, canonical.modelId)) {
-      const reason = this.activeQuarantineReason(canonical.providerId, canonical.modelId);
-      const error = new QuarantinedModelError(
-        `${canonical.providerId}/${canonical.modelId} is quarantined${reason !== null ? ` (${reason})` : ""}; refusing to route`,
+      this.logger.error(
+        `[sdd-plugin.routing] audit append failed (best-effort, continuing): ${(error as Error).message}`,
       );
-      await this.blockNatural(
-        correlationId,
-        error.name,
-        canonical.providerId,
-        canonical.modelId,
-        "",
-        error.name,
-        trigger,
-      );
-      throw error;
     }
-
-    const manifest = this.readManifest();
-    const hostName = this.manifestHostNameFor(manifest, canonical.providerId, canonical.modelId);
-    if (hostName === null) {
-      const error = new RoutedAgentUnavailableError(`${canonical.providerId}/${canonical.modelId} is not in the routing manifest fleet whitelist`);
-      await this.blockNatural(
-        correlationId,
-        error.name,
-        canonical.providerId,
-        canonical.modelId,
-        "",
-        error.name,
-        trigger,
-      );
-      throw error;
-    }
-
-    try {
-      new ModelRouteReadiness({
-        workspaceRoot: this.workspaceRoot,
-        now: this.now,
-        signingKey: this.signingKey,
-      }).verify({
-        manifest,
-        openCodeVersion: this.openCodeVersion,
-        bootIdentity: this.bootIdentity,
-      });
-    } catch (error) {
-      const errorClass = error instanceof AttestationExpiredError
-        ? "AttestationExpiredError"
-        : error instanceof AttestationMismatchError
-          ? "AttestationMismatchError"
-          : "AttestationUnavailableError";
-      await this.blockNatural(
-        correlationId,
-        errorClass,
-        canonical.providerId,
-        canonical.modelId,
-        hostName,
-        errorClass,
-        trigger,
-      );
-      if (error instanceof AttestationExpiredError || error instanceof AttestationMismatchError) throw error;
-      throw new AttestationUnavailableError((error as Error).message);
-    }
-
-    await this.auditLogger.append({
-      stage: "routing.natural.launch",
-      status: "success",
-      correlationId,
-      requestedAlias,
-      resolutionTier: "alias",
-      resolvedProviderId: canonical.providerId,
-      resolvedModelId: canonical.modelId,
-      routedAgent: hostName,
-      quarantineChecked: true,
-      trigger,
-      requestedNaturalReference: intent.rawReference,
-      durationMs: this.now() - startedAt,
-    });
-
-    // Rewrite ONLY the declared `subagent_type`. The prompt and every
-    // other `output.args` field (including `model`) are preserved
-    // byte-for-byte via the spread.
-    output.args = { ...output.args, subagent_type: hostName };
   }
 
   private correlationIdFor(input: HookInput): string {
@@ -501,69 +473,5 @@ export class ModelRouteTaskHook {
       new Date(this.now()),
     );
     return typeof active?.reason === "string" && active.reason.length > 0 ? active.reason : null;
-  }
-
-  private readManifest(): Manifest {
-    return JSON.parse(readFileSync(this.manifestPath, "utf8")) as Manifest;
-  }
-
-  private manifestHostNameFor(manifest: Manifest, providerId: string, modelId: string): string | null {
-    for (const route of manifest.routes) {
-      if (route.providerId === providerId && route.modelId === modelId) return route.hostName;
-    }
-    return null;
-  }
-
-  private async block(correlationId: string, requestedAlias: string, resolvedProviderId: string, resolvedModelId: string, routedAgent: string, errorClass: string): Promise<void> {
-    const fields: BlockedFields = {
-      correlationId, requestedAlias, resolutionTier: "exact",
-      resolvedProviderId, resolvedModelId, routedAgent, errorClass,
-    };
-    const entry: ModelRouteAuditEntry = {
-      stage: "routing.blocked",
-      status: "error",
-      correlationId: fields.correlationId,
-      requestedAlias: fields.requestedAlias,
-      resolutionTier: fields.resolutionTier,
-      resolvedProviderId: fields.resolvedProviderId,
-      resolvedModelId: fields.resolvedModelId,
-      routedAgent: fields.routedAgent,
-      quarantineChecked: true,
-      durationMs: 0,
-      errorClass: fields.errorClass,
-    };
-    await this.auditLogger.append(entry);
-  }
-
-  /**
-   * WU2: emit a `routing.natural.blocked` audit entry. Mirrors `block`
-   * but tags the stage as natural so audit consumers can distinguish
-   * caller-declared routes from natural-language requests. The raw
-   * prompt is NEVER recorded; only the trigger label is surfaced.
-   */
-  private async blockNatural(
-    correlationId: string,
-    errorCode: string,
-    resolvedProviderId: string,
-    resolvedModelId: string,
-    routedAgent: string,
-    errorClass: string,
-    trigger: string | undefined,
-  ): Promise<void> {
-    const entry: ModelRouteAuditEntry = {
-      stage: "routing.natural.blocked",
-      status: "error",
-      correlationId,
-      requestedAlias: errorCode,
-      resolutionTier: "alias",
-      resolvedProviderId,
-      resolvedModelId,
-      routedAgent,
-      quarantineChecked: true,
-      durationMs: 0,
-      errorClass,
-      ...(trigger !== undefined ? { trigger } : {}),
-    };
-    await this.auditLogger.append(entry);
   }
 }

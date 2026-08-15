@@ -46,7 +46,7 @@ export interface RoutingAuditEntry {
     | "routing.blocked"
     | "routing.natural.launch"
     | "routing.natural.blocked";
-  readonly status: "success" | "error";
+  readonly status: "success" | "error" | "warning";
   readonly correlationId: string;
   readonly requestedAlias: string;
   readonly resolutionTier: "exact" | "alias" | "normalized";
@@ -59,6 +59,10 @@ export interface RoutingAuditEntry {
   readonly trigger?: string;
   readonly requestedNaturalReference?: string;
   readonly ts?: number;
+  /** Rev 2: effort selection fields. */
+  readonly effortRequested?: string;
+  readonly effortApplied?: string | null;
+  readonly effortFallbackReason?: string | null;
   readonly [key: string]: unknown;
 }
 

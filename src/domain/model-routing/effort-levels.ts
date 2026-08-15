@@ -69,6 +69,11 @@ export function normalizeEffortLevels(
  * The "distance" is the absolute difference in the ranked-effort scale,
  * restricted to the levels that ARE exposed by the model. Returns
  * `null` if the model has no levels at all.
+ *
+ * Tie-breaking: when the requested level sits exactly between two
+ * exposed levels (e.g. `medium` with only `low` and `high` exposed),
+ * the higher level wins — the dispatch prefers the more capable
+ * variant when the operator did not specify.
  */
 export function nearestLevel(
   requested: NormalizedEffortLevel,
@@ -87,7 +92,7 @@ export function nearestLevel(
   for (let i = 1; i < exposed.length; i += 1) {
     const cand = exposed[i]!;
     const d = Math.abs(order[cand] - req);
-    if (d < bestDist) {
+    if (d < bestDist || (d === bestDist && order[cand] > order[best])) {
       best = cand;
       bestDist = d;
     }
